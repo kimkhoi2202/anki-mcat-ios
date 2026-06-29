@@ -207,4 +207,49 @@ final class AnkiKitTests: XCTestCase {
         // Default deck always has id 1; selecting it should not throw.
         XCTAssertNoThrow(try backend.setCurrentDeck(id: 1))
     }
+
+    // MARK: - Note add/edit
+
+    /// `notetypeFields` returns the notetype's field names in ordinal order, so
+    /// the editor's labels line up with a note's `fields`. The Basic notetype's
+    /// fields are `Front`/`Back` (matches the core's own service test).
+    func testNotetypeFieldsAreOrdered() throws {
+        let backend = try freshCollection()
+        let fields = try backend.notetypeFields(notetypeID: try basicNotetypeID(backend))
+        print("notetype fields:", fields)
+        XCTAssertEqual(fields, ["Front", "Back"], "Basic notetype has ordered Front/Back fields")
+    }
+
+    /// `getNote` round-trips an added note's notetype, field values, and tags —
+    /// the data the editor loads to populate its inputs in EDIT mode.
+    func testGetNoteReturnsFieldsTagsAndNotetype() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid = try backend.addNote(
+            notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1, tags: ["t1", "t2"]
+        )
+
+        let note = try backend.getNote(noteID: nid)
+        XCTAssertEqual(note.id, nid)
+        XCTAssertEqual(note.notetypeID, notetypeID)
+        XCTAssertEqual(note.fields, ["Q", "A"], "fields should round-trip in order")
+        XCTAssertEqual(note.tags, ["t1", "t2"], "tags should round-trip")
+    }
+
+    /// `updateNote` persists edited fields and tags (read-modify-write through
+    /// `update_notes`), and records an undo entry so the edit is reversible —
+    /// matching AnkiDroid saving an edited note.
+    func testUpdateNotePersistsFieldsAndTags() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1)
+
+        try backend.updateNote(noteID: nid, fields: ["Q2", "A2"], tags: ["edited"])
+
+        let note = try backend.getNote(noteID: nid)
+        XCTAssertEqual(note.fields, ["Q2", "A2"], "edited fields should persist")
+        XCTAssertEqual(note.tags, ["edited"], "edited tags should persist")
+        XCTAssertEqual(note.notetypeID, notetypeID, "editing fields must not change the notetype")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "editing a note should be undoable")
+    }
 }

@@ -8,6 +8,10 @@ final class AnkiStore: ObservableObject {
     /// Decks shown on the Home screen, flattened from the backend deck tree
     /// with per-deck new/learning/review counts.
     @Published var decks: [DeckTreeEntry] = []
+    /// The deck most recently selected for study (defaults to the Default deck,
+    /// which always has id 1). Used as the default target when adding a note,
+    /// mirroring how AnkiDroid's NoteEditor defaults to the current deck.
+    @Published var currentDeckID: Int64 = 1
 
     @Published var currentQuestion = ""
     @Published var currentAnswer = ""
@@ -124,6 +128,7 @@ final class AnkiStore: ObservableObject {
         guard let backend else { return }
         do {
             try backend.setCurrentDeck(id: id)
+            currentDeckID = id
             reviewDone = false
             showingAnswer = false
             currentQuestion = ""
@@ -135,6 +140,46 @@ final class AnkiStore: ObservableObject {
         } catch {
             status = "Select error: \(error)"
         }
+    }
+
+    // MARK: - Note add/edit
+
+    /// All notetypes (id + name) for the editor's notetype picker. Wraps
+    /// `notetypeNames()`; returns an empty list if the collection isn't ready.
+    func availableNotetypes() -> [(id: Int64, name: String)] {
+        guard let backend else { return [] }
+        return (try? backend.notetypeNames()) ?? []
+    }
+
+    /// Ordered field names for a notetype, used to label the editor's per-field
+    /// inputs (aligns with a note's `fields`).
+    func fieldNames(forNotetype notetypeID: Int64) -> [String] {
+        guard let backend else { return [] }
+        return (try? backend.notetypeFields(notetypeID: notetypeID)) ?? []
+    }
+
+    /// Loads an existing note's notetype, fields, and tags for editing.
+    func note(forEditing noteID: Int64) -> NoteForEditing? {
+        guard let backend else { return nil }
+        return try? backend.getNote(noteID: noteID)
+    }
+
+    /// Adds a new note (ADD mode), then refreshes the deck counts so the new
+    /// card shows up on Home. Throws so the editor can surface a clear message.
+    func addNote(notetypeID: Int64, fields: [String], tags: [String], deckID: Int64) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try backend.addNote(notetypeID: notetypeID, fields: fields, deckID: deckID, tags: tags)
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Saves edited fields/tags for an existing note (EDIT mode), then refreshes
+    /// derived state. Throws so the editor can surface a clear message.
+    func updateNote(noteID: Int64, fields: [String], tags: [String]) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try backend.updateNote(noteID: noteID, fields: fields, tags: tags)
+        refreshDecks()
+        refreshUndo()
     }
 
     private func seedIfNeeded(_ backend: Backend) throws {
@@ -548,6 +593,19 @@ final class AnkiStore: ObservableObject {
         _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
         try await Task.detached(priority: .userInitiated, operation: work).value
+    }
+}
+
+/// Errors surfaced by the note editor's save path before they reach the engine.
+enum NoteEditorError: LocalizedError {
+    /// The backend hasn't finished opening the collection yet.
+    case collectionNotReady
+
+    var errorDescription: String? {
+        switch self {
+        case .collectionNotReady:
+            return "The collection isn’t ready yet. Please try again in a moment."
+        }
     }
 }
 
