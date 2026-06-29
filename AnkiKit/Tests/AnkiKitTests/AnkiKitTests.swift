@@ -5,9 +5,15 @@ import XCTest
 final class AnkiKitTests: XCTestCase {
     /// Opens a backend on a fresh, temporary collection.
     private func freshCollection() throws -> Backend {
+        try openCollection(in: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString))
+    }
+
+    /// Opens a backend on a collection rooted at `dir` (created if needed), so the
+    /// caller knows the on-disk paths — used by the `.colpkg` round-trip, which
+    /// must close, replace, and reopen the same collection files.
+    private func openCollection(in dir: URL) throws -> Backend {
         let backend = try Backend()
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
         let mediaFolder = dir.appendingPathComponent("collection.media")
         try FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
         try backend.openCollection(
@@ -412,6 +418,104 @@ final class AnkiKitTests: XCTestCase {
         let limits = try backend.deckLimits(deckID: deckID)
         XCTAssertEqual(limits.newPerDay, 9999, "an over-large new/day should clamp to 9999")
         XCTAssertEqual(limits.reviewsPerDay, 0, "a negative reviews/day should clamp to 0")
+    }
+
+    // MARK: - Import / Export
+
+    /// Round-trips notes through a `.apkg`: export a source collection's notes
+    /// (ImportExportService, service 39, method 4), then import them into a fresh
+    /// collection (service 39, method 2) and assert the notes survive. Proves the
+    /// service/method indices, the request/response shapes, and the export note
+    /// count. Clone of AnkiDroid's apkg export/import driving the same backend.
+    func testExportThenImportAnkiPackageRoundTrip() throws {
+        let source = try freshCollection()
+        let notetypeID = try basicNotetypeID(source)
+        _ = try source.addNote(notetypeID: notetypeID, fields: ["RoundTripQ", "RoundTripA"], deckID: 1)
+        _ = try source.addNote(notetypeID: notetypeID, fields: ["SecondQ", "SecondA"], deckID: 1)
+
+        let apkg = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).apkg")
+        defer { try? FileManager.default.removeItem(at: apkg) }
+
+        let exportedCount = try source.exportAnkiPackage(
+            outPath: apkg.path,
+            limit: Backend.wholeCollectionExportLimit(),
+            withScheduling: true, withMedia: true, legacy: false
+        )
+        XCTAssertEqual(exportedCount, 2, "both notes should be exported")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: apkg.path), "an .apkg file should be written")
+
+        let dest = try freshCollection()
+        XCTAssertTrue(try dest.searchCards(query: "").isEmpty, "a fresh collection starts with no cards")
+
+        let result = try dest.importAnkiPackage(path: apkg.path)
+        XCTAssertEqual(result.found, 2, "the import log should report two notes found")
+
+        XCTAssertEqual(try dest.searchCards(query: "").count, 2, "both notes should be imported")
+        XCTAssertEqual(try dest.searchCards(query: "RoundTripQ").count, 1,
+                       "the imported note's field text should be searchable")
+    }
+
+    /// Importing a missing `.apkg` surfaces a decodable backend error (the UI
+    /// shows its message), rather than crashing or silently succeeding.
+    func testImportAnkiPackageMissingFileThrows() throws {
+        let backend = try freshCollection()
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).apkg")
+        XCTAssertThrowsError(try backend.importAnkiPackage(path: missing.path)) { error in
+            guard case AnkiError.backendError = error else {
+                return XCTFail("expected a backend error for a missing package")
+            }
+        }
+    }
+
+    /// Round-trips the whole collection through a `.colpkg`: export it (service
+    /// 39, method 1) — which leaves the collection closed, so we reopen — then
+    /// import it into a second collection (service 39, method 0), which requires
+    /// the destination closed and is reopened afterwards. Asserts the notes
+    /// survive. Clone of AnkiDroid's colpkg export/import open/close lifecycle.
+    func testColpkgExportImportRoundTrip() throws {
+        // Source collection with two notes, exported to a .colpkg.
+        let sourceDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = try openCollection(in: sourceDir)
+        let notetypeID = try basicNotetypeID(source)
+        _ = try source.addNote(notetypeID: notetypeID, fields: ["ColQ", "ColA"], deckID: 1)
+        _ = try source.addNote(notetypeID: notetypeID, fields: ["ColQ2", "ColA2"], deckID: 1)
+
+        let colpkg = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).colpkg")
+        defer { try? FileManager.default.removeItem(at: colpkg) }
+
+        try source.exportCollectionPackage(outPath: colpkg.path, includeMedia: true)
+        // Export takes the collection; reopen it (mirrors AnkiDroid's reopen()).
+        try source.openCollection(
+            path: sourceDir.appendingPathComponent("collection.anki2").path,
+            mediaFolder: sourceDir.appendingPathComponent("collection.media").path,
+            mediaDB: sourceDir.appendingPathComponent("collection.media.db2").path
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: colpkg.path), "a .colpkg file should be written")
+
+        // Destination collection: replace its contents with the .colpkg.
+        let destDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let dest = try openCollection(in: destDir)
+        XCTAssertTrue(try dest.searchCards(query: "").isEmpty, "the destination starts empty")
+
+        let destCol = destDir.appendingPathComponent("collection.anki2").path
+        let destMediaFolder = destDir.appendingPathComponent("collection.media").path
+        let destMediaDB = destDir.appendingPathComponent("collection.media.db2").path
+
+        // Colpkg import requires the collection closed; reopen afterwards.
+        try dest.closeCollection()
+        try dest.importCollectionPackage(
+            colPath: destCol, backupPath: colpkg.path,
+            mediaFolder: destMediaFolder, mediaDB: destMediaDB
+        )
+        try dest.openCollection(path: destCol, mediaFolder: destMediaFolder, mediaDB: destMediaDB)
+
+        XCTAssertEqual(try dest.searchCards(query: "").count, 2,
+                       "the destination should now hold the source collection's notes")
+        XCTAssertEqual(try dest.searchCards(query: "ColQ2").count, 1,
+                       "the replaced collection's note text should be searchable")
     }
 
     // MARK: - Statistics

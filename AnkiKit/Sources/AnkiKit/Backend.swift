@@ -89,6 +89,20 @@ public final class Backend: @unchecked Sendable {
         return try run(service: 3, method: 0, req, returning: Anki_Generic_Empty.self)
     }
 
+    /// CollectionService.closeCollection (service 3, method 1).
+    ///
+    /// Closes the open collection in the backend. Required around a `.colpkg`
+    /// import, which replaces the on-disk collection file and therefore needs the
+    /// collection closed first (mirrors AnkiDroid's `CollectionManager.importColpkg`,
+    /// which calls `ensureClosed()` before `importCollectionPackage`). Pass
+    /// `downgradeToSchema11` only when producing a legacy-compatible file.
+    @discardableResult
+    public func closeCollection(downgradeToSchema11: Bool = false) throws -> Anki_Generic_Empty {
+        var req = Anki_Collection_CloseCollectionRequest()
+        req.downgradeToSchema11 = downgradeToSchema11
+        return try run(service: 3, method: 1, req, returning: Anki_Generic_Empty.self)
+    }
+
     /// DecksService.getDeckNames (service 7, method 13).
     public func deckNames(
         skipEmptyDefault: Bool = false, includeFiltered: Bool = true

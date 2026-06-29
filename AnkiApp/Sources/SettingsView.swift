@@ -20,6 +20,7 @@ struct SettingsView: View {
             accountSection
             appearanceSection
             reviewingSection
+            dataSection
             aboutSection
         }
         .scrollContentBackground(.hidden)
@@ -116,6 +117,25 @@ struct SettingsView: View {
         }
         .font(DS.Typography.body)
         .foregroundStyle(DS.textPrimary)
+    }
+
+    // MARK: - Data (import / export)
+
+    private var dataSection: some View {
+        Section {
+            NavigationLink {
+                ImportExportView(store: store)
+            } label: {
+                Label("Import & Export", systemImage: "tray.and.arrow.up.fill")
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+            }
+            .accessibilityIdentifier("importExport")
+        } header: {
+            sectionHeader("Data")
+        } footer: {
+            sectionFooter("Import an .apkg/.colpkg, or export a deck or your whole collection to share or back up.")
+        }
     }
 
     // MARK: - About
