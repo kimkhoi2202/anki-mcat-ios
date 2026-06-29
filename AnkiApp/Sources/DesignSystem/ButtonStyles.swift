@@ -41,13 +41,16 @@ struct DSSecondaryButtonStyle: ButtonStyle {
 
         var body: some View {
             let shape = RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
+            // Label uses textPrimary, not accent: accent is intentionally dark so
+            // white-on-accent passes AA, which makes accent-colored text fail AA
+            // against the dark surface. The accent border carries the accent identity.
             configuration.label
                 .font(DS.Typography.headline)
-                .foregroundStyle(DS.accent)
+                .foregroundStyle(DS.textPrimary)
                 .frame(maxWidth: .infinity, minHeight: DS.minTapTarget)
                 .padding(.horizontal, DS.Spacing.l)
                 .background(DS.surface, in: shape)
-                .overlay(shape.strokeBorder(DS.accent.opacity(0.35), lineWidth: 1))
+                .overlay(shape.strokeBorder(DS.accent, lineWidth: 1))
                 .opacity(isEnabled ? 1 : 0.5)
                 .dsPressFeedback(configuration.isPressed, reduceMotion: reduceMotion)
         }
@@ -70,6 +73,7 @@ struct DSRatingButtonStyle: ButtonStyle {
     private struct StyledLabel: View {
         let color: Color
         let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var isEnabled
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
@@ -83,6 +87,7 @@ struct DSRatingButtonStyle: ButtonStyle {
                     color,
                     in: RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
                 )
+                .opacity(isEnabled ? 1 : 0.5)
                 .dsPressFeedback(configuration.isPressed, reduceMotion: reduceMotion)
         }
     }

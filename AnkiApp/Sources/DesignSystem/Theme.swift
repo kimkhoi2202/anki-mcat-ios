@@ -23,19 +23,22 @@ enum DS {
     /// Secondary, lower-emphasis text.
     static var textSecondary: Color { adaptive(light: 0x5D636E, dark: 0x9BA1AD) }
 
-    /// Brand accent for primary actions.
-    static var accent: Color { adaptive(light: 0x5A5AD6, dark: 0x8585F0) }
+    /// Brand accent for primary actions. Used as a fill behind white text, so it
+    /// is kept dark enough to clear WCAG AA with white in both appearances
+    /// (white contrast ~7.0:1 light / ~6.4:1 dark).
+    static var accent: Color { adaptive(light: 0x4B45C9, dark: 0x5249D6) }
 
-    // Review rating colors. Saturated mid-tones so white labels stay legible in
-    // both light and dark mode.
-    /// "Again" rating (red).
-    static var again: Color { adaptive(light: 0xDC3B3B, dark: 0xE5565B) }
-    /// "Hard" rating (orange).
-    static var hard: Color { adaptive(light: 0xC8701A, dark: 0xD98828) }
-    /// "Good" rating (blue).
-    static var good: Color { adaptive(light: 0x2E6FE0, dark: 0x4A86F0) }
-    /// "Easy" rating (green).
-    static var easy: Color { adaptive(light: 0x2E8B57, dark: 0x3CA268) }
+    // Review rating colors. Deep, saturated tones chosen so white label text
+    // clears WCAG AA (>=4.5:1) against the fill in BOTH light and dark mode;
+    // approximate white-on-fill contrast ratios are noted per color.
+    /// "Again" rating (red). White contrast ~5.9:1 light / ~5.4:1 dark.
+    static var again: Color { adaptive(light: 0xC0271F, dark: 0xCC2A22) }
+    /// "Hard" rating (orange). White contrast ~6.0:1 light / ~5.1:1 dark.
+    static var hard: Color { adaptive(light: 0xB23A0A, dark: 0xBB4A0A) }
+    /// "Good" rating (blue). White contrast ~6.0:1 light / ~5.8:1 dark.
+    static var good: Color { adaptive(light: 0x1C5BD6, dark: 0x2060D0) }
+    /// "Easy" rating (green). White contrast ~5.9:1 light / ~5.4:1 dark.
+    static var easy: Color { adaptive(light: 0x157347, dark: 0x18794A) }
 
     // MARK: - Spacing
 
