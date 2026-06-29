@@ -413,4 +413,82 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(limits.newPerDay, 9999, "an over-large new/day should clamp to 9999")
         XCTAssertEqual(limits.reviewsPerDay, 0, "a negative reviews/day should clamp to 0")
     }
+
+    // MARK: - Statistics
+
+    /// `graphs` (StatsService, service 43, method 2) returns real data from the
+    /// engine: with three freshly added Basic notes the collection has three new
+    /// cards, which the Card Counts data reflects — proving the service/method
+    /// indices and the `GraphsResponse` shape.
+    func testGraphsReturnsRealCardCounts() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        for i in 0..<3 {
+            _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q\(i)", "A\(i)"], deckID: 1)
+        }
+
+        let resp = try backend.graphs(search: "", days: 0)
+        XCTAssertEqual(resp.cardCounts.includingInactive.newCards, 3,
+                       "three added Basic notes should be three new cards")
+
+        let summary = Backend.makeStatsSummary(from: resp, period: .allTime)
+        XCTAssertEqual(summary.cardCounts.new, 3, "summary should mirror the engine's new-card count")
+        XCTAssertEqual(summary.totalCards, 3, "total cards should sum every state bucket")
+    }
+
+    /// Answering a card is recorded in the engine's revlog and surfaces in the
+    /// graphs' Today block: after one answer, today's answer count is 1. This
+    /// proves `statsSummary` reads live review data, not a static snapshot.
+    func testStatsSummaryReflectsAnswersToday() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Front", "Back"], deckID: 1)
+
+        // Nothing answered yet.
+        let before = try backend.statsSummary(period: .month)
+        XCTAssertEqual(before.today.answerCount, 0, "no reviews answered yet")
+
+        // Answer the one queued card.
+        let card = try XCTUnwrap(try backend.queuedCards().cards.first)
+        try backend.answer(card: card, rating: .good, millisecondsTaken: 1500)
+
+        let after = try backend.statsSummary(period: .month)
+        XCTAssertEqual(after.today.answerCount, 1, "one card answered today")
+        XCTAssertEqual(after.today.correctCount, 1, "a 'good' answer counts as correct")
+        XCTAssertEqual(after.today.againCount, 0, "nothing was answered 'again'")
+        XCTAssertEqual(after.today.retentionPercent, 100, "today's retention is 100%")
+    }
+
+    /// `makeStatsSummary` applies desktop Anki's period windows: Future Due drops
+    /// the backlog (day < 0) and caps to the range's upper bound, while Reviews
+    /// keeps past days (day <= 0) down to the range's lower bound. Tested as a
+    /// pure mapping on a hand-built response, with no backend.
+    func testMakeStatsSummaryClipsToPeriod() {
+        var resp = Anki_Stats_GraphsResponse()
+        // Future due across backlog, today, near future, and far future.
+        var futureDue = Anki_Stats_GraphsResponse.FutureDue()
+        futureDue.futureDue = [-2: 5, 0: 1, 1: 2, 40: 9]
+        resp.futureDue = futureDue
+        // Reviews on today, within a month, and far in the past.
+        func reviews(_ count: UInt32) -> Anki_Stats_GraphsResponse.ReviewCountsAndTimes.Reviews {
+            var r = Anki_Stats_GraphsResponse.ReviewCountsAndTimes.Reviews()
+            r.young = count
+            return r
+        }
+        var rcat = Anki_Stats_GraphsResponse.ReviewCountsAndTimes()
+        rcat.count = [0: reviews(3), -5: reviews(2), -40: reviews(7)]
+        resp.reviews = rcat
+
+        let month = Backend.makeStatsSummary(from: resp, period: .month)
+        XCTAssertEqual(month.futureDue.map(\.day), [0, 1],
+                       "month future-due drops the backlog (-2) and the >31d bar (40)")
+        XCTAssertEqual(month.reviews.map(\.day), [-5, 0],
+                       "month reviews keep only the last 30 days (drops -40)")
+
+        let all = Backend.makeStatsSummary(from: resp, period: .allTime)
+        XCTAssertEqual(all.futureDue.map(\.day), [0, 1, 40],
+                       "all-time keeps every future bar but still drops the backlog")
+        XCTAssertEqual(all.reviews.map(\.day), [-40, -5, 0],
+                       "all-time keeps every past review day")
+    }
 }
