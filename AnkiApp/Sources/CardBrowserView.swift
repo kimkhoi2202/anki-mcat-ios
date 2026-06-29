@@ -19,6 +19,8 @@ struct CardBrowserView: View {
     @State private var rows: [CardBrowserRow] = []
     @State private var phase: LoadPhase = .loading
     @State private var editTarget: EditTarget?
+    @State private var infoTarget: CardTarget?
+    @State private var changeTypeTarget: NoteTarget?
     @State private var pendingDelete: CardBrowserRow?
     @State private var actionError: String?
     /// Guards against out-of-order results when searches overlap: only the most
@@ -40,6 +42,10 @@ struct CardBrowserView: View {
 
     /// Identifiable wrapper so the edit sheet can be driven by `.sheet(item:)`.
     private struct EditTarget: Identifiable { let id: Int64 }
+    /// Identifiable wrapper for a card-scoped sheet (Card Info), keyed by card id.
+    private struct CardTarget: Identifiable { let id: Int64 }
+    /// Identifiable wrapper for a note-scoped sheet (Change Note Type), keyed by note id.
+    private struct NoteTarget: Identifiable { let id: Int64 }
 
     var body: some View {
         ZStack {
@@ -62,6 +68,14 @@ struct CardBrowserView: View {
         }
         .sheet(item: $editTarget) { target in
             NoteEditorView(store: store, mode: .edit(noteID: target.id)) {
+                runSearch()
+            }
+        }
+        .sheet(item: $infoTarget) { target in
+            CardInfoView(store: store, cardID: target.id)
+        }
+        .sheet(item: $changeTypeTarget) { target in
+            ChangeNotetypeView(store: store, noteID: target.id) {
                 runSearch()
             }
         }
@@ -146,9 +160,24 @@ struct CardBrowserView: View {
         .background(DS.background)
     }
 
-    /// The shared long-press menu: suspend toggle, a flag submenu, and delete.
+    /// The shared long-press menu: card info, change note type, suspend toggle, a
+    /// flag submenu, and delete.
     @ViewBuilder
     private func rowMenu(_ row: CardBrowserRow) -> some View {
+        Button {
+            infoTarget = CardTarget(id: row.id)
+        } label: {
+            Label("Card Info", systemImage: "info.circle")
+        }
+
+        Button {
+            changeTypeTarget = NoteTarget(id: row.noteID)
+        } label: {
+            Label("Change Note Type", systemImage: "arrow.triangle.2.circlepath")
+        }
+
+        Divider()
+
         Button {
             toggleSuspend(row)
         } label: {

@@ -595,4 +595,138 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(all.reviews.map(\.day), [-40, -5, 0],
                        "all-time keeps every past review day")
     }
+
+    // MARK: - Card Info
+
+    /// `cardStats`/`cardInfo` (StatsService, service 43, method 0) returns real
+    /// per-card data: a freshly added Basic card reports its deck, note type, and
+    /// a clean (no reviews/lapses, never-reviewed) history — proving the
+    /// service/method indices and the `CardStatsResponse` shape.
+    func testCardInfoReturnsRealData() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["InfoQ", "InfoA"], deckID: 1)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "").first)
+
+        let info = try backend.cardInfo(cardID: cardID)
+        XCTAssertEqual(info.cardID, cardID, "info should be for the requested card")
+        XCTAssertEqual(info.deck, "Default", "the card lives in the Default deck")
+        XCTAssertTrue(info.notetype.hasPrefix("Basic"), "note type name should come through")
+        XCTAssertGreaterThan(info.added, 0, "added timestamp should be set")
+        XCTAssertEqual(info.reviews, 0, "a new card has no reviews")
+        XCTAssertEqual(info.lapses, 0, "a new card has no lapses")
+        XCTAssertNil(info.firstReview, "a new card has never been reviewed")
+        XCTAssertNotNil(info.duePosition, "a new card has a queue position")
+    }
+
+    /// After answering a card, its info reflects the review: the review count
+    /// rises and a first/latest review timestamp appears — proving `cardInfo`
+    /// reads live data, not a static snapshot.
+    func testCardInfoReflectsAReview() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Front", "Back"], deckID: 1)
+        let card = try XCTUnwrap(try backend.queuedCards().cards.first)
+        try backend.answer(card: card, rating: .good, millisecondsTaken: 1200)
+
+        let info = try backend.cardInfo(cardID: card.card.id)
+        XCTAssertEqual(info.reviews, 1, "one review should be recorded")
+        XCTAssertNotNil(info.firstReview, "a reviewed card has a first-review time")
+        XCTAssertNotNil(info.latestReview, "a reviewed card has a latest-review time")
+    }
+
+    // MARK: - Change Note Type
+
+    /// `changeNotetypeInfo` (NotetypesService, service 23, method 14) returns the
+    /// old/new field names and a sensible default mapping (matched by name), and
+    /// `changeNotetype` (23, 15) applies it: the note adopts the new type while
+    /// the default map preserves its field contents. Proves both indices and the
+    /// `ChangeNotetypeInfo`/`ChangeNotetypeRequest` shapes.
+    func testChangeNotetypeRemapsNoteAndPreservesFields() throws {
+        let backend = try freshCollection()
+        let notetypes = try backend.notetypeNames()
+        let basic = try XCTUnwrap(notetypes.first { $0.name == "Basic" })
+        let reversed = try XCTUnwrap(
+            notetypes.first { $0.name == "Basic (and reversed card)" },
+            "fresh collection ships the reversed Basic note type"
+        )
+        let nid = try backend.addNote(notetypeID: basic.id, fields: ["Q", "A"], deckID: 1)
+
+        let info = try backend.changeNotetypeInfo(oldNotetypeID: basic.id, newNotetypeID: reversed.id)
+        XCTAssertEqual(info.oldFieldNames, ["Front", "Back"], "Basic has Front/Back fields")
+        XCTAssertEqual(info.newFieldNames, ["Front", "Back"], "reversed Basic also has Front/Back")
+        XCTAssertEqual(info.defaultFieldMap, [0, 1], "matching names map straight across")
+        XCTAssertFalse(info.isCloze, "neither note type is cloze")
+
+        try backend.changeNotetype(
+            noteIDs: [nid], info: info,
+            fieldMap: info.defaultFieldMap, templateMap: info.defaultTemplateMap
+        )
+
+        let note = try backend.getNote(noteID: nid)
+        XCTAssertEqual(note.notetypeID, reversed.id, "the note should adopt the new note type")
+        XCTAssertEqual(note.fields, ["Q", "A"], "the default mapping preserves field contents")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "changing note type should be undoable")
+    }
+
+    // MARK: - Filtered Decks
+
+    /// Creating a filtered deck gathers matching cards, the deck shows up in the
+    /// deck tree as filtered, and emptying it returns the cards to their home
+    /// deck. Exercises `get_or_create_filtered_deck` (7, 19) +
+    /// `add_or_update_filtered_deck` (7, 20) + `rebuild_filtered_deck` (13, 16) +
+    /// `empty_filtered_deck` (13, 15) against the real engine.
+    func testCreateRebuildEmptyFilteredDeck() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        for i in 0..<3 {
+            _ = try backend.addNote(notetypeID: notetypeID, fields: ["FQ\(i)", "FA\(i)"], deckID: 1)
+        }
+
+        let result = try backend.createFilteredDeck(
+            name: "Cram", search: "deck:Default", limit: 50, order: .orderAdded, reschedule: true
+        )
+        XCTAssertGreaterThan(result.deckID, 0, "a created filtered deck has a real id")
+        XCTAssertEqual(result.cardCount, 3, "all three Default cards are gathered")
+
+        // It appears in the deck tree, flagged as filtered.
+        let entry = try XCTUnwrap(
+            try backend.deckTree().first { $0.id == result.deckID },
+            "the filtered deck should appear in the deck list"
+        )
+        XCTAssertTrue(entry.filtered, "the new deck is a filtered deck")
+        XCTAssertEqual(entry.name, "Cram")
+
+        // The gathered cards now live in the filtered deck.
+        XCTAssertEqual(try backend.searchCards(query: "deck:Cram").count, 3,
+                       "the cards moved into the filtered deck")
+
+        // Rebuild re-gathers the same cards.
+        XCTAssertEqual(try backend.rebuildFilteredDeck(deckID: result.deckID), 3,
+                       "rebuild gathers the same three cards")
+
+        // Emptying returns them to their home deck (the filtered deck remains).
+        try backend.emptyFilteredDeck(deckID: result.deckID)
+        XCTAssertEqual(try backend.searchCards(query: "deck:Cram").count, 0,
+                       "emptying returns the cards to their home deck")
+        XCTAssertTrue(try backend.deckNames().contains { $0.id == result.deckID },
+                      "the emptied filtered deck still exists")
+    }
+
+    /// A filtered deck whose search matches nothing is rejected by the engine
+    /// (matching desktop's `allow_empty = false`), surfacing as a decodable
+    /// backend error the UI can show.
+    func testCreateFilteredDeckEmptyMatchThrows() throws {
+        let backend = try freshCollection()
+        XCTAssertThrowsError(
+            try backend.createFilteredDeck(
+                name: "Empty", search: "tag:does-not-exist", limit: 10,
+                order: .orderDue, reschedule: true
+            )
+        ) { error in
+            guard case AnkiError.backendError = error else {
+                return XCTFail("expected a backend error for an empty filtered deck")
+            }
+        }
+    }
 }

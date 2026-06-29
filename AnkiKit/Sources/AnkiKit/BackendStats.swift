@@ -288,3 +288,120 @@ public extension Backend {
         )
     }
 }
+
+/// A view-facing snapshot of a single card's statistics, decoupled from the
+/// generated `CardStatsResponse` protobuf (the same way `StatsSummary` is).
+///
+/// Mirrors the data AnkiDroid's "Card Info" screen shows (`CardInfo` /
+/// `card-info.ts`): identity (deck, note type, card template), scheduling
+/// (added, due, interval, ease), and review history (reviews, lapses, time).
+/// Optional fields are `nil` when the engine left them unset (e.g. a brand-new
+/// card has no first/latest review).
+public struct CardInfo: Sendable, Equatable {
+    public let cardID: Int64
+    public let noteID: Int64
+    /// Human-readable deck name the card lives in.
+    public let deck: String
+    /// Note type (model) name.
+    public let notetype: String
+    /// Card template name, e.g. "Card 1".
+    public let cardType: String
+    /// When the card was created (Unix seconds).
+    public let added: Int64
+    /// First review timestamp (Unix seconds); `nil` if never reviewed.
+    public let firstReview: Int64?
+    /// Latest review timestamp (Unix seconds); `nil` if never reviewed.
+    public let latestReview: Int64?
+    /// Due date as a Unix timestamp for date-scheduled (review) cards; `nil`
+    /// when the card's due value isn't a date (e.g. a new card).
+    public let dueDate: Int64?
+    /// New-card queue position; `nil` for cards past the new queue.
+    public let duePosition: Int32?
+    /// Current interval in days (`0` for new/learning cards).
+    public let intervalDays: UInt32
+    /// Ease factor in permille (e.g. `2500` = 250%); `0` when not applicable.
+    public let easePermille: UInt32
+    /// Total number of reviews answered.
+    public let reviews: UInt32
+    /// Number of lapses (times the card was forgotten).
+    public let lapses: UInt32
+    /// Average answer time, in seconds.
+    public let averageSecs: Float
+    /// Total answer time, in seconds.
+    public let totalSecs: Float
+    /// FSRS retrievability (0…1) when available; `nil` otherwise.
+    public let retrievability: Float?
+
+    public init(
+        cardID: Int64, noteID: Int64, deck: String, notetype: String,
+        cardType: String, added: Int64, firstReview: Int64?, latestReview: Int64?,
+        dueDate: Int64?, duePosition: Int32?, intervalDays: UInt32,
+        easePermille: UInt32, reviews: UInt32, lapses: UInt32,
+        averageSecs: Float, totalSecs: Float, retrievability: Float?
+    ) {
+        self.cardID = cardID
+        self.noteID = noteID
+        self.deck = deck
+        self.notetype = notetype
+        self.cardType = cardType
+        self.added = added
+        self.firstReview = firstReview
+        self.latestReview = latestReview
+        self.dueDate = dueDate
+        self.duePosition = duePosition
+        self.intervalDays = intervalDays
+        self.easePermille = easePermille
+        self.reviews = reviews
+        self.lapses = lapses
+        self.averageSecs = averageSecs
+        self.totalSecs = totalSecs
+        self.retrievability = retrievability
+    }
+}
+
+/// Card-info convenience methods. `StatsService.card_stats` is service 43,
+/// method 0 (confirmed in `_backend_generated.py`); the request is a
+/// `cards.CardId` and the response a `stats.CardStatsResponse`.
+public extension Backend {
+    /// StatsService.cardStats (43, 0).
+    ///
+    /// Returns the raw per-card statistics the engine assembles for the Card
+    /// Info screen — the single RPC powering "Card Info" on every Anki platform.
+    func cardStats(cardID: Int64) throws -> Anki_Stats_CardStatsResponse {
+        var req = Anki_Cards_CardId()
+        req.cid = cardID
+        return try run(service: 43, method: 0, req, returning: Anki_Stats_CardStatsResponse.self)
+    }
+
+    /// Fetches a card's stats and maps them into a `CardInfo` for the UI, keeping
+    /// the protobuf decoding in AnkiKit so the view layer (and tests) work with
+    /// plain Swift values.
+    func cardInfo(cardID: Int64) throws -> CardInfo {
+        return Backend.makeCardInfo(from: try cardStats(cardID: cardID))
+    }
+
+    /// Pure mapping from the engine response to a `CardInfo`, split out so it can
+    /// be unit-tested without a backend. Optional fields use the response's
+    /// `has*` accessors so "unset" stays distinct from a real zero value.
+    static func makeCardInfo(from r: Anki_Stats_CardStatsResponse) -> CardInfo {
+        CardInfo(
+            cardID: r.cardID,
+            noteID: r.noteID,
+            deck: r.deck,
+            notetype: r.notetype,
+            cardType: r.cardType,
+            added: r.added,
+            firstReview: r.hasFirstReview ? r.firstReview : nil,
+            latestReview: r.hasLatestReview ? r.latestReview : nil,
+            dueDate: r.hasDueDate ? r.dueDate : nil,
+            duePosition: r.hasDuePosition ? r.duePosition : nil,
+            intervalDays: r.interval,
+            easePermille: r.ease,
+            reviews: r.reviews,
+            lapses: r.lapses,
+            averageSecs: r.averageSecs,
+            totalSecs: r.totalSecs,
+            retrievability: r.hasFsrsRetrievability ? r.fsrsRetrievability : nil
+        )
+    }
+}
