@@ -1,0 +1,19 @@
+[package]
+name = "ankicore-ffi"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "C-ABI bridge exposing Anki's Rust core (rslib) to Swift/iOS"
+
+[lib]
+name = "ankicore_ffi"
+# staticlib for iOS (linked into the app). cdylib is only useful for host-side
+# testing and fails to link for iOS device, so it's intentionally omitted.
+crate-type = ["staticlib"]
+
+[dependencies]
+# Anki's Rust core, consumed from the desktop fork (shared engine).
+anki = { path = "../../anki-desktop/main/rslib" }
+# rslib relies on workspace-level tokio feature unification (notably io-util).
+# Depend on tokio directly so those features are enabled in this standalone build.
+tokio = { version = "1", features = ["full"] }

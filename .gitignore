@@ -1,0 +1,23 @@
+# Rust build output
+AnkiCore/target/
+
+# Built engine binary (regenerate with AnkiCore/build-xcframework.sh)
+AnkiCore/AnkiCore.xcframework/
+AnkiCore/smoketest
+
+# SwiftPM
+.build/
+**/.build/
+Package.resolved
+
+# Xcode / XcodeGen (project is generated from project.yml)
+AnkiApp/AnkiSpeedrun.xcodeproj/
+AnkiApp/build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad
+
+# Scratch / screenshots
+*.png
+
+.DS_Store

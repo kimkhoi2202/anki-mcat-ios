@@ -1,0 +1,4 @@
+module AnkiCoreFFI {
+    header "ankicore.h"
+    export *
+}

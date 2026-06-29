@@ -1,0 +1,3 @@
+[toolchain]
+# Match the version pinned by Anki's rslib.
+channel = "1.92.0"
