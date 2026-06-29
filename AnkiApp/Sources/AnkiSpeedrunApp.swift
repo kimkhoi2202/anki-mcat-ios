@@ -4,7 +4,7 @@ import SwiftUI
 struct AnkiSpeedrunApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            HomeView()
         }
     }
 }

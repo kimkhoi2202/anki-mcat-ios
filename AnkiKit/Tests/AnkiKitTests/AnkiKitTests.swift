@@ -26,4 +26,25 @@ final class AnkiKitTests: XCTestCase {
         print("decks:", decks.map { $0.name })
         XCTAssertTrue(decks.contains { $0.name == "Default" }, "fresh collection should have a Default deck")
     }
+
+    func testDeckTreeAndSetCurrentDeck() throws {
+        let backend = try Backend()
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let mediaFolder = dir.appendingPathComponent("collection.media")
+        try FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+
+        let colPath = dir.appendingPathComponent("collection.anki2").path
+        let mediaDB = dir.appendingPathComponent("collection.media.db2").path
+
+        try backend.openCollection(path: colPath, mediaFolder: mediaFolder.path, mediaDB: mediaDB)
+
+        let tree = try backend.deckTree()
+        print("deckTree:", tree.map { $0.name })
+        XCTAssertTrue(tree.contains { $0.name == "Default" }, "deckTree should include the Default deck")
+
+        // Default deck always has id 1; selecting it should not throw.
+        XCTAssertNoThrow(try backend.setCurrentDeck(id: 1))
+    }
 }
