@@ -64,6 +64,33 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertFalse(requeued.cards.isEmpty, "undo should restore the answered card")
     }
 
+    /// `getPreferences`/`setPreferences` round-trip through the real engine
+    /// (ConfigService, service 9, methods 9/10). Flipping reviewing booleans,
+    /// writing them, then re-reading proves both the service/method indices and
+    /// that the change persists in the collection.
+    func testPreferencesRoundTrip() throws {
+        let backend = try freshCollection()
+
+        let original = try backend.getPreferences()
+        let flippedIntervals = !original.reviewing.showIntervalsOnButtons
+        let flippedDueCounts = !original.reviewing.showRemainingDueCounts
+        let flippedHideAudio = !original.reviewing.hideAudioPlayButtons
+
+        var updated = original
+        updated.reviewing.showIntervalsOnButtons = flippedIntervals
+        updated.reviewing.showRemainingDueCounts = flippedDueCounts
+        updated.reviewing.hideAudioPlayButtons = flippedHideAudio
+        _ = try backend.setPreferences(updated)
+
+        let readBack = try backend.getPreferences()
+        XCTAssertEqual(readBack.reviewing.showIntervalsOnButtons, flippedIntervals,
+                       "showIntervalsOnButtons should persist through the engine")
+        XCTAssertEqual(readBack.reviewing.showRemainingDueCounts, flippedDueCounts,
+                       "showRemainingDueCounts should persist through the engine")
+        XCTAssertEqual(readBack.reviewing.hideAudioPlayButtons, flippedHideAudio,
+                       "hideAudioPlayButtons should persist through the engine")
+    }
+
     func testOpenCollectionAndListDecks() throws {
         let backend = try Backend()
 

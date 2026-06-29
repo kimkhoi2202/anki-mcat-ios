@@ -9,6 +9,7 @@ import AnkiKit
 struct HomeView: View {
     @StateObject private var store = AnkiStore()
     @State private var goReview = false
+    @State private var goSettings = false
 
     var body: some View {
         NavigationStack {
@@ -20,7 +21,18 @@ struct HomeView: View {
             .navigationDestination(isPresented: $goReview) {
                 ReviewerView(store: store)
             }
+            .navigationDestination(isPresented: $goSettings) {
+                SettingsView(store: store)
+            }
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    NavigationLink {
+                        SettingsView(store: store)
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     SyncToolbarButton(store: store)
                 }
@@ -56,6 +68,9 @@ struct HomeView: View {
             // Compiled only into debug builds; release ships none of this.
             if ProcessInfo.processInfo.arguments.contains("-startInReview") {
                 goReview = true
+            }
+            if ProcessInfo.processInfo.arguments.contains("-startInSettings") {
+                goSettings = true
             }
             if UserDefaults.standard.bool(forKey: "showLogin") {
                 store.showLogin = true
