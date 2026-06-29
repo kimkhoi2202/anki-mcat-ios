@@ -344,4 +344,73 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(removed, 1, "one note should be removed")
         XCTAssertTrue(try backend.searchCards(query: "").isEmpty, "the card should be gone after delete")
     }
+
+    // MARK: - Deck management
+
+    /// `createDeck` adds a normal deck (new_deck + add_deck), `renameDeck`
+    /// changes its name in place, and `removeDecks` deletes it (and its cards) —
+    /// the create / rename / delete flow behind AnkiDroid's DeckPicker. The deck
+    /// is observed through `deckNames()`, and adding a note to it proves it's a
+    /// real, usable deck.
+    func testCreateRenameRemoveDeck() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+
+        let deckID = try backend.createDeck(name: "MCAT")
+        XCTAssertGreaterThan(deckID, 0, "a created deck should have a real id")
+        XCTAssertTrue(
+            try backend.deckNames().contains { $0.id == deckID && $0.name == "MCAT" },
+            "the new deck should appear in the deck list"
+        )
+
+        try backend.renameDeck(id: deckID, name: "MCAT Biology")
+        let renamed = try backend.deckNames().first { $0.id == deckID }
+        XCTAssertEqual(renamed?.name, "MCAT Biology", "the deck should keep its id but change name")
+
+        // Put a card in the deck so the delete reports the card it removes
+        // (remove_decks returns the card count, not the deck count).
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: deckID)
+        let removedCards = try backend.removeDecks(ids: [deckID])
+        XCTAssertEqual(removedCards, 1, "deleting the deck removes its one card")
+        XCTAssertFalse(
+            try backend.deckNames().contains { $0.id == deckID },
+            "the deck should be gone after delete"
+        )
+    }
+
+    /// A created deck reports the default preset limits (20 new / 200 reviews),
+    /// and `setDeckLimits` persists per-deck overrides that read back through
+    /// `deckLimits` — the get/set behind the deck-options new/day & reviews/day
+    /// controls. Setting is undoable (UpdateDeck records an undo entry).
+    func testDeckLimitsGetSetRoundTrip() throws {
+        let backend = try freshCollection()
+        let deckID = try backend.createDeck(name: "Limits")
+
+        let defaults = try backend.deckLimits(deckID: deckID)
+        XCTAssertEqual(defaults.newPerDay, Backend.defaultNewCardsPerDay,
+                       "a deck with no override falls back to the preset new/day default")
+        XCTAssertEqual(defaults.reviewsPerDay, Backend.defaultReviewsPerDay,
+                       "a deck with no override falls back to the preset reviews/day default")
+
+        try backend.setDeckLimits(deckID: deckID, newPerDay: 30, reviewsPerDay: 150)
+
+        let updated = try backend.deckLimits(deckID: deckID)
+        XCTAssertEqual(updated.newPerDay, 30, "new/day override should persist")
+        XCTAssertEqual(updated.reviewsPerDay, 150, "reviews/day override should persist")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "changing limits should be undoable")
+    }
+
+    /// `setDeckLimits` clamps out-of-range values to the engine's 0…9999 window
+    /// (`ensure_u32_valid`), so a wildly large input is stored capped rather than
+    /// rejected.
+    func testDeckLimitsClampLargeValues() throws {
+        let backend = try freshCollection()
+        let deckID = try backend.createDeck(name: "Clamp")
+
+        try backend.setDeckLimits(deckID: deckID, newPerDay: 100_000, reviewsPerDay: -5)
+
+        let limits = try backend.deckLimits(deckID: deckID)
+        XCTAssertEqual(limits.newPerDay, 9999, "an over-large new/day should clamp to 9999")
+        XCTAssertEqual(limits.reviewsPerDay, 0, "a negative reviews/day should clamp to 0")
+    }
 }

@@ -142,6 +142,55 @@ final class AnkiStore: ObservableObject {
         }
     }
 
+    // MARK: - Deck management
+
+    /// Creates a new deck (`::`-separated names create subdecks), then refreshes
+    /// the deck list so it appears. Throws so the caller can surface a clear
+    /// message (e.g. an invalid name). Clone of AnkiDroid's create-deck action.
+    func createDeck(name: String) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try backend.createDeck(name: name)
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Renames a deck in place (reparenting its subdecks), then refreshes the
+    /// list. Clone of AnkiDroid's rename context action.
+    func renameDeck(id: Int64, name: String) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try backend.renameDeck(id: id, name: name)
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Deletes a deck and its cards, then refreshes the list. Clone of
+    /// AnkiDroid's delete-deck action (the confirmation lives in the view).
+    func deleteDeck(id: Int64) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try backend.removeDecks(ids: [id])
+        // Deleting the current deck falls study back to the Default deck.
+        if currentDeckID == id { currentDeckID = 1 }
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Reads a deck's basic daily limits (new/day, reviews/day) for the options
+    /// sheet; returns nil if the collection isn't ready or the deck can't be read.
+    func deckLimits(forDeck id: Int64) -> DeckLimits? {
+        guard let backend else { return nil }
+        return try? backend.deckLimits(deckID: id)
+    }
+
+    /// Persists a deck's basic daily limits, then refreshes the list (the new
+    /// limit changes how many cards are due). Throws so the options sheet can
+    /// surface a clear message.
+    func setDeckLimits(forDeck id: Int64, newPerDay: Int, reviewsPerDay: Int) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try backend.setDeckLimits(deckID: id, newPerDay: newPerDay, reviewsPerDay: reviewsPerDay)
+        refreshDecks()
+        refreshUndo()
+    }
+
     // MARK: - Note add/edit
 
     /// All notetypes (id + name) for the editor's notetype picker. Wraps

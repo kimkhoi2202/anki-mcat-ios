@@ -13,6 +13,15 @@ struct HomeView: View {
     @State private var goBrowse = false
     @State private var showAddNote = false
 
+    // Deck management (T2.3), cloning AnkiDroid's DeckPicker create-deck dialog
+    // and per-deck context menu (rename / options / delete).
+    @State private var showCreateDeck = false
+    @State private var deckNameInput = ""
+    @State private var renameTarget: DeckTreeEntry?
+    @State private var pendingDelete: DeckTreeEntry?
+    @State private var optionsTarget: DeckTreeEntry?
+    @State private var deckActionError: String?
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -66,6 +75,46 @@ struct HomeView: View {
             .overlay(alignment: .bottom) {
                 SyncBanner(store: store)
             }
+            .sheet(item: $optionsTarget) { deck in
+                DeckOptionsView(store: store, deck: deck) {
+                    store.refreshDecks()
+                }
+            }
+            // Create deck — clone of AnkiDroid's CreateDeckDialog text prompt.
+            .alert("New Deck", isPresented: $showCreateDeck) {
+                TextField("Deck name", text: $deckNameInput)
+                    .autocorrectionDisabled()
+                Button("Create") { createDeck() }
+                Button("Cancel", role: .cancel) { deckNameInput = "" }
+            } message: {
+                Text("Use “::” to make a subdeck, e.g. MCAT::Biology.")
+            }
+            // Rename deck — same dialog AnkiDroid reuses for renames.
+            .alert("Rename Deck", isPresented: renamePresented) {
+                TextField("Deck name", text: $deckNameInput)
+                    .autocorrectionDisabled()
+                Button("Rename") { performRename() }
+                Button("Cancel", role: .cancel) { renameTarget = nil; deckNameInput = "" }
+            } message: {
+                Text("Enter a new name for this deck.")
+            }
+            // Delete deck — confirmation clone of DeckPickerConfirmDeleteDeckDialog.
+            .confirmationDialog(
+                "Delete deck?",
+                isPresented: deletePresented,
+                titleVisibility: .visible,
+                presenting: pendingDelete
+            ) { deck in
+                Button("Delete", role: .destructive) { performDelete(deck) }
+                Button("Cancel", role: .cancel) { pendingDelete = nil }
+            } message: { deck in
+                Text("This permanently deletes “\(deck.fullName)” and all of its cards. You can undo it from the reviewer.")
+            }
+            .alert("Action failed", isPresented: deckErrorPresented) {
+                Button("OK", role: .cancel) { deckActionError = nil }
+            } message: {
+                Text(deckActionError ?? "")
+            }
         }
         .sheet(isPresented: $store.showLogin) {
             LoginView(store: store)
@@ -104,6 +153,12 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInBrowser") {
                 goBrowse = true
             }
+            if ProcessInfo.processInfo.arguments.contains("-startInCreateDeck") {
+                showCreateDeck = true
+            }
+            if ProcessInfo.processInfo.arguments.contains("-startInDeckOptions") {
+                optionsTarget = store.decks.first
+            }
             if UserDefaults.standard.bool(forKey: "showLogin") {
                 store.showLogin = true
             }
@@ -126,8 +181,11 @@ struct HomeView: View {
             emptyState
         } else {
             ScrollView {
-                deckList
-                    .padding(DS.Spacing.l)
+                VStack(spacing: DS.Spacing.l) {
+                    deckList
+                    newDeckButton
+                }
+                .padding(DS.Spacing.l)
             }
         }
     }
@@ -147,6 +205,8 @@ struct HomeView: View {
                     DeckRow(deck: deck)
                 }
                 .buttonStyle(.plain)
+                // Long-press deck actions, cloning AnkiDroid's DeckPickerContextMenu.
+                .contextMenu { deckRowMenu(deck) }
             }
         }
         .background(
@@ -157,6 +217,60 @@ struct HomeView: View {
             RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
                 .strokeBorder(DS.separator, lineWidth: 1)
         )
+    }
+
+    /// Per-deck long-press menu: rename, options (limits), and delete — the
+    /// subset of AnkiDroid's deck context menu in T2.3's scope. "Options" is
+    /// hidden for filtered decks (they have no new/review-per-day limits) and
+    /// "Delete" for the Default deck (which Anki always keeps).
+    @ViewBuilder
+    private func deckRowMenu(_ deck: DeckTreeEntry) -> some View {
+        Button {
+            beginRename(deck)
+        } label: {
+            Label("Rename", systemImage: "pencil")
+        }
+
+        if !deck.filtered {
+            Button {
+                optionsTarget = deck
+            } label: {
+                Label("Options", systemImage: "slider.horizontal.3")
+            }
+        }
+
+        if deck.id != Self.defaultDeckID {
+            Divider()
+            Button(role: .destructive) {
+                pendingDelete = deck
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
+    /// Full-width "New Deck" action below the list, keeping deck creation out of
+    /// the already-busy toolbar (add-note / browse / sync).
+    private var newDeckButton: some View {
+        Button {
+            beginCreateDeck()
+        } label: {
+            Label("New Deck", systemImage: "folder.badge.plus")
+                .font(DS.Typography.body.weight(.semibold))
+                .foregroundStyle(DS.accent)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: DS.minTapTarget)
+                .background(
+                    DS.surface,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                        .strokeBorder(DS.separator, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("New deck")
     }
 
     private var emptyState: some View {
@@ -170,9 +284,86 @@ struct HomeView: View {
             Text(store.status)
                 .font(DS.Typography.caption)
                 .foregroundStyle(DS.textSecondary)
+            Button {
+                beginCreateDeck()
+            } label: {
+                Label("New Deck", systemImage: "folder.badge.plus")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(DS.accent)
+            .padding(.top, DS.Spacing.s)
         }
         .multilineTextAlignment(.center)
         .padding(DS.Spacing.xl)
+    }
+
+    // MARK: - Deck management actions
+
+    /// The Default deck always has id 1 and can't be deleted (Anki recreates it).
+    private static let defaultDeckID: Int64 = 1
+
+    private var renamePresented: Binding<Bool> {
+        Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })
+    }
+
+    private var deletePresented: Binding<Bool> {
+        Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })
+    }
+
+    private var deckErrorPresented: Binding<Bool> {
+        Binding(get: { deckActionError != nil }, set: { if !$0 { deckActionError = nil } })
+    }
+
+    private func beginCreateDeck() {
+        deckNameInput = ""
+        showCreateDeck = true
+    }
+
+    private func beginRename(_ deck: DeckTreeEntry) {
+        deckNameInput = deck.fullName
+        renameTarget = deck
+    }
+
+    private func createDeck() {
+        let name = deckNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        deckNameInput = ""
+        guard !name.isEmpty else { return }
+        runDeckAction { try store.createDeck(name: name) }
+    }
+
+    private func performRename() {
+        guard let deck = renameTarget else { return }
+        let name = deckNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        renameTarget = nil
+        deckNameInput = ""
+        guard !name.isEmpty, name != deck.fullName else { return }
+        runDeckAction { try store.renameDeck(id: deck.id, name: name) }
+    }
+
+    private func performDelete(_ deck: DeckTreeEntry) {
+        pendingDelete = nil
+        runDeckAction { try store.deleteDeck(id: deck.id) }
+    }
+
+    /// Runs a deck mutation, surfacing a readable message on failure (the store
+    /// already refreshes the deck list on success).
+    private func runDeckAction(_ work: () throws -> Void) {
+        do {
+            try work()
+        } catch {
+            deckActionError = describe(error)
+        }
+    }
+
+    /// Extracts a human-readable message from a thrown error, decoding the
+    /// engine's protobuf `BackendError` when present (e.g. an invalid deck name).
+    private func describe(_ error: Error) -> String {
+        if case let AnkiError.backendError(data) = error,
+           let backendError = try? Anki_Backend_BackendError(serializedBytes: data),
+           !backendError.message.isEmpty {
+            return backendError.message
+        }
+        return error.localizedDescription
     }
 }
 
