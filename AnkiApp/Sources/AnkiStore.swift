@@ -5,10 +5,9 @@ import AnkiKit
 final class AnkiStore: ObservableObject {
     @Published var buildHash = ""
     @Published var status = "Starting…"
-    @Published var deckNames: [String] = []
-    @Published var newCount = 0
-    @Published var learningCount = 0
-    @Published var reviewCount = 0
+    /// Decks shown on the Home screen, flattened from the backend deck tree
+    /// with per-deck new/learning/review counts.
+    @Published var decks: [DeckTreeEntry] = []
 
     @Published var currentQuestion = ""
     @Published var currentAnswer = ""
@@ -33,12 +32,34 @@ final class AnkiStore: ObservableObject {
                 mediaFolder: mediaFolder.path,
                 mediaDB: docs.appendingPathComponent("collection.media.db2").path
             )
-            deckNames = try backend.deckNames().map(\.name)
             try seedIfNeeded(backend)
-            refreshCounts()
+            refreshDecks()
             status = "Engine OK"
         } catch {
             status = "Error: \(error)"
+        }
+    }
+
+    /// Reload the deck list and its counts (e.g. after returning from review).
+    func refreshDecks() {
+        guard let backend else { return }
+        decks = (try? backend.deckTree()) ?? []
+    }
+
+    /// Select `id` as the current deck (so the scheduler scopes study to it and
+    /// its subdecks), reset reviewer state, and load the first queued card.
+    func selectDeck(id: Int64) {
+        guard let backend else { return }
+        do {
+            try backend.setCurrentDeck(id: id)
+            reviewDone = false
+            showingAnswer = false
+            currentQuestion = ""
+            currentAnswer = ""
+            currentCard = nil
+            loadNext()
+        } catch {
+            status = "Select error: \(error)"
         }
     }
 
@@ -59,13 +80,6 @@ final class AnkiStore: ObservableObject {
         UserDefaults.standard.set(true, forKey: key)
     }
 
-    private func refreshCounts() {
-        guard let backend, let q = try? backend.queuedCards() else { return }
-        newCount = Int(q.newCount)
-        learningCount = Int(q.learningCount)
-        reviewCount = Int(q.reviewCount)
-    }
-
     func startReview() {
         if currentQuestion.isEmpty && !reviewDone { loadNext() }
     }
@@ -75,9 +89,6 @@ final class AnkiStore: ObservableObject {
         showingAnswer = false
         do {
             let q = try backend.queuedCards()
-            newCount = Int(q.newCount)
-            learningCount = Int(q.learningCount)
-            reviewCount = Int(q.reviewCount)
             guard let first = q.cards.first else {
                 currentCard = nil
                 reviewDone = true
