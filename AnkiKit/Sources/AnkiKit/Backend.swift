@@ -14,7 +14,14 @@ public enum AnkiError: Error {
 /// Every backend call funnels through `run(service:method:input:)`, mirroring
 /// `pylib/anki/_backend.py`. Service/method indices come from the generated
 /// `_backend_generated.py` reference.
-public final class Backend {
+///
+/// `@unchecked Sendable`: the wrapper holds only an opaque handle, and the Rust
+/// core behind it is `Send + Sync` — it guards the collection with a mutex and
+/// is explicitly designed for concurrent use (e.g. media sync runs on a
+/// background thread while the foreground polls `media_sync_status`). This lets
+/// callers offload the blocking sync calls onto a background task while keeping
+/// the UI responsive.
+public final class Backend: @unchecked Sendable {
     private let handle: UnsafeMutableRawPointer
 
     public init(preferredLangs: [String] = ["en"]) throws {
