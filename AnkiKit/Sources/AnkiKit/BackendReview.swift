@@ -31,14 +31,31 @@ public extension Backend {
         return try run(service: 13, method: 3, req, returning: Anki_Scheduler_QueuedCards.self)
     }
 
-    /// CardRenderingService.renderExistingCard (27, 6). Returns final HTML.
-    func renderCard(cardID: Int64) throws -> (question: String, answer: String) {
+    /// CardRenderingService.renderExistingCard (27, 6). Returns the final
+    /// question/answer HTML plus the card's CSS.
+    ///
+    /// `css` is the notetype's styling: the core sets it to
+    /// `notetype.config.css` (see rslib `notetype/render.rs`), so it is
+    /// identical to `notetypeCSS(notetypeID:)` but comes back for free with the
+    /// render, avoiding an extra round-trip per card.
+    func renderCard(cardID: Int64) throws -> (question: String, answer: String, css: String) {
         var req = Anki_CardRendering_RenderExistingCardRequest()
         req.cardID = cardID
         req.browser = false
         req.partialRender = false
         let resp = try run(service: 27, method: 6, req, returning: Anki_CardRendering_RenderCardResponse.self)
-        return (Backend.joinNodes(resp.questionNodes), Backend.joinNodes(resp.answerNodes))
+        return (Backend.joinNodes(resp.questionNodes), Backend.joinNodes(resp.answerNodes), resp.css)
+    }
+
+    /// SchedulerService.describeNextStates (13, 24).
+    ///
+    /// Given a queued card's precomputed `states`, returns one human-readable
+    /// interval label per answer button, in order `[again, hard, good, easy]`
+    /// (e.g. `["<1m", "<10m", "1d", "4d"]`). Mirrors AnkiDroid's
+    /// `AnswerButtonsNextTime.from`, which destructures the same four strings.
+    func describeNextStates(_ states: Anki_Scheduler_SchedulingStates) throws -> [String] {
+        let resp = try run(service: 13, method: 24, states, returning: Anki_Generic_StringList.self)
+        return resp.vals
     }
 
     /// SchedulerService.answerCard (13, 4), using a queued card's precomputed states.
