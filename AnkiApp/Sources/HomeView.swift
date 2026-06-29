@@ -10,12 +10,18 @@ struct HomeView: View {
     @StateObject private var store = AnkiStore()
     @State private var goReview = false
     @State private var goSettings = false
+    @State private var showAddNote = false
 
     var body: some View {
         NavigationStack {
             ZStack {
                 DS.background.ignoresSafeArea()
                 content
+            }
+            .sheet(isPresented: $showAddNote) {
+                NoteEditorView(store: store, mode: .add(defaultDeckID: store.currentDeckID)) {
+                    store.refreshDecks()
+                }
             }
             .navigationTitle("Decks")
             .navigationDestination(isPresented: $goReview) {
@@ -32,6 +38,14 @@ struct HomeView: View {
                         Image(systemName: "gearshape")
                     }
                     .accessibilityLabel("Settings")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showAddNote = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("Add note")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     SyncToolbarButton(store: store)
@@ -71,6 +85,9 @@ struct HomeView: View {
             }
             if ProcessInfo.processInfo.arguments.contains("-startInSettings") {
                 goSettings = true
+            }
+            if ProcessInfo.processInfo.arguments.contains("-startInAddNote") {
+                showAddNote = true
             }
             if UserDefaults.standard.bool(forKey: "showLogin") {
                 store.showLogin = true
