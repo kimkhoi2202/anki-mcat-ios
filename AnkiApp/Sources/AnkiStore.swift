@@ -43,8 +43,25 @@ final class AnkiStore: ObservableObject {
     /// must choose to upload (keep this device) or download (keep the server).
     @Published var pendingConflict = false
 
-    /// Custom server endpoint from the stored credentials (nil = default AnkiWeb).
-    private var savedEndpoint: String?
+    /// Custom sync server endpoint (nil = default AnkiWeb), surfaced read-only on
+    /// the Settings screen. Mirrors `savedEndpoint`.
+    @Published private(set) var customSyncServer: String?
+
+    // MARK: - Preferences state (engine-backed)
+
+    /// Reviewing preferences read from the engine `Preferences` message, shown as
+    /// toggles on the Settings screen. Cloned from AnkiDroid's Appearance/Study
+    /// settings, which read/write the same collection prefs.
+    @Published var reviewingPrefs = ReviewingPrefs()
+    /// Whether `reviewingPrefs` was successfully loaded from the engine (drives
+    /// whether the Settings screen shows the reviewing toggles).
+    @Published private(set) var preferencesAvailable = false
+
+    /// Custom server endpoint from the stored credentials (nil = default
+    /// AnkiWeb). Kept in sync with the published `customSyncServer`.
+    private var savedEndpoint: String? {
+        didSet { customSyncServer = savedEndpoint }
+    }
     /// Auth + media USN captured when a full-sync conflict is raised, reused once
     /// the user picks a resolution.
     private var pendingConflictAuth: Anki_Sync_SyncAuth?
@@ -84,6 +101,7 @@ final class AnkiStore: ObservableObject {
             refreshDecks()
             refreshUndo()
             loadLoginState()
+            loadPreferences()
             status = "Engine OK"
         } catch {
             status = "Error: \(error)"
@@ -458,6 +476,7 @@ final class AnkiStore: ObservableObject {
     private func refreshAfterSync() {
         refreshDecks()
         refreshUndo()
+        loadPreferences()
     }
 
     private func defaultMessage(for kind: SyncError.Kind) -> String {
@@ -470,6 +489,58 @@ final class AnkiStore: ObservableObject {
         }
     }
 
+    // MARK: - Preferences (engine-backed)
+
+    /// Loads the reviewing preferences from the engine `Preferences` message.
+    /// Read locally (fast SQLite-backed call), mirroring how AnkiDroid's settings
+    /// screens populate their toggles from `col.getPreferences()`.
+    func loadPreferences() {
+        guard let backend else { return }
+        do {
+            reviewingPrefs = ReviewingPrefs(try backend.getPreferences().reviewing)
+            preferencesAvailable = true
+        } catch {
+            preferencesAvailable = false
+            status = "Preferences error: \(error)"
+        }
+    }
+
+    /// "Show next review time above answer buttons" (engine
+    /// `reviewing.show_intervals_on_buttons`).
+    func setShowIntervalsOnButtons(_ value: Bool) {
+        updateReviewing { $0.showIntervalsOnButtons = value }
+    }
+
+    /// "Show remaining card count" during review (engine
+    /// `reviewing.show_remaining_due_counts`).
+    func setShowRemainingDueCounts(_ value: Bool) {
+        updateReviewing { $0.showRemainingDueCounts = value }
+    }
+
+    /// "Show play buttons on cards with audio". Stored inverted in the engine as
+    /// `reviewing.hide_audio_play_buttons` (as in AnkiDroid).
+    func setShowPlayButtonsOnAudio(_ value: Bool) {
+        updateReviewing { $0.hideAudioPlayButtons = !value }
+    }
+
+    /// Read-modify-write a single reviewing preference through the engine, then
+    /// re-read so the UI reflects the persisted truth (clone of AnkiDroid's
+    /// `prefs.copy { reviewing = ... }; setPreferences(newPrefs)`). On failure the
+    /// reload reverts the toggle to the engine's actual value.
+    private func updateReviewing(
+        _ mutate: (inout Anki_Config_Preferences.Reviewing) -> Void
+    ) {
+        guard let backend else { return }
+        do {
+            var prefs = try backend.getPreferences()
+            mutate(&prefs.reviewing)
+            _ = try backend.setPreferences(prefs)
+        } catch {
+            status = "Preferences error: \(error)"
+        }
+        loadPreferences()
+    }
+
     /// Runs a blocking backend call off the main actor so the UI stays
     /// responsive, then resumes on the main actor. Safe because `Backend` is
     /// `Sendable` (the Rust core is internally synchronized).
@@ -477,5 +548,25 @@ final class AnkiStore: ObservableObject {
         _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
         try await Task.detached(priority: .userInitiated, operation: work).value
+    }
+}
+
+/// Plain, view-facing snapshot of the engine's reviewing preferences. Decouples
+/// the SwiftUI layer from the generated protobuf type.
+struct ReviewingPrefs: Equatable {
+    /// "Show next review time above answer buttons".
+    var showIntervalsOnButtons = false
+    /// "Show remaining card count" during review.
+    var showRemainingDueCounts = false
+    /// "Show play buttons on cards with audio" (inverse of the engine's
+    /// `hide_audio_play_buttons`).
+    var showPlayButtonsOnAudio = false
+
+    init() {}
+
+    init(_ reviewing: Anki_Config_Preferences.Reviewing) {
+        showIntervalsOnButtons = reviewing.showIntervalsOnButtons
+        showRemainingDueCounts = reviewing.showRemainingDueCounts
+        showPlayButtonsOnAudio = !reviewing.hideAudioPlayButtons
     }
 }
