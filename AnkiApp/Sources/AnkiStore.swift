@@ -43,7 +43,11 @@ final class AnkiStore: ObservableObject {
     /// Reload the deck list and its counts (e.g. after returning from review).
     func refreshDecks() {
         guard let backend else { return }
-        decks = (try? backend.deckTree()) ?? []
+        do {
+            decks = try backend.deckTree()
+        } catch {
+            status = "Deck list error: \(error)"
+        }
     }
 
     /// Select `id` as the current deck (so the scheduler scopes study to it and
