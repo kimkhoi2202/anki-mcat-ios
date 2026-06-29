@@ -1,5 +1,4 @@
 import Foundation
-import UIKit
 import AnkiKit
 
 @MainActor
@@ -52,10 +51,6 @@ final class AnkiStore: ObservableObject {
                 mediaFolder: mediaFolder.path,
                 mediaDB: docs.appendingPathComponent("collection.media.db2").path
             )
-            // Seed the image-media demo before the text cards so it surfaces
-            // first in a fresh collection, giving the reviewer something to
-            // exercise the media scheme handler with.
-            try seedMediaDemoIfNeeded(backend)
             try seedIfNeeded(backend)
             refreshDecks()
             refreshUndo()
@@ -109,49 +104,6 @@ final class AnkiStore: ObservableObject {
             _ = try backend.addNote(notetypeID: basic.id, fields: [q, a], deckID: 1)
         }
         UserDefaults.standard.set(true, forKey: key)
-    }
-
-    /// Seeds one card that references a bundled image, plus the image itself in
-    /// the media folder, so the reviewer's `<img>` resolution (the media scheme
-    /// handler) can be verified end-to-end. Generated at runtime to avoid
-    /// committing a binary asset.
-    private func seedMediaDemoIfNeeded(_ backend: Backend) throws {
-        let key = "seeded_media_demo_v1"
-        if UserDefaults.standard.bool(forKey: key) { return }
-        guard let basic = try backend.notetypeNames().first(where: { $0.name.hasPrefix("Basic") }) else { return }
-
-        let imageName = "ankispeedrun-demo.png"
-        if let data = Self.makeDemoPNG() {
-            try? FileManager.default.createDirectory(at: mediaFolderURL, withIntermediateDirectories: true)
-            try? data.write(to: mediaFolderURL.appendingPathComponent(imageName))
-        }
-        _ = try backend.addNote(
-            notetypeID: basic.id,
-            fields: ["This image is loaded from the media folder:", "<img src=\"\(imageName)\">"],
-            deckID: 1
-        )
-        UserDefaults.standard.set(true, forKey: key)
-    }
-
-    /// Renders a small PNG used by the media demo card.
-    private static func makeDemoPNG() -> Data? {
-        let size = CGSize(width: 240, height: 140)
-        let renderer = UIGraphicsImageRenderer(size: size)
-        let image = renderer.image { _ in
-            UIColor(red: 0.29, green: 0.27, blue: 0.84, alpha: 1).setFill()
-            UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 18).fill()
-            let text = "IMG"
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.boldSystemFont(ofSize: 52),
-                .foregroundColor: UIColor.white,
-            ]
-            let textSize = text.size(withAttributes: attrs)
-            text.draw(
-                at: CGPoint(x: (size.width - textSize.width) / 2, y: (size.height - textSize.height) / 2),
-                withAttributes: attrs
-            )
-        }
-        return image.pngData()
     }
 
     func startReview() {

@@ -211,6 +211,7 @@ struct ReviewerView: View {
                 if index < store.currentIntervals.count, !store.currentIntervals[index].isEmpty {
                     Text(store.currentIntervals[index])
                         .font(DS.Typography.caption)
+                        .monospacedDigit()
                         .opacity(0.9)
                 }
                 Text(label)
