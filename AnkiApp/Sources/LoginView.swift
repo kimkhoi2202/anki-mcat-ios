@@ -53,11 +53,14 @@ struct LoginView: View {
                 }
             }
             .onAppear {
-                // Prefill from the stored account, or from launch arguments when
-                // driving the login screen for automated screenshots.
+                // Prefill from the stored account.
+                username = store.syncUsername
+                #if DEBUG
+                // Launch-argument overrides for automated screenshots (debug-only).
                 let defaults = UserDefaults.standard
-                username = defaults.string(forKey: "syncUser") ?? store.syncUsername
-                serverURL = defaults.string(forKey: "syncServer") ?? serverURL
+                if let user = defaults.string(forKey: "syncUser") { username = user }
+                if let server = defaults.string(forKey: "syncServer") { serverURL = server }
+                #endif
                 focused = username.isEmpty ? .username : .password
             }
         }

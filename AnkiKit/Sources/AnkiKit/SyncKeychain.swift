@@ -32,7 +32,9 @@ public struct KeychainError: Error, Sendable, Equatable {
 ///
 /// A single generic-password item (one per `service`/`account` pair) holds the
 /// JSON-encoded ``SyncCredentials``. Items are accessible after first unlock so
-/// a background sync can read them without the device being unlocked.
+/// a background sync can read them without the device being unlocked, and are
+/// marked `ThisDeviceOnly` so the password-equivalent host key never leaves the
+/// device via iCloud Keychain or encrypted backups.
 public enum SyncKeychain {
     /// Keychain service identifier for this app's sync credentials.
     public static let service = "com.khoilam.ankispeedrun.sync"
@@ -48,9 +50,12 @@ public enum SyncKeychain {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
+        // ThisDeviceOnly: the host key is password-equivalent, so keep it off
+        // iCloud Keychain and out of encrypted backups. Applied on both the
+        // SecItemUpdate (attributes) and SecItemAdd (merged into `insert`) paths.
         let attributes: [String: Any] = [
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
         let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         switch updateStatus {

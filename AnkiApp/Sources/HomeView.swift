@@ -51,14 +51,17 @@ struct HomeView: View {
         }
         .task {
             store.boot()
+            #if DEBUG
+            // Launch-argument automation hooks for UI tests / screenshots.
+            // Compiled only into debug builds; release ships none of this.
             if ProcessInfo.processInfo.arguments.contains("-startInReview") {
                 goReview = true
             }
-            // Automation hooks (see AnkiStore.autoLoginAndSyncIfRequested).
             if UserDefaults.standard.bool(forKey: "showLogin") {
                 store.showLogin = true
             }
             store.autoLoginAndSyncIfRequested()
+            #endif
         }
         .onChange(of: goReview) { presented in
             // Returning from the reviewer: refresh per-deck counts.

@@ -266,10 +266,11 @@ final class AnkiStore: ObservableObject {
         Task { await sync() }
     }
 
-    /// Testing/automation hook (mirrors the existing `-startInReview` launch
+    #if DEBUG
+    /// Debug-only testing/automation hook (mirrors the `-startInReview` launch
     /// argument): when launched with `-autoSync 1 -syncUser <u> -syncPass <p>
     /// [-syncServer <url>]`, log in and sync automatically so the flow can be
-    /// driven and screenshotted from `simctl`. No-op in normal use.
+    /// driven and screenshotted from `simctl`. Excluded from release builds.
     func autoLoginAndSyncIfRequested() {
         let defaults = UserDefaults.standard
         guard defaults.bool(forKey: "autoSync"),
@@ -285,6 +286,7 @@ final class AnkiStore: ObservableObject {
             if loggedIn { await sync() }
         }
     }
+    #endif
 
     /// Runs a collection sync followed by a media sync, cloning AnkiDroid's
     /// `handleNormalSync`: a normal collection sync, then branching on the

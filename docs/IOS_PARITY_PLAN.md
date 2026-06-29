@@ -59,3 +59,20 @@ MCATKit (separate module, depends on AnkiKit)  ->  exam config + 3 scores + cove
 
 ## Done so far
 - Engine bridge (AnkiCore + AnkiKit), host smoke test, iOS app running a basic review loop on the simulator.
+
+## Known issues
+- **Sync (T1.3) — verified path:** full collection sync is verified two-way and
+  no-loss against the canonical Anki sync server (self-hosted `anki-sync-server`),
+  including media sync, normal/incremental sync, and the full-sync upload/download
+  conflict flow. AnkiWeb **login** works as well.
+- **AnkiWeb full-UPLOAD is currently broken (HTTP 400, masked):** a full upload to
+  AnkiWeb fails, surfaced to us as `"missing original size"`. Root cause is in the
+  engine's HTTP layer, not our Swift code: `rslib`'s `io_monitor` reads the
+  response's size header *before* checking the HTTP status, so when AnkiWeb returns
+  a real `400`, the missing-size read throws first and masks the actual status/body.
+  Most likely engine-vs-AnkiWeb version skew — our engine is bleeding-edge
+  `v26.05`, ahead of what AnkiWeb's endpoint currently expects.
+- **Deferred:** unmask the underlying status and fix during the dedicated
+  Rust-engine-change phase (the `rslib` work already scheduled post-parity).
+  Until then, **self-hosted sync is the verified, supported path; AnkiWeb is
+  best-effort** (login + incremental sync may work; first-time full upload may not).
