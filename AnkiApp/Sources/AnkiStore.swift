@@ -80,6 +80,10 @@ final class AnkiStore: ObservableObject {
     private var currentCard: Anki_Scheduler_QueuedCards.QueuedCard?
     private var cardShownAt = Date()
 
+    /// The card currently shown in the reviewer, if any — used to open Card Info
+    /// from the reviewer's toolbar.
+    var currentCardID: Int64? { currentCard?.card.id }
+
     /// Directory holding the collection and its media (the app's Documents).
     private var documentsURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -292,6 +296,103 @@ final class AnkiStore: ObservableObject {
     func statsSummary(period: StatsPeriod) async throws -> StatsSummary {
         guard let backend else { throw NoteEditorError.collectionNotReady }
         return try await runDetached { try backend.statsSummary(period: period) }
+    }
+
+    // MARK: - Card Info
+
+    /// Loads a single card's statistics for the Card Info screen, off the main
+    /// actor (the engine gathers the card's revlog). Mirrors how AnkiDroid's Card
+    /// Info screen reads `col.cardStats(cid)`. Throws so the view can surface a
+    /// clear message.
+    func cardInfo(cardID: Int64) async throws -> CardInfo {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        return try await runDetached { try backend.cardInfo(cardID: cardID) }
+    }
+
+    /// The id of the first card in the collection (collection order), or nil if
+    /// there are none. Used by the debug screenshot hook to open Card Info.
+    func firstCardID() async -> Int64? {
+        guard let backend else { return nil }
+        return (try? await runDetached { try backend.searchCards(query: "") })?.first
+    }
+
+    /// The note id behind the first card in the collection, or nil if there are
+    /// none. Used by the debug screenshot hook to open Change Note Type.
+    func firstNoteID() async -> Int64? {
+        guard let backend, let cardID = await firstCardID() else { return nil }
+        return (try? await runDetached { try backend.getCard(cardID: cardID) })?.noteID
+    }
+
+    // MARK: - Change Note Type
+
+    /// The notetype id behind a note (the "old" type when changing it). Returns
+    /// nil if the note can't be read.
+    func notetypeID(forNote noteID: Int64) -> Int64? {
+        guard let backend else { return nil }
+        return (try? backend.getNote(noteID: noteID))?.notetypeID
+    }
+
+    /// Computes the default field/template mapping for moving notes from one
+    /// notetype to another, for the change-notetype mapping UI. Throws so the
+    /// view can surface a clear message.
+    func changeNotetypeInfo(oldNotetypeID: Int64, newNotetypeID: Int64) throws -> ChangeNotetypeInfo {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        return try backend.changeNotetypeInfo(oldNotetypeID: oldNotetypeID, newNotetypeID: newNotetypeID)
+    }
+
+    /// Applies a notetype change to the given notes using the chosen mapping,
+    /// then refreshes derived state (cards may be added/removed). Throws so the
+    /// view can surface a clear message.
+    func changeNotetype(
+        noteIDs: [Int64], info: ChangeNotetypeInfo,
+        fieldMap: [Int?], templateMap: [Int?]
+    ) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try backend.changeNotetype(noteIDs: noteIDs, info: info, fieldMap: fieldMap, templateMap: templateMap)
+        refreshDecks()
+        refreshUndo()
+    }
+
+    // MARK: - Filtered Decks
+
+    /// Creates a filtered deck from a search query / limit / order and builds it,
+    /// then refreshes the deck list so it appears. The engine selects the new
+    /// deck as current, so study pulls from it next. Throws so the caller can
+    /// surface a clear message (e.g. an empty match). Clone of AnkiDroid's
+    /// create-filtered-deck (custom study) flow.
+    @discardableResult
+    func createFilteredDeck(
+        name: String, search: String, limit: Int,
+        order: FilteredDeckOrder, reschedule: Bool
+    ) throws -> FilteredDeckResult {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let result = try backend.createFilteredDeck(
+            name: name, search: search, limit: limit, order: order, reschedule: reschedule
+        )
+        currentDeckID = result.deckID
+        refreshDecks()
+        refreshUndo()
+        return result
+    }
+
+    /// Re-gathers a filtered deck's cards from its search, returning the count.
+    /// Clone of AnkiDroid's "Rebuild" custom-study action.
+    @discardableResult
+    func rebuildFilteredDeck(deckID: Int64) throws -> Int {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let count = try backend.rebuildFilteredDeck(deckID: deckID)
+        refreshDecks()
+        refreshUndo()
+        return count
+    }
+
+    /// Empties a filtered deck (returns its cards to their home decks). Clone of
+    /// AnkiDroid's "Empty" custom-study action.
+    func emptyFilteredDeck(deckID: Int64) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try backend.emptyFilteredDeck(deckID: deckID)
+        refreshDecks()
+        refreshUndo()
     }
 
     private func seedIfNeeded(_ backend: Backend) throws {

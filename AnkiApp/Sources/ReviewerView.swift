@@ -148,6 +148,7 @@ struct CardWebView: UIViewRepresentable {
 struct ReviewerView: View {
     @ObservedObject var store: AnkiStore
     @Environment(\.colorScheme) private var colorScheme
+    @State private var infoCardID: Int64?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -190,6 +191,15 @@ struct ReviewerView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    infoCardID = store.currentCardID
+                } label: {
+                    Label("Card Info", systemImage: "info.circle")
+                }
+                .disabled(store.currentCardID == nil || store.reviewDone)
+                .accessibilityLabel("Card info")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button(action: store.undo) {
                     Label("Undo", systemImage: "arrow.uturn.backward")
                 }
@@ -197,7 +207,19 @@ struct ReviewerView: View {
                 .accessibilityLabel(store.undoName.isEmpty ? "Undo" : "Undo \(store.undoName)")
             }
         }
+        .sheet(item: infoSheetBinding) { target in
+            CardInfoView(store: store, cardID: target.id)
+        }
         .onAppear { store.startReview() }
+    }
+
+    /// Drives the Card Info sheet from the optional card id (wrapped so
+    /// `.sheet(item:)` can present it).
+    private var infoSheetBinding: Binding<CardInfoTarget?> {
+        Binding(
+            get: { infoCardID.map(CardInfoTarget.init) },
+            set: { if $0 == nil { infoCardID = nil } }
+        )
     }
 
     /// One answer button: the projected interval (smaller) above the ease name,

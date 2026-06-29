@@ -24,6 +24,14 @@ struct HomeView: View {
     @State private var optionsTarget: DeckTreeEntry?
     @State private var deckActionError: String?
 
+    // Filtered decks (T3.3): create from Home, plus rebuild/empty per filtered
+    // deck — Anki's custom-study essentials.
+    @State private var showCreateFilteredDeck = false
+    @State private var deckActionResult: String?
+    // Card Info / Change Note Type (T3.3) screenshot/automation hooks.
+    @State private var cardInfoTarget: CardInfoTarget?
+    @State private var changeNotetypeNoteID: HomeNoteTarget?
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -96,6 +104,21 @@ struct HomeView: View {
                     store.refreshDecks()
                 }
             }
+            // Create filtered deck — clone of AnkiDroid's custom-study / filtered
+            // deck builder.
+            .sheet(isPresented: $showCreateFilteredDeck) {
+                FilteredDeckView(store: store) { _ in
+                    store.refreshDecks()
+                }
+            }
+            .sheet(item: $cardInfoTarget) { target in
+                CardInfoView(store: store, cardID: target.id)
+            }
+            .sheet(item: $changeNotetypeNoteID) { target in
+                ChangeNotetypeView(store: store, noteID: target.id) {
+                    store.refreshDecks()
+                }
+            }
             // Create deck — clone of AnkiDroid's CreateDeckDialog text prompt.
             .alert("New Deck", isPresented: $showCreateDeck) {
                 TextField("Deck name", text: $deckNameInput)
@@ -130,6 +153,11 @@ struct HomeView: View {
                 Button("OK", role: .cancel) { deckActionError = nil }
             } message: {
                 Text(deckActionError ?? "")
+            }
+            .alert("Filtered deck", isPresented: deckResultPresented) {
+                Button("OK", role: .cancel) { deckActionResult = nil }
+            } message: {
+                Text(deckActionResult ?? "")
             }
         }
         .sheet(isPresented: $store.showLogin) {
@@ -184,6 +212,21 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInDeckOptions") {
                 optionsTarget = store.decks.first
             }
+            if ProcessInfo.processInfo.arguments.contains("-startInCreateFilteredDeck") {
+                showCreateFilteredDeck = true
+            }
+            // Open Card Info for the first card (used for the T3.3 screenshot).
+            if ProcessInfo.processInfo.arguments.contains("-startInCardInfo") {
+                if let cardID = await store.firstCardID() {
+                    cardInfoTarget = CardInfoTarget(id: cardID)
+                }
+            }
+            // Open Change Note Type for the first note (T3.3 verification hook).
+            if ProcessInfo.processInfo.arguments.contains("-startInChangeNotetype") {
+                if let noteID = await store.firstNoteID() {
+                    changeNotetypeNoteID = HomeNoteTarget(id: noteID)
+                }
+            }
             if UserDefaults.standard.bool(forKey: "showLogin") {
                 store.showLogin = true
             }
@@ -209,6 +252,7 @@ struct HomeView: View {
                 VStack(spacing: DS.Spacing.l) {
                     deckList
                     newDeckButton
+                    newFilteredDeckButton
                 }
                 .padding(DS.Spacing.l)
             }
@@ -256,7 +300,20 @@ struct HomeView: View {
             Label("Rename", systemImage: "pencil")
         }
 
-        if !deck.filtered {
+        if deck.filtered {
+            // Filtered decks get Anki's custom-study rebuild/empty instead of the
+            // per-day limit options (which only apply to normal decks).
+            Button {
+                rebuildFiltered(deck)
+            } label: {
+                Label("Rebuild", systemImage: "arrow.clockwise")
+            }
+            Button {
+                emptyFiltered(deck)
+            } label: {
+                Label("Empty", systemImage: "tray")
+            }
+        } else {
             Button {
                 optionsTarget = deck
             } label: {
@@ -296,6 +353,30 @@ struct HomeView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("New deck")
+    }
+
+    /// Full-width "New Filtered Deck" action (Anki's custom study), kept beside
+    /// "New Deck" and out of the busy toolbar.
+    private var newFilteredDeckButton: some View {
+        Button {
+            showCreateFilteredDeck = true
+        } label: {
+            Label("New Filtered Deck", systemImage: "line.3.horizontal.decrease.circle")
+                .font(DS.Typography.body.weight(.semibold))
+                .foregroundStyle(DS.good)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: DS.minTapTarget)
+                .background(
+                    DS.surface,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                        .strokeBorder(DS.separator, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("New filtered deck")
     }
 
     private var emptyState: some View {
@@ -339,6 +420,10 @@ struct HomeView: View {
         Binding(get: { deckActionError != nil }, set: { if !$0 { deckActionError = nil } })
     }
 
+    private var deckResultPresented: Binding<Bool> {
+        Binding(get: { deckActionResult != nil }, set: { if !$0 { deckActionResult = nil } })
+    }
+
     private func beginCreateDeck() {
         deckNameInput = ""
         showCreateDeck = true
@@ -370,6 +455,26 @@ struct HomeView: View {
         runDeckAction { try store.deleteDeck(id: deck.id) }
     }
 
+    /// Re-gathers a filtered deck's cards, reporting the count (Anki's "Rebuild").
+    private func rebuildFiltered(_ deck: DeckTreeEntry) {
+        do {
+            let count = try store.rebuildFilteredDeck(deckID: deck.id)
+            deckActionResult = "“\(deck.name)” now holds ^[\(count) card](inflect: true)."
+        } catch {
+            deckActionError = describe(error)
+        }
+    }
+
+    /// Returns a filtered deck's cards to their home decks (Anki's "Empty").
+    private func emptyFiltered(_ deck: DeckTreeEntry) {
+        do {
+            try store.emptyFilteredDeck(deckID: deck.id)
+            deckActionResult = "“\(deck.name)” was emptied; its cards returned to their decks."
+        } catch {
+            deckActionError = describe(error)
+        }
+    }
+
     /// Runs a deck mutation, surfacing a readable message on failure (the store
     /// already refreshes the deck list on success).
     private func runDeckAction(_ work: () throws -> Void) {
@@ -390,6 +495,12 @@ struct HomeView: View {
         }
         return error.localizedDescription
     }
+}
+
+/// Identifiable wrapper so the Change Note Type sheet can be driven by
+/// `.sheet(item:)` from an optional note id (used by the verification hook).
+private struct HomeNoteTarget: Identifiable {
+    let id: Int64
 }
 
 /// The Home sync control, cloning AnkiDroid's DeckPicker sync action.
