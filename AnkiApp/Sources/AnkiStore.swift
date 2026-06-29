@@ -270,6 +270,18 @@ final class AnkiStore: ObservableObject {
         refreshUndo()
     }
 
+    // MARK: - Statistics
+
+    /// Loads the stats summary for the whole collection over the given period,
+    /// off the main actor (the engine gathers and aggregates the revlog, which
+    /// can be heavy on large collections). Mirrors how AnkiDroid's Statistics
+    /// screen reads `col.graphs(...)`; here we render the data natively instead
+    /// of in a WebView. Throws so the Stats screen can surface a clear message.
+    func statsSummary(period: StatsPeriod) async throws -> StatsSummary {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        return try await runDetached { try backend.statsSummary(period: period) }
+    }
+
     private func seedIfNeeded(_ backend: Backend) throws {
         let key = "seeded_v1"
         if UserDefaults.standard.bool(forKey: key) { return }
@@ -436,6 +448,25 @@ final class AnkiStore: ObservableObject {
             }
             if loggedIn { await sync() }
         }
+    }
+
+    /// Debug-only automation hook (mirrors the `-startInReview` launch
+    /// argument): when launched with `-studySome`, answer a handful of due cards
+    /// so the Statistics screen has real review history (Today / Reviews /
+    /// Future Due) to render in screenshots. Excluded from release builds.
+    func studySomeIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("-studySome") else { return }
+        guard let backend else { return }
+        let ratings: [Anki_Scheduler_CardAnswer.Rating] =
+            [.good, .easy, .good, .again, .good, .hard, .easy, .good]
+        for (index, rating) in ratings.enumerated() {
+            guard let card = try? backend.queuedCards().cards.first else { break }
+            try? backend.answer(
+                card: card, rating: rating, millisecondsTaken: UInt32(800 + index * 250)
+            )
+        }
+        refreshDecks()
+        refreshUndo()
     }
     #endif
 

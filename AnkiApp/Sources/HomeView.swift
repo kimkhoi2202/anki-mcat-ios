@@ -11,6 +11,7 @@ struct HomeView: View {
     @State private var goReview = false
     @State private var goSettings = false
     @State private var goBrowse = false
+    @State private var goStats = false
     @State private var showAddNote = false
 
     // Deck management (T2.3), cloning AnkiDroid's DeckPicker create-deck dialog
@@ -43,6 +44,9 @@ struct HomeView: View {
             .navigationDestination(isPresented: $goBrowse) {
                 CardBrowserView(store: store)
             }
+            .navigationDestination(isPresented: $goStats) {
+                StatsView(store: store)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     NavigationLink {
@@ -51,6 +55,14 @@ struct HomeView: View {
                         Image(systemName: "gearshape")
                     }
                     .accessibilityLabel("Settings")
+                }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        goStats = true
+                    } label: {
+                        Image(systemName: "chart.bar.xaxis")
+                    }
+                    .accessibilityLabel("Statistics")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -152,6 +164,12 @@ struct HomeView: View {
             }
             if ProcessInfo.processInfo.arguments.contains("-startInBrowser") {
                 goBrowse = true
+            }
+            // Answer a few cards first so the stats screen has real review
+            // history to show (used for the T3.1 screenshot).
+            store.studySomeIfRequested()
+            if ProcessInfo.processInfo.arguments.contains("-startInStats") {
+                goStats = true
             }
             if ProcessInfo.processInfo.arguments.contains("-startInCreateDeck") {
                 showCreateDeck = true
