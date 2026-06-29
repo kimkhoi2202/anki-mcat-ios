@@ -20,12 +20,45 @@ struct HomeView: View {
             .navigationDestination(isPresented: $goReview) {
                 ReviewerView(store: store)
             }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    SyncToolbarButton(store: store)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                SyncBanner(store: store)
+            }
+        }
+        .sheet(isPresented: $store.showLogin) {
+            LoginView(store: store)
+        }
+        .confirmationDialog(
+            "Select collection to keep",
+            isPresented: $store.pendingConflict,
+            titleVisibility: .visible
+        ) {
+            // Clone of AnkiDroid's DIALOG_SYNC_CONFLICT_RESOLUTION: the two
+            // collections diverged and can't be merged, so the user keeps one.
+            Button("Upload to server", role: .destructive) {
+                Task { await store.resolveConflict(upload: true) }
+            }
+            Button("Download from server", role: .destructive) {
+                Task { await store.resolveConflict(upload: false) }
+            }
+            Button("Cancel", role: .cancel) { store.cancelConflict() }
+        } message: {
+            Text("The collections can’t be combined.\nWhich collection do you want to keep?")
         }
         .task {
             store.boot()
             if ProcessInfo.processInfo.arguments.contains("-startInReview") {
                 goReview = true
             }
+            // Automation hooks (see AnkiStore.autoLoginAndSyncIfRequested).
+            if UserDefaults.standard.bool(forKey: "showLogin") {
+                store.showLogin = true
+            }
+            store.autoLoginAndSyncIfRequested()
         }
         .onChange(of: goReview) { presented in
             // Returning from the reviewer: refresh per-deck counts.
@@ -86,6 +119,126 @@ struct HomeView: View {
         }
         .multilineTextAlignment(.center)
         .padding(DS.Spacing.xl)
+    }
+}
+
+/// The Home sync control, cloning AnkiDroid's DeckPicker sync action.
+///
+/// When logged in a tap runs a collection + media sync; while syncing it shows a
+/// spinner and is disabled. When logged out it opens the login sheet. A context
+/// menu (long-press) shows the account and a log-out action.
+private struct SyncToolbarButton: View {
+    @ObservedObject var store: AnkiStore
+
+    var body: some View {
+        Button {
+            if store.isLoggedIn {
+                Task { await store.sync() }
+            } else {
+                store.showLogin = true
+            }
+        } label: {
+            if store.syncPhase.isActive {
+                ProgressView()
+            } else {
+                Image(systemName: store.isLoggedIn
+                    ? "arrow.triangle.2.circlepath"
+                    : "person.crop.circle.badge.plus")
+            }
+        }
+        .disabled(store.syncPhase.isActive)
+        .accessibilityLabel(store.isLoggedIn ? "Sync now" : "Log in to sync")
+        .contextMenu {
+            if store.isLoggedIn {
+                Section("Signed in as \(store.syncUsername)") {
+                    Button(role: .destructive) {
+                        store.logout()
+                    } label: {
+                        Label("Log out", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A floating bottom banner reflecting `AnkiStore.syncPhase`: an indeterminate
+/// spinner while the collection syncs, live counts during media sync, and a
+/// tappable success/error result. Success auto-dismisses; an auth failure offers
+/// a shortcut back to login.
+private struct SyncBanner: View {
+    @ObservedObject var store: AnkiStore
+
+    var body: some View {
+        content
+            .frame(maxWidth: 520)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, DS.Spacing.l)
+            .padding(.bottom, DS.Spacing.m)
+            .animation(.easeInOut(duration: 0.2), value: store.syncPhase)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch store.syncPhase {
+        case .idle:
+            EmptyView()
+        case .syncing(let text):
+            progressCard(title: text.isEmpty ? "Syncing…" : text, detail: nil)
+        case .mediaSyncing(let text):
+            progressCard(title: "Syncing media…", detail: text.isEmpty ? nil : text)
+        case .success(let message):
+            resultCard(icon: "checkmark.circle.fill", tint: DS.easy, message: message)
+                .onTapGesture { store.dismissSyncResult() }
+                .task(id: message) {
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    store.dismissSyncResult()
+                }
+        case .failed(let failure):
+            resultCard(icon: "exclamationmark.triangle.fill", tint: DS.again, message: failure.message)
+                .onTapGesture { store.dismissSyncResult() }
+                .overlay(alignment: .trailing) {
+                    if failure.kind == .auth {
+                        Button("Log in") { store.showLogin = true }
+                            .font(DS.Typography.caption.weight(.semibold))
+                            .foregroundStyle(DS.accent)
+                            .padding(.trailing, DS.Spacing.m)
+                    }
+                }
+        }
+    }
+
+    private func progressCard(title: String, detail: String?) -> some View {
+        HStack(spacing: DS.Spacing.m) {
+            ProgressView()
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+                if let detail {
+                    Text(detail)
+                        .font(DS.Typography.caption)
+                        .foregroundStyle(DS.textSecondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .dsCard(padding: DS.Spacing.m)
+    }
+
+    private func resultCard(icon: String, tint: Color, message: String) -> some View {
+        HStack(spacing: DS.Spacing.m) {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+            Text(message)
+                .font(DS.Typography.body)
+                .foregroundStyle(DS.textPrimary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .dsCard(padding: DS.Spacing.m)
+        .accessibilityElement(children: .combine)
     }
 }
 
