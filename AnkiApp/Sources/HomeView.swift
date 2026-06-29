@@ -12,6 +12,7 @@ struct HomeView: View {
     @State private var goSettings = false
     @State private var goBrowse = false
     @State private var goStats = false
+    @State private var goImportExport = false
     @State private var showAddNote = false
 
     // Deck management (T2.3), cloning AnkiDroid's DeckPicker create-deck dialog
@@ -46,6 +47,9 @@ struct HomeView: View {
             }
             .navigationDestination(isPresented: $goStats) {
                 StatsView(store: store)
+            }
+            .navigationDestination(isPresented: $goImportExport) {
+                ImportExportView(store: store)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -158,6 +162,9 @@ struct HomeView: View {
             }
             if ProcessInfo.processInfo.arguments.contains("-startInSettings") {
                 goSettings = true
+            }
+            if ProcessInfo.processInfo.arguments.contains("-startInImportExport") {
+                goImportExport = true
             }
             if ProcessInfo.processInfo.arguments.contains("-startInAddNote") {
                 showAddNote = true

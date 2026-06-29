@@ -80,11 +80,18 @@ final class AnkiStore: ObservableObject {
     private var currentCard: Anki_Scheduler_QueuedCards.QueuedCard?
     private var cardShownAt = Date()
 
+    /// Directory holding the collection and its media (the app's Documents).
+    private var documentsURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+    /// The collection database file (`collection.anki2`).
+    private var collectionURL: URL { documentsURL.appendingPathComponent("collection.anki2") }
+    /// The media database file (`collection.media.db2`).
+    private var mediaDBURL: URL { documentsURL.appendingPathComponent("collection.media.db2") }
     /// Media folder backing `<img src="...">` resolution in the reviewer.
     /// Matches the folder passed to `openCollection` in `boot()`.
     var mediaFolderURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("collection.media")
+        documentsURL.appendingPathComponent("collection.media")
     }
 
     func boot() {
@@ -93,14 +100,7 @@ final class AnkiStore: ObservableObject {
         do {
             let backend = try Backend()
             self.backend = backend
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let mediaFolder = mediaFolderURL
-            try? FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
-            try backend.openCollection(
-                path: docs.appendingPathComponent("collection.anki2").path,
-                mediaFolder: mediaFolder.path,
-                mediaDB: docs.appendingPathComponent("collection.media.db2").path
-            )
+            try openDefaultCollection(backend)
             try seedIfNeeded(backend)
             refreshDecks()
             refreshUndo()
@@ -110,6 +110,18 @@ final class AnkiStore: ObservableObject {
         } catch {
             status = "Error: \(error)"
         }
+    }
+
+    /// Opens (or reopens) the collection at the app's standard Documents paths.
+    /// Used at launch and to reopen after a `.colpkg` import/export, which close
+    /// the collection around replacing/reading the file.
+    private func openDefaultCollection(_ backend: Backend) throws {
+        try? FileManager.default.createDirectory(at: mediaFolderURL, withIntermediateDirectories: true)
+        try backend.openCollection(
+            path: collectionURL.path,
+            mediaFolder: mediaFolderURL.path,
+            mediaDB: mediaDBURL.path
+        )
     }
 
     /// Reload the deck list and its counts (e.g. after returning from review).
@@ -705,6 +717,141 @@ final class AnkiStore: ObservableObject {
         loadPreferences()
     }
 
+    // MARK: - Import / Export
+
+    /// Imports a picked `.apkg`/`.colpkg`. Cloning AnkiDroid's import flow:
+    /// a `.colpkg` (or the conventional `collection.apkg`) replaces the whole
+    /// collection — which requires the collection closed, then reopened — while
+    /// any other `.apkg` imports its notes into the open collection.
+    ///
+    /// The document picker hands back a security-scoped URL that the engine may
+    /// not be able to read directly, so we copy it into our temp directory first
+    /// (mirroring AnkiDroid copying the import into its cache). Derived UI state
+    /// is refreshed on success.
+    func importPackage(from url: URL) async throws -> ImportOutcome {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let isColpkg = Self.isCollectionPackage(url.lastPathComponent)
+        let localURL = try copyIntoTemp(url)
+        defer { try? FileManager.default.removeItem(at: localURL) }
+
+        let packagePath = localURL.path
+        let colPath = collectionURL.path
+        let mediaFolder = mediaFolderURL.path
+        let mediaDB = mediaDBURL.path
+
+        let outcome: ImportOutcome
+        if isColpkg {
+            try await runDetached {
+                // .colpkg replaces the collection file: close, import, reopen.
+                try backend.closeCollection()
+                do {
+                    try backend.importCollectionPackage(
+                        colPath: colPath, backupPath: packagePath,
+                        mediaFolder: mediaFolder, mediaDB: mediaDB
+                    )
+                } catch {
+                    // Import failed before swapping the file in; reopen the
+                    // unchanged collection so the app isn't left closed.
+                    try? backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
+                    throw error
+                }
+                try backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
+            }
+            // The replaced collection may not contain the previously-current deck.
+            currentDeckID = 1
+            outcome = .collectionReplaced
+        } else {
+            let result = try await runDetached { try backend.importAnkiPackage(path: packagePath) }
+            outcome = .deckPackage(result)
+        }
+        refreshAfterImport()
+        return outcome
+    }
+
+    /// Exports a deck (and its subdecks) to a temporary `.apkg`, returning the
+    /// file URL for the share sheet. Includes scheduling so the deck transfers
+    /// with its progress; `includeMedia` carries referenced media.
+    func exportDeck(id: Int64, name: String, includeMedia: Bool) async throws -> URL {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let outURL = Self.exportFileURL(name: name, ext: "apkg")
+        let path = outURL.path
+        _ = try await runDetached {
+            try backend.exportAnkiPackage(deckID: id, outPath: path, withMedia: includeMedia)
+        }
+        return outURL
+    }
+
+    /// Exports the whole collection to a temporary `.colpkg`, returning the file
+    /// URL for the share sheet. The core takes the collection to export it,
+    /// leaving it closed, so we reopen afterwards (AnkiDroid's `reopen()`).
+    func exportWholeCollection(includeMedia: Bool) async throws -> URL {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let outURL = Self.exportFileURL(name: "collection", ext: "colpkg")
+        let path = outURL.path
+        let colPath = collectionURL.path
+        let mediaFolder = mediaFolderURL.path
+        let mediaDB = mediaDBURL.path
+        try await runDetached {
+            do {
+                try backend.exportCollectionPackage(outPath: path, includeMedia: includeMedia, legacy: false)
+            } catch {
+                try? backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
+                throw error
+            }
+            try backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
+        }
+        return outURL
+    }
+
+    /// Clone of AnkiDroid's `ImportUtils.isCollectionPackage`: a `.colpkg`, or the
+    /// conventional whole-collection export name `collection.apkg`, is a full
+    /// collection import; any other `.apkg` is a note/deck import.
+    static func isCollectionPackage(_ filename: String) -> Bool {
+        let lower = filename.lowercased()
+        return lower.hasSuffix(".colpkg") || lower == "collection.apkg"
+    }
+
+    /// Copies a (possibly security-scoped) picked file into the app's temp dir so
+    /// the engine can read it by path, preserving the extension. The caller is
+    /// responsible for removing the returned file.
+    private func copyIntoTemp(_ url: URL) throws -> URL {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let ext = url.pathExtension.isEmpty ? "apkg" : url.pathExtension
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(ext)
+        try? FileManager.default.removeItem(at: dest)
+        try FileManager.default.copyItem(at: url, to: dest)
+        return dest
+    }
+
+    /// A temp URL for a produced export, named after the deck/collection so the
+    /// share sheet offers a sensible filename. Path-unsafe characters in deck
+    /// names (`/`, `:`, the `::` subdeck separator) are flattened.
+    private static func exportFileURL(name: String, ext: String) -> URL {
+        let cleaned = name
+            .replacingOccurrences(of: "::", with: "-")
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = cleaned.isEmpty ? "Export" : cleaned
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("exports", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(base).appendingPathExtension(ext)
+        try? FileManager.default.removeItem(at: url)
+        return url
+    }
+
+    /// Refreshes derived UI state after an import (the collection's decks, undo
+    /// availability, and preferences may all have changed — especially after a
+    /// whole-collection replace).
+    private func refreshAfterImport() {
+        refreshDecks()
+        refreshUndo()
+        loadPreferences()
+    }
+
     /// Runs a blocking backend call off the main actor so the UI stays
     /// responsive, then resumes on the main actor. Safe because `Backend` is
     /// `Sendable` (the Rust core is internally synchronized).
@@ -713,6 +860,14 @@ final class AnkiStore: ObservableObject {
     ) async throws -> T {
         try await Task.detached(priority: .userInitiated, operation: work).value
     }
+}
+
+/// The result of importing a package, for the confirmation shown to the user.
+enum ImportOutcome: Equatable {
+    /// A `.apkg` was imported into the open collection (with its note summary).
+    case deckPackage(ImportResult)
+    /// A `.colpkg` replaced the entire collection.
+    case collectionReplaced
 }
 
 /// Errors surfaced by the note editor's save path before they reach the engine.
