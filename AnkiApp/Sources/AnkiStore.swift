@@ -182,6 +182,45 @@ final class AnkiStore: ObservableObject {
         refreshUndo()
     }
 
+    // MARK: - Card Browser
+
+    /// Runs a Card Browser search and builds its display rows off the main actor
+    /// (the per-card render can be heavy for large result sets), then returns
+    /// them to the caller on the main actor. Throws so the browser can show an
+    /// invalid-search / not-ready message; an empty result is a normal empty list.
+    func browserRows(query: String) async throws -> [CardBrowserRow] {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        return try await runDetached { try backend.cardBrowserRows(query: query) }
+    }
+
+    /// Suspends or unsuspends the given cards, then refreshes derived state.
+    /// Suspended cards leave the study queue, so deck counts are refreshed too.
+    func setCardsSuspended(_ cardIDs: [Int64], suspended: Bool) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        if suspended {
+            _ = try backend.suspendCards(cardIDs: cardIDs)
+        } else {
+            try backend.unsuspendCards(cardIDs: cardIDs)
+        }
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Sets (1...7) or clears (0) the flag color on the given cards.
+    func setFlag(_ cardIDs: [Int64], flag: Int) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try backend.setFlag(cardIDs: cardIDs, flag: flag)
+        refreshUndo()
+    }
+
+    /// Deletes the notes behind the given cards, then refreshes derived state.
+    func deleteNotes(forCards cardIDs: [Int64]) throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try backend.removeNotesForCards(cardIDs: cardIDs)
+        refreshDecks()
+        refreshUndo()
+    }
+
     private func seedIfNeeded(_ backend: Backend) throws {
         let key = "seeded_v1"
         if UserDefaults.standard.bool(forKey: key) { return }
