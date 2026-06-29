@@ -252,4 +252,96 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(note.notetypeID, notetypeID, "editing fields must not change the notetype")
         XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "editing a note should be undoable")
     }
+
+    // MARK: - Card Browser
+
+    /// `searchCards` resolves Anki search syntax to card ids: an empty query
+    /// returns every card, and a `deck:`/field query narrows the results — the
+    /// search powering the browser's results list.
+    func testSearchCardsResolvesQueryToCardIDs() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Apple", "Fruit"], deckID: 1)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Beta", "Greek"], deckID: 1)
+
+        let all = try backend.searchCards(query: "")
+        XCTAssertEqual(all.count, 2, "empty query should return every card")
+
+        let byDeck = try backend.searchCards(query: "deck:Default")
+        XCTAssertEqual(byDeck.count, 2, "both cards live in the Default deck")
+
+        let byField = try backend.searchCards(query: "Apple")
+        XCTAssertEqual(byField.count, 1, "only one card contains 'Apple'")
+
+        // An invalid search string (a misplaced `and` operator) surfaces as a
+        // backend error, which the browser shows as an invalid-search message.
+        XCTAssertThrowsError(try backend.searchCards(query: "and")) { error in
+            guard case AnkiError.backendError = error else {
+                return XCTFail("expected a backend error for an invalid query")
+            }
+        }
+    }
+
+    /// `cardBrowserRow` assembles the display row the list renders: the
+    /// engine-stripped question/answer snippet, the deck name, the owning note id,
+    /// and default (unflagged, unsuspended) state for a fresh card.
+    func testCardBrowserRowReturnsSnippetDeckAndState() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Front Q", "Back A"], deckID: 1)
+
+        let rows = try backend.cardBrowserRows(query: "")
+        let row = try XCTUnwrap(rows.first, "the added card should produce a browser row")
+        XCTAssertEqual(row.noteID, nid, "row should point back to its note")
+        XCTAssertTrue(row.question.contains("Front Q"), "question snippet should show the front")
+        XCTAssertTrue(row.answer.contains("Back A"), "answer snippet should show the back")
+        XCTAssertEqual(row.deck, "Default", "card lives in the Default deck")
+        XCTAssertEqual(row.flag, 0, "a new card has no flag")
+        XCTAssertFalse(row.suspended, "a new card is not suspended")
+    }
+
+    /// Suspending then unsuspending a card flips its `suspended` state (read back
+    /// through the browser row), and suspending is undoable — matching
+    /// AnkiDroid's browser suspend/unsuspend toggle.
+    func testSuspendAndUnsuspendCards() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "").first)
+
+        let suspended = try backend.suspendCards(cardIDs: [cardID])
+        XCTAssertEqual(suspended, 1, "one card should be suspended")
+        XCTAssertTrue(try backend.cardBrowserRow(cardID: cardID).suspended, "card should read as suspended")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "suspending should be undoable")
+
+        try backend.unsuspendCards(cardIDs: [cardID])
+        XCTAssertFalse(try backend.cardBrowserRow(cardID: cardID).suspended, "card should no longer be suspended")
+    }
+
+    /// `setFlag` sets and clears a card's flag color, visible on the browser row.
+    func testSetFlagSetsAndClears() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "").first)
+
+        XCTAssertEqual(try backend.setFlag(cardIDs: [cardID], flag: 1), 1, "one card flagged")
+        XCTAssertEqual(try backend.cardBrowserRow(cardID: cardID).flag, 1, "flag should be red (1)")
+
+        _ = try backend.setFlag(cardIDs: [cardID], flag: 0)
+        XCTAssertEqual(try backend.cardBrowserRow(cardID: cardID).flag, 0, "flag should be cleared")
+    }
+
+    /// `removeNotesForCards` deletes the notes behind the given cards, so a
+    /// follow-up search no longer finds them — the browser's delete action.
+    func testRemoveNotesForCardsDeletes() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Doomed", "Card"], deckID: 1)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "").first)
+
+        let removed = try backend.removeNotesForCards(cardIDs: [cardID])
+        XCTAssertEqual(removed, 1, "one note should be removed")
+        XCTAssertTrue(try backend.searchCards(query: "").isEmpty, "the card should be gone after delete")
+    }
 }

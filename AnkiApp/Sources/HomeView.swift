@@ -10,6 +10,7 @@ struct HomeView: View {
     @StateObject private var store = AnkiStore()
     @State private var goReview = false
     @State private var goSettings = false
+    @State private var goBrowse = false
     @State private var showAddNote = false
 
     var body: some View {
@@ -30,6 +31,9 @@ struct HomeView: View {
             .navigationDestination(isPresented: $goSettings) {
                 SettingsView(store: store)
             }
+            .navigationDestination(isPresented: $goBrowse) {
+                CardBrowserView(store: store)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     NavigationLink {
@@ -38,6 +42,14 @@ struct HomeView: View {
                         Image(systemName: "gearshape")
                     }
                     .accessibilityLabel("Settings")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        goBrowse = true
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                    .accessibilityLabel("Browse cards")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -89,6 +101,9 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInAddNote") {
                 showAddNote = true
             }
+            if ProcessInfo.processInfo.arguments.contains("-startInBrowser") {
+                goBrowse = true
+            }
             if UserDefaults.standard.bool(forKey: "showLogin") {
                 store.showLogin = true
             }
@@ -97,6 +112,10 @@ struct HomeView: View {
         }
         .onChange(of: goReview) { presented in
             // Returning from the reviewer: refresh per-deck counts.
+            if !presented { store.refreshDecks() }
+        }
+        .onChange(of: goBrowse) { presented in
+            // Returning from the browser: suspend/delete may have changed counts.
             if !presented { store.refreshDecks() }
         }
     }
