@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import AnkiKit
 
 @MainActor
@@ -11,12 +12,31 @@ final class AnkiStore: ObservableObject {
 
     @Published var currentQuestion = ""
     @Published var currentAnswer = ""
+    /// The current card's notetype CSS, injected into the reviewer WebView.
+    @Published var currentCSS = ""
+    /// Template ordinal of the current card (drives the `cardN` body class).
+    @Published var currentOrdinal = 0
+    /// Projected interval labels for the four answer buttons, in order
+    /// `[again, hard, good, easy]`. Empty until a card is loaded.
+    @Published var currentIntervals: [String] = []
     @Published var showingAnswer = false
     @Published var reviewDone = false
+
+    /// Whether the backend has an action to undo (drives the Undo control).
+    @Published var canUndo = false
+    /// Localized name of the next undoable action (e.g. "Answer Card").
+    @Published var undoName = ""
 
     private var backend: Backend?
     private var currentCard: Anki_Scheduler_QueuedCards.QueuedCard?
     private var cardShownAt = Date()
+
+    /// Media folder backing `<img src="...">` resolution in the reviewer.
+    /// Matches the folder passed to `openCollection` in `boot()`.
+    var mediaFolderURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("collection.media")
+    }
 
     func boot() {
         guard backend == nil else { return }
@@ -25,15 +45,20 @@ final class AnkiStore: ObservableObject {
             let backend = try Backend()
             self.backend = backend
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let mediaFolder = docs.appendingPathComponent("collection.media")
+            let mediaFolder = mediaFolderURL
             try? FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
             try backend.openCollection(
                 path: docs.appendingPathComponent("collection.anki2").path,
                 mediaFolder: mediaFolder.path,
                 mediaDB: docs.appendingPathComponent("collection.media.db2").path
             )
+            // Seed the image-media demo before the text cards so it surfaces
+            // first in a fresh collection, giving the reviewer something to
+            // exercise the media scheme handler with.
+            try seedMediaDemoIfNeeded(backend)
             try seedIfNeeded(backend)
             refreshDecks()
+            refreshUndo()
             status = "Engine OK"
         } catch {
             status = "Error: \(error)"
@@ -60,6 +85,8 @@ final class AnkiStore: ObservableObject {
             showingAnswer = false
             currentQuestion = ""
             currentAnswer = ""
+            currentCSS = ""
+            currentIntervals = []
             currentCard = nil
             loadNext()
         } catch {
@@ -84,6 +111,49 @@ final class AnkiStore: ObservableObject {
         UserDefaults.standard.set(true, forKey: key)
     }
 
+    /// Seeds one card that references a bundled image, plus the image itself in
+    /// the media folder, so the reviewer's `<img>` resolution (the media scheme
+    /// handler) can be verified end-to-end. Generated at runtime to avoid
+    /// committing a binary asset.
+    private func seedMediaDemoIfNeeded(_ backend: Backend) throws {
+        let key = "seeded_media_demo_v1"
+        if UserDefaults.standard.bool(forKey: key) { return }
+        guard let basic = try backend.notetypeNames().first(where: { $0.name.hasPrefix("Basic") }) else { return }
+
+        let imageName = "ankispeedrun-demo.png"
+        if let data = Self.makeDemoPNG() {
+            try? FileManager.default.createDirectory(at: mediaFolderURL, withIntermediateDirectories: true)
+            try? data.write(to: mediaFolderURL.appendingPathComponent(imageName))
+        }
+        _ = try backend.addNote(
+            notetypeID: basic.id,
+            fields: ["This image is loaded from the media folder:", "<img src=\"\(imageName)\">"],
+            deckID: 1
+        )
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    /// Renders a small PNG used by the media demo card.
+    private static func makeDemoPNG() -> Data? {
+        let size = CGSize(width: 240, height: 140)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let image = renderer.image { _ in
+            UIColor(red: 0.29, green: 0.27, blue: 0.84, alpha: 1).setFill()
+            UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 18).fill()
+            let text = "IMG"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.boldSystemFont(ofSize: 52),
+                .foregroundColor: UIColor.white,
+            ]
+            let textSize = text.size(withAttributes: attrs)
+            text.draw(
+                at: CGPoint(x: (size.width - textSize.width) / 2, y: (size.height - textSize.height) / 2),
+                withAttributes: attrs
+            )
+        }
+        return image.pngData()
+    }
+
     func startReview() {
         if currentQuestion.isEmpty && !reviewDone { loadNext() }
     }
@@ -98,14 +168,24 @@ final class AnkiStore: ObservableObject {
                 reviewDone = true
                 currentQuestion = ""
                 currentAnswer = ""
+                currentCSS = ""
+                currentIntervals = []
+                refreshUndo()
                 return
             }
             reviewDone = false
             currentCard = first
+            currentOrdinal = Int(first.card.templateIdx)
             let rendered = try backend.renderCard(cardID: first.card.id)
             currentQuestion = rendered.question
             currentAnswer = rendered.answer
+            currentCSS = rendered.css
+            // One interval label per button: [again, hard, good, easy].
+            // Ignore an unexpected shape rather than mislabeling buttons.
+            let intervals = (try? backend.describeNextStates(first.states)) ?? []
+            currentIntervals = intervals.count == 4 ? intervals : []
             cardShownAt = Date()
+            refreshUndo()
         } catch {
             status = "Review error: \(error)"
         }
@@ -118,5 +198,29 @@ final class AnkiStore: ObservableObject {
         let ms = UInt32(min(60_000, Date().timeIntervalSince(cardShownAt) * 1000))
         try? backend.answer(card: card, rating: rating, millisecondsTaken: ms)
         loadNext()
+    }
+
+    /// Reverts the last undoable action (e.g. the previous answer) and reloads
+    /// the queue so the restored card is shown again.
+    func undo() {
+        guard let backend, canUndo else { return }
+        do {
+            _ = try backend.undo()
+            loadNext()
+        } catch {
+            status = "Undo error: \(error)"
+        }
+    }
+
+    /// Refreshes `canUndo`/`undoName` from the backend's undo status.
+    private func refreshUndo() {
+        guard let backend else { return }
+        if let status = try? backend.undoStatus() {
+            undoName = status.undo
+            canUndo = !status.undo.isEmpty
+        } else {
+            undoName = ""
+            canUndo = false
+        }
     }
 }
