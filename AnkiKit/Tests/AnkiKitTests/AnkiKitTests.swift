@@ -288,22 +288,28 @@ final class AnkiKitTests: XCTestCase {
         }
     }
 
-    /// `cardBrowserRow` assembles the display row the list renders: the
-    /// engine-stripped question/answer snippet, the deck name, the owning note id,
-    /// and default (unflagged, unsuspended) state for a fresh card.
+    /// `cardBrowserRows(cardIDs:)` assembles the display rows the list renders —
+    /// the windowed page fetch: resolve ids first, then build a row per id from a
+    /// single browser-row call (state derived from the row's color). It returns
+    /// the engine-stripped question/answer snippet, the deck name, and the
+    /// default (unflagged, unsuspended) state for a fresh card.
     func testCardBrowserRowReturnsSnippetDeckAndState() throws {
         let backend = try freshCollection()
         let notetypeID = try basicNotetypeID(backend)
         let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Front Q", "Back A"], deckID: 1)
 
-        let rows = try backend.cardBrowserRows(query: "")
+        let ids = try backend.searchCards(query: "")
+        let rows = try backend.cardBrowserRows(cardIDs: ids)
         let row = try XCTUnwrap(rows.first, "the added card should produce a browser row")
-        XCTAssertEqual(row.noteID, nid, "row should point back to its note")
         XCTAssertTrue(row.question.contains("Front Q"), "question snippet should show the front")
         XCTAssertTrue(row.answer.contains("Back A"), "answer snippet should show the back")
         XCTAssertEqual(row.deck, "Default", "card lives in the Default deck")
         XCTAssertEqual(row.flag, 0, "a new card has no flag")
         XCTAssertFalse(row.suspended, "a new card is not suspended")
+        // The owning note id (used to open the editor) is resolved on demand via
+        // getCard rather than carried on every row, so verify that linkage here.
+        XCTAssertEqual(try backend.getCard(cardID: row.id).noteID, nid,
+                       "the row's card should resolve back to its note")
     }
 
     /// Suspending then unsuspending a card flips its `suspended` state (read back

@@ -1,18 +1,20 @@
 import Foundation
 import SwiftProtobuf
 
-/// One row of the Card Browser, assembled from the engine's browser-row API plus
-/// the card's own state. Decouples the SwiftUI layer from the generated protobuf
+/// One row of the Card Browser, assembled entirely from the engine's
+/// browser-row API. Decouples the SwiftUI layer from the generated protobuf
 /// (the same way `DeckTreeEntry`/`NoteForEditing` do).
 ///
 /// Mirrors AnkiDroid's CardBrowser row: a question/answer snippet, the deck name,
-/// and the per-card flag / suspended indicators.
+/// and the per-card flag / suspended indicators. Built from a single
+/// `browser_row_for_id` call (one backend call per displayed row); the owning
+/// note id isn't carried here because the browser only needs it for the rare
+/// single-row edit / change-note-type action, where it's resolved on demand
+/// (see `Backend.getCard`) rather than fetched for every displayed row.
 public struct CardBrowserRow: Identifiable, Sendable, Equatable {
     /// The card id (the browser lists one entry per card, like AnkiDroid's
     /// default cards mode).
     public let id: Int64
-    /// The note behind the card — used to open the editor and to delete.
-    public let noteID: Int64
     /// Engine-stripped question text (HTML reduced to one display line).
     public let question: String
     /// Engine-stripped answer text (with the shared question prefix removed).
@@ -21,15 +23,14 @@ public struct CardBrowserRow: Identifiable, Sendable, Equatable {
     public let deck: String
     /// Flag color, 0 = none, 1...7 = red/orange/green/blue/pink/turquoise/purple.
     public let flag: Int
-    /// Whether the card is currently suspended (queue == -1).
+    /// Whether the card is currently suspended.
     public let suspended: Bool
 
     public init(
-        id: Int64, noteID: Int64, question: String, answer: String,
+        id: Int64, question: String, answer: String,
         deck: String, flag: Int, suspended: Bool
     ) {
         self.id = id
-        self.noteID = noteID
         self.question = question
         self.answer = answer
         self.deck = deck
@@ -48,8 +49,20 @@ public extension Backend {
     /// the camelCase `Column` serializations from rslib `browser_table.rs`.
     private static var browserColumns: [String] { ["question", "answer", "deck"] }
 
-    /// The engine's suspended queue value (rslib `CardQueue::Suspended`).
-    private static var suspendedQueue: Int32 { -1 }
+    /// Anki's default browser sort: by the note's sort field, ascending. This is
+    /// the engine's own default (`"sortType": "noteFld", "sortBackwards": false`
+    /// in rslib `config/schema11.rs`), applied so the list isn't in arbitrary
+    /// creation order. A configurable tap-to-sort UI is a separate later task; an
+    /// unknown column would be ignored by the core (`Column::from_str(..)
+    /// .unwrap_or_default()`), so this is always safe.
+    private static var defaultBrowserSort: Anki_Search_SortOrder {
+        var order = Anki_Search_SortOrder()
+        var builtin = Anki_Search_SortOrder.Builtin()
+        builtin.column = "noteFld"
+        builtin.reverse = false
+        order.builtin = builtin
+        return order
+    }
 
     /// SearchService.searchCards (29, 1).
     ///
@@ -60,6 +73,19 @@ public extension Backend {
     func searchCards(query: String) throws -> [Int64] {
         var req = Anki_Search_SearchRequest()
         req.search = query
+        return try run(service: 29, method: 1, req, returning: Anki_Search_SearchResponse.self).ids
+    }
+
+    /// Resolves a Card Browser search to its matching card ids in Anki's default
+    /// browser sort order (see `defaultBrowserSort`), mirroring AnkiDroid building
+    /// its browser list with the configured sort. Returns ids only, so it stays
+    /// cheap even on very large collections — the row DATA for the cards actually
+    /// on screen is fetched lazily, a page at a time, via `cardBrowserRows(cardIDs:)`.
+    /// An invalid query throws a backend error, which the UI surfaces.
+    func browserCardIDs(query: String) throws -> [Int64] {
+        var req = Anki_Search_SearchRequest()
+        req.search = query
+        req.order = Backend.defaultBrowserSort
         return try run(service: 29, method: 1, req, returning: Anki_Search_SearchResponse.self).ids
     }
 
@@ -88,9 +114,11 @@ public extension Backend {
 
     /// CardsService.getCard (5, 0).
     ///
-    /// Used for the authoritative per-card state the row needs but the browser
-    /// row doesn't carry directly: the owning note id (for edit/delete), the flag
-    /// number, and the queue (to detect suspension).
+    /// Used to resolve a card's owning note id on demand — e.g. when the browser
+    /// opens the editor or Change Note Type for a single tapped row — and for the
+    /// reviewer's per-card needs. The browser row itself no longer needs this
+    /// (its flag/suspended state comes from the browser row's `color`), so it is
+    /// not called for every displayed row.
     func getCard(cardID: Int64) throws -> Anki_Cards_Card {
         var req = Anki_Cards_CardId()
         req.cid = cardID
@@ -119,18 +147,20 @@ public extension Backend {
         return try buildBrowserRow(cardID: cardID)
     }
 
-    /// Runs a Card Browser search and assembles its display rows: resolves the
-    /// query to card ids, sets the active columns once, then builds one row per
-    /// card. Mirrors AnkiDroid populating its CardBrowser list from browser rows.
+    /// Builds the display rows for an explicit, already-resolved page of card ids
+    /// — the Card Browser's windowed page fetch. Sets the active columns once,
+    /// then makes exactly ONE backend call per card (`browser_row_for_id`),
+    /// deriving each row's flag/suspended state from that row's `color` rather
+    /// than a second `getCard`. Only the cards currently on screen are passed in,
+    /// so this stays bounded regardless of how large the full result set is.
     ///
-    /// A card that fails to build mid-iteration (e.g. concurrently deleted) is
-    /// skipped rather than failing the whole search; a bad *query* still throws.
-    func cardBrowserRows(query: String) throws -> [CardBrowserRow] {
-        let ids = try searchCards(query: query)
+    /// A card that fails to build (e.g. concurrently deleted) is skipped rather
+    /// than failing the whole page, so the result may be shorter than `cardIDs`.
+    func cardBrowserRows(cardIDs: [Int64]) throws -> [CardBrowserRow] {
         try setActiveBrowserColumns(Backend.browserColumns)
         var rows: [CardBrowserRow] = []
-        rows.reserveCapacity(ids.count)
-        for id in ids {
+        rows.reserveCapacity(cardIDs.count)
+        for id in cardIDs {
             if let row = try? buildBrowserRow(cardID: id) {
                 rows.append(row)
             }
@@ -138,24 +168,46 @@ public extension Backend {
         return rows
     }
 
-    /// Combines the browser-row snippet (question / answer / deck text) with the
-    /// card's note id, flag, and suspended state. Assumes the active columns are
+    /// Builds one display row from a single `browser_row_for_id` call: the
+    /// question / answer / deck snippet cells plus the flag and suspended state,
+    /// both decoded from the row's `color`. Assumes the active columns are
     /// already set (`browser_row_for_id` errors otherwise).
     private func buildBrowserRow(cardID: Int64) throws -> CardBrowserRow {
         let row = try browserRow(cardID: cardID)
-        let card = try getCard(cardID: cardID)
         func cell(_ index: Int) -> String {
             index < row.cells.count ? row.cells[index].text : ""
         }
+        let state = Backend.flagAndSuspended(from: row.color)
         return CardBrowserRow(
             id: cardID,
-            noteID: card.noteID,
             question: cell(0),
             answer: cell(1),
             deck: cell(2),
-            flag: Int(card.flags),
-            suspended: card.queue == Backend.suspendedQueue
+            flag: state.flag,
+            suspended: state.suspended
         )
+    }
+
+    /// Decodes the engine's single per-row `color` into the (flag, suspended)
+    /// pair the row badges render. The core encodes ONE state per row, with the
+    /// priority flag > marked > suspended > buried (rslib
+    /// `browser_table.rs::get_row_color`); a card that is both flagged and
+    /// suspended therefore reads as flagged, matching desktop and AnkiDroid,
+    /// which likewise colour the row by this single value.
+    static func flagAndSuspended(
+        from color: Anki_Search_BrowserRow.Color
+    ) -> (flag: Int, suspended: Bool) {
+        switch color {
+        case .flagRed: return (1, false)
+        case .flagOrange: return (2, false)
+        case .flagGreen: return (3, false)
+        case .flagBlue: return (4, false)
+        case .flagPink: return (5, false)
+        case .flagTurquoise: return (6, false)
+        case .flagPurple: return (7, false)
+        case .suspended: return (0, true)
+        default: return (0, false)
+        }
     }
 
     /// SchedulerService.buryOrSuspendCards (13, 14) with mode SUSPEND. Returns

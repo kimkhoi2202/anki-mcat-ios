@@ -330,41 +330,84 @@ final class AnkiStore: ObservableObject {
 
     // MARK: - Card Browser
 
-    /// Runs a Card Browser search and builds its display rows off the main actor
-    /// (the per-card render can be heavy for large result sets), then returns
-    /// them to the caller on the main actor. Throws so the browser can show an
+    /// Resolves a Card Browser search to its matching card ids (in Anki's default
+    /// browser sort), off the main actor. Cheap even on a huge collection — it
+    /// returns ids only; the browser then fetches row DATA lazily, a page at a
+    /// time, via `browserRows(forCardIDs:)`. Throws so the browser can show an
     /// invalid-search / not-ready message; an empty result is a normal empty list.
-    func browserRows(query: String) async throws -> [CardBrowserRow] {
+    func browserCardIDs(query: String) async throws -> [Int64] {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        return try await runDetached { try backend.cardBrowserRows(query: query) }
+        return try await runDetached { try backend.browserCardIDs(query: query) }
     }
 
-    /// Suspends or unsuspends the given cards, then refreshes derived state.
-    /// Suspended cards leave the study queue, so deck counts are refreshed too.
-    func setCardsSuspended(_ cardIDs: [Int64], suspended: Bool) throws {
+    /// Builds the display rows for one page of card ids (the cards currently on
+    /// screen), off the main actor — one backend call per row. Concurrently
+    /// deleted cards are skipped, so the result may be shorter than the input. A
+    /// page-level failure (e.g. the collection isn't ready) yields an empty page
+    /// rather than throwing, so the browser simply leaves those rows as
+    /// placeholders to retry later instead of erroring the whole list.
+    func browserRows(forCardIDs cardIDs: [Int64]) async -> [CardBrowserRow] {
+        guard let backend else { return [] }
+        return (try? await runDetached { try backend.cardBrowserRows(cardIDs: cardIDs) }) ?? []
+    }
+
+    /// Resolves the note id behind a card on demand — for opening the editor or
+    /// Change Note Type from a single tapped browser row — off the main actor.
+    /// Returns nil if the card was concurrently deleted.
+    func noteID(forCard cardID: Int64) async -> Int64? {
+        guard let backend else { return nil }
+        return (try? await runDetached { try backend.getCard(cardID: cardID) })?.noteID
+    }
+
+    /// Suspends or unsuspends the given cards off the main actor, then refreshes
+    /// derived state. Suspended cards leave the study queue, so deck counts are
+    /// refreshed too.
+    func setCardsSuspended(_ cardIDs: [Int64], suspended: Bool) async throws {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        if suspended {
-            _ = try backend.suspendCards(cardIDs: cardIDs)
-        } else {
-            try backend.unsuspendCards(cardIDs: cardIDs)
+        try await runDetached {
+            if suspended {
+                _ = try backend.suspendCards(cardIDs: cardIDs)
+            } else {
+                try backend.unsuspendCards(cardIDs: cardIDs)
+            }
         }
         refreshDecks()
         refreshUndo()
     }
 
-    /// Sets (1...7) or clears (0) the flag color on the given cards.
-    func setFlag(_ cardIDs: [Int64], flag: Int) throws {
+    /// Sets (1...7) or clears (0) the flag color on the given cards, off the main
+    /// actor.
+    func setFlag(_ cardIDs: [Int64], flag: Int) async throws {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        _ = try backend.setFlag(cardIDs: cardIDs, flag: flag)
+        _ = try await runDetached { try backend.setFlag(cardIDs: cardIDs, flag: flag) }
         refreshUndo()
     }
 
-    /// Deletes the notes behind the given cards, then refreshes derived state.
-    func deleteNotes(forCards cardIDs: [Int64]) throws {
+    /// Deletes the notes behind the given cards off the main actor (a delete can
+    /// cascade to many sibling cards, so it must not block the main thread), then
+    /// refreshes derived state. Returns every card id removed — the affected
+    /// notes' cards, resolved before the delete — so the browser can drop exactly
+    /// those rows in place instead of re-running the whole search.
+    @discardableResult
+    func deleteNotes(forCards cardIDs: [Int64]) async throws -> [Int64] {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        _ = try backend.removeNotesForCards(cardIDs: cardIDs)
+        let removed = try await runDetached { () throws -> [Int64] in
+            // Resolve every card of the affected notes BEFORE deleting (a note's
+            // siblings are deleted too), so the caller can remove exactly those
+            // rows. Best-effort: fall back to the tapped cards if a lookup fails.
+            var affected = Set(cardIDs)
+            for cardID in cardIDs {
+                if let noteID = try? backend.getCard(cardID: cardID).noteID,
+                   let siblings = try? backend.searchCards(query: "nid:\(noteID)") {
+                    affected.formUnion(siblings)
+                }
+            }
+            _ = try backend.removeNotesForCards(cardIDs: cardIDs)
+            return Array(affected)
+        }
         refreshDecks()
         refreshUndo()
+        return removed
     }
 
     // MARK: - Statistics
