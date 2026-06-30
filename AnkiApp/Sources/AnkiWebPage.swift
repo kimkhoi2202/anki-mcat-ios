@@ -22,6 +22,8 @@ struct AnkiWebPage: UIViewRepresentable {
     let backend: Backend
     /// Render Anki's night theme (passed as the `#night` URL fragment).
     var nightMode: Bool = false
+    /// Called when the page asks the host to close (e.g. Deck Options after save).
+    var onClose: (() -> Void)? = nil
 
     static let scheme = "ankipage"
     static let host = "app"
@@ -46,12 +48,14 @@ struct AnkiWebPage: UIViewRepresentable {
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
+        context.coordinator.onClose = onClose
         load(into: webView)
         context.coordinator.loadedKey = loadKey
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.onClose = onClose
         // Reload if the requested page or theme changed.
         if context.coordinator.loadedKey != loadKey {
             load(into: webView)
@@ -73,6 +77,7 @@ struct AnkiWebPage: UIViewRepresentable {
     final class Coordinator: NSObject, WKURLSchemeHandler, WKScriptMessageHandlerWithReply {
         let backend: Backend
         var loadedKey: String = ""
+        var onClose: (() -> Void)?
 
         init(backend: Backend) { self.backend = backend }
 
@@ -143,6 +148,18 @@ struct AnkiWebPage: UIViewRepresentable {
             guard let dict = message.body as? [String: Any],
                   let method = dict["method"] as? String
             else { return (nil, "bad _anki request") }
+
+            // UI-side methods (not backend RPCs), used mainly by the deck-options
+            // page to signal readiness / request closing.
+            switch method {
+            case "deckOptionsReady", "searchInBrowser", "congratsLearnMore":
+                return ("", nil)
+            case "deckOptionsRequireClose":
+                onClose?()
+                return ("", nil)
+            default:
+                break
+            }
 
             let input = Data(base64Encoded: dict["body"] as? String ?? "") ?? Data()
             guard let idx = AnkiWebMethods.index[method] else {
