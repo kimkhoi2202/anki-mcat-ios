@@ -25,6 +25,16 @@ struct CardBrowserView: View {
     @State private var changeTypeTarget: NoteTarget?
     @State private var pendingDelete: CardBrowserRow?
 
+    // Multi-select bulk-action UI state.
+    /// Presents the "Change deck" picker for the selection.
+    @State private var showingDeckPicker = false
+    /// Drives the bulk-delete confirmation for the selection.
+    @State private var pendingBulkDelete = false
+    /// Which tag prompt (add / remove) is showing, if any.
+    @State private var tagSheet: TagSheetKind?
+    /// The space-separated tag text entered in the add/remove tag prompt.
+    @State private var tagInput = ""
+
     /// Opens the browser with an initial query (empty = all cards, matching
     /// AnkiDroid's default "show everything" browse).
     init(store: AnkiStore, initialQuery: String = "") {
@@ -44,7 +54,7 @@ struct CardBrowserView: View {
             DS.background.ignoresSafeArea()
             content
         }
-        .navigationTitle("Browse")
+        .navigationTitle(navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
         .searchable(
             text: queryBinding,
@@ -54,9 +64,61 @@ struct CardBrowserView: View {
         .autocorrectionDisabled()
         .textInputAutocapitalization(.never)
         .onSubmit(of: .search) { model.submitSearch() }
+        .toolbar { selectionToolbar }
+        // The bottom bulk-action bar slides in while multi-select is active.
+        .safeAreaInset(edge: .bottom) {
+            if model.isSelecting { bulkActionBar }
+        }
         .task {
             // Initial load (the view's `.task` runs once on appear).
             model.startIfNeeded()
+            #if DEBUG
+            // Screenshot/automation hook: open straight into multi-select with a
+            // few rows selected so a screenshot shows the selection UI + bar.
+            if ProcessInfo.processInfo.arguments.contains("-demoBrowserSelect") {
+                await model.demoEnterSelectionForScreenshot()
+            }
+            #endif
+        }
+        .sheet(isPresented: $showingDeckPicker) {
+            DeckPickerSheet(decks: store.decks.filter { !$0.filtered }) { deckID in
+                model.bulkSetDeck(deckID)
+                showingDeckPicker = false
+            } onCancel: {
+                showingDeckPicker = false
+            }
+        }
+        .alert(
+            tagSheet?.title ?? "",
+            isPresented: tagAlertPresented,
+            presenting: tagSheet
+        ) { kind in
+            TextField("Tags (space-separated)", text: $tagInput)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+            Button("Cancel", role: .cancel) { tagInput = "" }
+            Button(kind.actionTitle) {
+                switch kind {
+                case .add: model.bulkAddTags(tagInput)
+                case .remove: model.bulkRemoveTags(tagInput)
+                }
+                tagInput = ""
+            }
+        } message: { kind in
+            Text(kind.message)
+        }
+        .confirmationDialog(
+            "Delete notes?",
+            isPresented: $pendingBulkDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete ^[\(model.selectedCount) note](inflect: true)", role: .destructive) {
+                model.bulkDelete()
+                pendingBulkDelete = false
+            }
+            Button("Cancel", role: .cancel) { pendingBulkDelete = false }
+        } message: {
+            Text("This deletes the selected notes and all their cards. You can undo it from the reviewer.")
         }
         .sheet(item: $editTarget) { target in
             NoteEditorView(store: store, mode: .edit(noteID: target.id)) {
@@ -122,7 +184,7 @@ struct CardBrowserView: View {
                 // even when they never left the viewport.
                 ForEach(model.cardIDs, id: \.self) { cardID in
                     rowView(cardID)
-                        .listRowBackground(DS.surface)
+                        .listRowBackground(rowBackground(cardID))
                         .listRowSeparatorTint(DS.separator)
                         .task(id: model.loadGeneration) { model.ensureLoaded(cardID: cardID) }
                 }
@@ -137,10 +199,22 @@ struct CardBrowserView: View {
         .background(DS.background)
     }
 
-    /// One results row: the loaded card row with its actions, or a lightweight
-    /// placeholder while its page is still being fetched.
+    /// One results row. In normal mode it's the loaded card row with its
+    /// tap-to-edit / swipe / context actions; in multi-select mode it's a
+    /// selectable row (leading checkmark, tap toggles). A page still loading
+    /// shows a lightweight placeholder in either mode.
     @ViewBuilder
     private func rowView(_ cardID: Int64) -> some View {
+        if model.isSelecting {
+            selectableRow(cardID)
+        } else {
+            normalRow(cardID)
+        }
+    }
+
+    /// Normal-mode row: tap edits, swipe/long-press expose the single-row actions.
+    @ViewBuilder
+    private func normalRow(_ cardID: Int64) -> some View {
         if let row = model.rowsByID[cardID] {
             Button {
                 openEditor(forCard: row.id)
@@ -170,10 +244,56 @@ struct CardBrowserView: View {
         }
     }
 
-    /// The shared long-press menu: card info, change note type, suspend toggle, a
-    /// flag submenu, and delete.
+    /// Multi-select row: a leading checkmark + the row content (loaded row or
+    /// placeholder). Tapping toggles the card's membership in the selection; the
+    /// checkmark renders from the id alone, so even a not-yet-loaded row shows
+    /// its selected state without forcing a fetch.
+    private func selectableRow(_ cardID: Int64) -> some View {
+        Button {
+            model.toggleSelection(cardID)
+        } label: {
+            HStack(spacing: DS.Spacing.m) {
+                Image(systemName: model.isSelected(cardID) ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(model.isSelected(cardID) ? DS.accent : DS.textSecondary)
+                    .accessibilityHidden(true)
+                selectableRowContent(cardID)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(model.isSelected(cardID) ? "Selected" : "Not selected")
+        .accessibilityAddTraits(model.isSelected(cardID) ? [.isSelected] : [])
+    }
+
+    @ViewBuilder
+    private func selectableRowContent(_ cardID: Int64) -> some View {
+        if let row = model.rowsByID[cardID] {
+            CardBrowserRowView(row: row)
+        } else {
+            CardBrowserRowPlaceholder()
+        }
+    }
+
+    /// Tints a selected row in multi-select mode; otherwise the standard surface.
+    private func rowBackground(_ cardID: Int64) -> Color {
+        model.isSelecting && model.isSelected(cardID) ? DS.accent.opacity(0.12) : DS.surface
+    }
+
+    /// The shared long-press menu: enter multi-select, card info, change note
+    /// type, suspend toggle, a flag submenu, and delete.
     @ViewBuilder
     private func rowMenu(_ row: CardBrowserRow) -> some View {
+        // Long-press → multi-select, seeded with this row (AnkiDroid's
+        // long-press-to-multiselect entry point).
+        Button {
+            model.enterSelection(initial: row.id)
+        } label: {
+            Label("Select", systemImage: "checkmark.circle")
+        }
+
+        Divider()
+
         Button {
             infoTarget = CardTarget(id: row.id)
         } label: {
@@ -264,6 +384,156 @@ struct CardBrowserView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    // MARK: - Multi-select chrome
+
+    /// Inline title: "Browse" normally; the live selected count while selecting.
+    private var navigationTitle: String {
+        guard model.isSelecting else { return "Browse" }
+        return model.selectedCount == 0 ? "Select Cards" : "\(model.selectedCount) selected"
+    }
+
+    /// Toolbar: a "Select" entry point normally; Cancel + Select-All/Deselect-All
+    /// while selecting. Mirrors AnkiDroid's multiselect action bar affordances.
+    @ToolbarContentBuilder
+    private var selectionToolbar: some ToolbarContent {
+        if model.isSelecting {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Cancel") { model.exitSelection() }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(model.allSelected ? "Deselect All" : "Select All") {
+                    if model.allSelected { model.deselectAll() } else { model.selectAll() }
+                }
+                .disabled(model.cardIDs.isEmpty)
+            }
+        } else {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Select") { model.enterSelection() }
+                    .disabled(model.cardIDs.isEmpty)
+            }
+        }
+    }
+
+    /// Bottom bulk-action bar shown while selecting: Change Deck, Flag, status
+    /// (suspend/unsuspend/bury), tags (mark/unmark/add/remove), and Delete —
+    /// AnkiDroid's browser bulk operations. Grouped actions open menus; all are
+    /// disabled with an empty selection.
+    private var bulkActionBar: some View {
+        HStack(spacing: 0) {
+            bulkBarButton("Deck", systemImage: "tray.full") { showingDeckPicker = true }
+            flagBarMenu
+            statusBarMenu
+            tagsBarMenu
+            bulkBarButton("Delete", systemImage: "trash", destructive: true) {
+                pendingBulkDelete = true
+            }
+        }
+        .disabled(model.selectedCount == 0)
+        .padding(.vertical, DS.Spacing.xs)
+        .background(.bar)
+    }
+
+    /// Flag 0–7 applied to the whole selection.
+    private var flagBarMenu: some View {
+        Menu {
+            ForEach(CardFlag.allCases) { flag in
+                Button {
+                    model.bulkSetFlag(flag.rawValue)
+                } label: {
+                    Label(flag.label, systemImage: flag.systemImage)
+                }
+            }
+        } label: {
+            bulkBarLabel("Flag", systemImage: "flag")
+        }
+        .disabled(model.selectedCount == 0)
+    }
+
+    /// Suspend / Unsuspend / Bury for the whole selection.
+    private var statusBarMenu: some View {
+        Menu {
+            Button {
+                model.bulkSetSuspended(true)
+            } label: {
+                Label("Suspend", systemImage: "pause.fill")
+            }
+            Button {
+                model.bulkSetSuspended(false)
+            } label: {
+                Label("Unsuspend", systemImage: "play.fill")
+            }
+            Divider()
+            Button {
+                model.bulkBury()
+            } label: {
+                Label("Bury", systemImage: "eye.slash")
+            }
+        } label: {
+            bulkBarLabel("Suspend", systemImage: "pause.circle")
+        }
+        .disabled(model.selectedCount == 0)
+    }
+
+    /// Mark / Unmark and Add / Remove tags for the whole selection.
+    private var tagsBarMenu: some View {
+        Menu {
+            Button {
+                model.bulkSetMarked(true)
+            } label: {
+                Label("Mark", systemImage: "star.fill")
+            }
+            Button {
+                model.bulkSetMarked(false)
+            } label: {
+                Label("Unmark", systemImage: "star.slash")
+            }
+            Divider()
+            Button {
+                tagInput = ""
+                tagSheet = .add
+            } label: {
+                Label("Add Tags", systemImage: "tag")
+            }
+            Button {
+                tagInput = ""
+                tagSheet = .remove
+            } label: {
+                Label("Remove Tags", systemImage: "tag.slash")
+            }
+        } label: {
+            bulkBarLabel("Tags", systemImage: "tag")
+        }
+        .disabled(model.selectedCount == 0)
+    }
+
+    /// One tappable bottom-bar item (icon over caption), evenly sized.
+    private func bulkBarButton(
+        _ title: String, systemImage: String,
+        destructive: Bool = false, action: @escaping () -> Void
+    ) -> some View {
+        Button(role: destructive ? .destructive : nil, action: action) {
+            bulkBarLabel(title, systemImage: systemImage, destructive: destructive)
+        }
+        .accessibilityLabel(title)
+    }
+
+    /// Shared bottom-bar item appearance (icon over caption), used by both the
+    /// plain buttons and the menu labels so the whole bar reads consistently.
+    private func bulkBarLabel(
+        _ title: String, systemImage: String, destructive: Bool = false
+    ) -> some View {
+        VStack(spacing: 2) {
+            Image(systemName: systemImage)
+                .font(.system(size: 18))
+            Text(title)
+                .font(.caption2)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(minHeight: DS.minTapTarget)
+        .foregroundStyle(destructive ? DS.again : DS.accent)
+        .contentShape(Rectangle())
+    }
+
     // MARK: - Actions
 
     /// Resolves the row's note id on demand (one quick backend call, made only
@@ -302,6 +572,79 @@ struct CardBrowserView: View {
     private var actionErrorPresented: Binding<Bool> {
         Binding(get: { model.actionError != nil }, set: { if !$0 { model.actionError = nil } })
     }
+
+    /// Drives the add/remove-tag prompt; clearing it resets the typed text so a
+    /// dismissed prompt doesn't leak its input into the next one.
+    private var tagAlertPresented: Binding<Bool> {
+        Binding(get: { tagSheet != nil }, set: { if !$0 { tagSheet = nil; tagInput = "" } })
+    }
+}
+
+/// Which bulk tag prompt is showing, and its copy. Identifiable so it can key the
+/// `.alert(presenting:)` content.
+private enum TagSheetKind: Identifiable {
+    case add, remove
+
+    var id: Int { self == .add ? 0 : 1 }
+    var title: String { self == .add ? "Add Tags" : "Remove Tags" }
+    var actionTitle: String { self == .add ? "Add" : "Remove" }
+    var message: String {
+        self == .add
+            ? "Add space-separated tags to the selected notes."
+            : "Remove space-separated tags from the selected notes."
+    }
+}
+
+/// A simple deck chooser for the bulk "Change deck" action: lists the normal
+/// (non-filtered) decks by full path and reports the picked deck id. Filtered
+/// decks are excluded because cards can't be moved into them.
+private struct DeckPickerSheet: View {
+    let decks: [DeckTreeEntry]
+    let onSelect: (Int64) -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                DS.background.ignoresSafeArea()
+                if decks.isEmpty {
+                    Text("No decks available.")
+                        .font(DS.Typography.caption)
+                        .foregroundStyle(DS.textSecondary)
+                } else {
+                    List(decks) { deck in
+                        Button {
+                            onSelect(deck.id)
+                        } label: {
+                            HStack(spacing: DS.Spacing.m) {
+                                Image(systemName: "rectangle.stack")
+                                    .foregroundStyle(DS.textSecondary)
+                                Text(deck.fullName)
+                                    .font(DS.Typography.body)
+                                    .foregroundStyle(DS.textPrimary)
+                                Spacer(minLength: 0)
+                            }
+                            .frame(minHeight: DS.minTapTarget)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(DS.surface)
+                        .listRowSeparatorTint(DS.separator)
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .background(DS.background)
+                }
+            }
+            .navigationTitle("Change Deck")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onCancel() }
+                }
+            }
+        }
+    }
 }
 
 /// Owns the Card Browser's windowed data and search state, off the View so the
@@ -337,6 +680,15 @@ final class CardBrowserModel: ObservableObject {
     /// already on screen — SwiftUI's `.onAppear` alone wouldn't re-fire for a row
     /// that never left the viewport.
     @Published private(set) var loadGeneration = 0
+
+    /// Whether the browser is in multi-select mode (AnkiDroid's CardBrowser
+    /// multiselect). Entered from the toolbar "Select" button or a row's "Select"
+    /// context action; while on, a row tap toggles selection instead of opening
+    /// the editor, and a bottom action bar applies bulk ops to the selection.
+    @Published var isSelecting = false
+    /// The selected card ids — ids ONLY, so selecting thousands of cards (incl.
+    /// Select All) stays cheap and never materializes the windowed row list.
+    @Published private(set) var selection: Set<Int64> = []
 
     private let store: AnkiStore
     /// O(1) position lookup so an appearing row can find (and page-load) its window.
@@ -527,6 +879,140 @@ final class CardBrowserModel: ObservableObject {
         }
     }
 
+    // MARK: Selection (multi-select)
+
+    var selectedCount: Int { selection.count }
+    /// True when every matching card is selected (drives Select-All/Deselect-All).
+    var allSelected: Bool { !cardIDs.isEmpty && selection.count == cardIDs.count }
+
+    func isSelected(_ cardID: Int64) -> Bool { selection.contains(cardID) }
+
+    /// Enters multi-select mode, optionally seeding the selection with the row it
+    /// was started on (the long-press/"Select" entry point selects that row).
+    func enterSelection(initial cardID: Int64? = nil) {
+        isSelecting = true
+        if let cardID { selection = [cardID] }
+    }
+
+    /// Leaves multi-select mode and clears the selection.
+    func exitSelection() {
+        isSelecting = false
+        selection.removeAll()
+    }
+
+    /// Toggles a row's membership in the selection (the in-select-mode tap).
+    func toggleSelection(_ cardID: Int64) {
+        if selection.contains(cardID) {
+            selection.remove(cardID)
+        } else {
+            selection.insert(cardID)
+        }
+    }
+
+    /// Selects every matching card (ids only — no row data is loaded).
+    func selectAll() { selection = Set(cardIDs) }
+
+    /// Clears the selection but stays in select mode.
+    func deselectAll() { selection.removeAll() }
+
+    #if DEBUG
+    /// Screenshot/automation hook: wait for the initial id list to load, then
+    /// enter multi-select with the first few rows selected so a screenshot
+    /// captures the selection UI and the bottom action bar. Debug-only.
+    func demoEnterSelectionForScreenshot() async {
+        for _ in 0..<60 {
+            if !cardIDs.isEmpty { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        isSelecting = true
+        selection = Set(cardIDs.prefix(3))
+    }
+    #endif
+
+    // MARK: Bulk actions (multi-select)
+    //
+    // Each applies one backend op to the whole selection off-main (via the
+    // store), then refreshes the affected rows in place. Non-destructive ops keep
+    // the selection and stay in select mode (as AnkiDroid does); delete clears
+    // the selection and exits. All stay undoable via the engine.
+
+    func bulkSetDeck(_ deckID: Int64) {
+        runBulk { try await self.store.setDeck(forCards: $0, deckID: deckID) }
+    }
+
+    func bulkSetFlag(_ flag: Int) {
+        runBulk { try await self.store.setFlag($0, flag: flag) }
+    }
+
+    func bulkSetSuspended(_ suspended: Bool) {
+        runBulk { try await self.store.setCardsSuspended($0, suspended: suspended) }
+    }
+
+    func bulkBury() {
+        runBulk { try await self.store.buryCards($0) }
+    }
+
+    func bulkSetMarked(_ marked: Bool) {
+        runBulk { try await self.store.setMarked(forCards: $0, marked: marked) }
+    }
+
+    func bulkAddTags(_ tags: String) {
+        let trimmed = tags.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        runBulk { try await self.store.addTags(forCards: $0, tags: trimmed) }
+    }
+
+    func bulkRemoveTags(_ tags: String) {
+        let trimmed = tags.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        runBulk { try await self.store.removeTags(forCards: $0, tags: trimmed) }
+    }
+
+    /// Deletes the notes behind the selection (and their sibling cards), removes
+    /// exactly those rows in place, then exits select mode — matching AnkiDroid,
+    /// which leaves multiselect after a destructive bulk action.
+    func bulkDelete() {
+        let ids = Array(selection)
+        guard !ids.isEmpty else { return }
+        Task {
+            do {
+                let removed = try await store.deleteNotes(forCards: ids)
+                removeCards(removed.isEmpty ? ids : removed)
+                exitSelection()
+            } catch {
+                actionError = describeBrowserError(error)
+            }
+        }
+    }
+
+    /// Shared driver for the non-destructive bulk ops: run `op` over the current
+    /// selection, then reload the affected rows in place so their badges update,
+    /// keeping the selection and select mode.
+    private func runBulk(_ op: @escaping ([Int64]) async throws -> Void) {
+        let ids = Array(selection)
+        guard !ids.isEmpty else { return }
+        Task {
+            do {
+                try await op(ids)
+                reloadRows(Set(ids))
+            } catch {
+                actionError = describeBrowserError(error)
+            }
+        }
+    }
+
+    /// Drops cached data for the given cards and re-triggers loading for whatever
+    /// is on screen (by bumping `loadGeneration`), so a bulk action's badge
+    /// changes appear without re-resolving the whole id list or losing scroll
+    /// position. Off-screen affected rows simply reload when next scrolled to.
+    private func reloadRows(_ ids: Set<Int64>) {
+        guard !ids.isEmpty else { return }
+        var updated = rowsByID
+        for id in ids { updated[id] = nil }
+        rowsByID = updated
+        loadGeneration += 1
+    }
+
     // MARK: List bookkeeping
 
     /// Replaces the id list and rebuilds the position index, pruning cached rows
@@ -537,6 +1023,12 @@ final class CardBrowserModel: ObservableObject {
         indexByID = Self.indexMap(for: ids)
         if !rowsByID.isEmpty {
             rowsByID = rowsByID.filter { indexByID[$0.key] != nil }
+        }
+        // Drop any selected ids the new result set no longer contains, so the
+        // selected-count and bulk ops never reference cards that aren't listed
+        // (a narrower re-search keeps the still-matching selection).
+        if !selection.isEmpty {
+            selection = selection.filter { indexByID[$0] != nil }
         }
     }
 

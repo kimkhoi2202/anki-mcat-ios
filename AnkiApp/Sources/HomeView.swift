@@ -218,7 +218,10 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInAddNote") {
                 showAddNote = true
             }
-            if ProcessInfo.processInfo.arguments.contains("-startInBrowser") {
+            // Open the browser; `-demoBrowserSelect` additionally enters
+            // multi-select with a few rows selected (for the bulk-action shot).
+            if ProcessInfo.processInfo.arguments.contains("-startInBrowser")
+                || ProcessInfo.processInfo.arguments.contains("-demoBrowserSelect") {
                 goBrowse = true
             }
             // Answer a few cards first so the stats screen has real review

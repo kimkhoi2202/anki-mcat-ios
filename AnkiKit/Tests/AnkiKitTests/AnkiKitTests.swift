@@ -357,6 +357,103 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertTrue(try backend.searchCards(query: "").isEmpty, "the card should be gone after delete")
     }
 
+    // MARK: - Card Browser bulk actions (multi-select)
+
+    /// `setDeck` (CardsService, service 5, method 3) moves the selected cards to a
+    /// target deck — the browser's bulk "Change deck" — and the move is undoable.
+    /// Read back through `getCard(cardID:).deckID`, mirroring AnkiDroid's
+    /// `col.setDeck(cardIds, deckId)`.
+    func testSetDeckMovesSelectedCards() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q1", "A1"], deckID: 1)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q2", "A2"], deckID: 1)
+        let cardIDs = try backend.searchCards(query: "")
+        XCTAssertEqual(cardIDs.count, 2, "two cards start in the Default deck")
+
+        let targetDeck = try backend.createDeck(name: "Moved")
+        let moved = try backend.setDeck(cardIDs: cardIDs, deckID: targetDeck)
+        XCTAssertEqual(moved, 2, "both selected cards should move")
+
+        for cardID in cardIDs {
+            XCTAssertEqual(try backend.getCard(cardID: cardID).deckID, targetDeck,
+                           "each card should now live in the target deck")
+        }
+        XCTAssertEqual(try backend.searchCards(query: "deck:Moved").count, 2,
+                       "both cards should be found in the new deck")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "changing deck should be undoable")
+    }
+
+    /// `addTags`/`removeTags` (card-id wrappers over TagsService 45,7 / 45,8)
+    /// bulk add then remove a tag across the notes behind a card selection. With
+    /// a two-card (reversed) note, BOTH card ids collapse to one note via
+    /// `noteIDs(forCardIDs:)`, so the tag lands once — the browser's bulk
+    /// add/remove tags. Read back through `getNote(noteID:).tags`.
+    func testBulkAddAndRemoveTagsByCardIDs() throws {
+        let backend = try freshCollection()
+        let notetypes = try backend.notetypeNames()
+        let reversed = try XCTUnwrap(
+            notetypes.first { $0.name == "Basic (and reversed card)" },
+            "fresh collection ships the reversed Basic note type"
+        )
+        let nid = try backend.addNote(notetypeID: reversed.id, fields: ["Q", "A"], deckID: 1)
+        let cardIDs = try backend.searchCards(query: "")
+        XCTAssertEqual(cardIDs.count, 2, "a reversed note produces two cards")
+
+        // Both sibling card ids resolve to the single owning note.
+        XCTAssertEqual(try backend.noteIDs(forCardIDs: cardIDs), [nid],
+                       "sibling cards collapse to one note id")
+
+        let changed = try backend.addTags(cardIDs: cardIDs, tags: "marked hard")
+        XCTAssertEqual(changed, 1, "the one underlying note is tagged once, not per card")
+        let tagged = try backend.getNote(noteID: nid).tags
+        XCTAssertTrue(tagged.contains("hard"), "the added tag should be present")
+        XCTAssertTrue(tagged.contains("marked"), "multiple space-separated tags should all be added")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "adding tags should be undoable")
+
+        _ = try backend.removeTags(cardIDs: cardIDs, tags: "hard")
+        let afterRemove = try backend.getNote(noteID: nid).tags
+        XCTAssertFalse(afterRemove.contains("hard"), "the removed tag should be gone")
+        XCTAssertTrue(afterRemove.contains("marked"), "untouched tags should remain")
+    }
+
+    /// `setMarked` (card-id wrapper) bulk-marks then unmarks the notes behind a
+    /// selection by toggling the `marked` tag — the browser's bulk Mark/Unmark.
+    /// Verified via `isNoteMarked`.
+    func testBulkSetMarkedByCardIDs() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid1 = try backend.addNote(notetypeID: notetypeID, fields: ["Q1", "A1"], deckID: 1)
+        let nid2 = try backend.addNote(notetypeID: notetypeID, fields: ["Q2", "A2"], deckID: 1)
+        let cardIDs = try backend.searchCards(query: "")
+
+        XCTAssertEqual(try backend.setMarked(cardIDs: cardIDs, marked: true), 2, "both notes marked")
+        XCTAssertTrue(try backend.isNoteMarked(noteID: nid1), "first note should be marked")
+        XCTAssertTrue(try backend.isNoteMarked(noteID: nid2), "second note should be marked")
+
+        _ = try backend.setMarked(cardIDs: cardIDs, marked: false)
+        XCTAssertFalse(try backend.isNoteMarked(noteID: nid1), "first note should be unmarked")
+        XCTAssertFalse(try backend.isNoteMarked(noteID: nid2), "second note should be unmarked")
+    }
+
+    /// `buryCards` (SchedulerService 13,14 mode BURY_USER) buries an entire
+    /// selection — the browser's bulk Bury — removing them all from the study
+    /// queue. Complements the single-card reviewer test with a multi-card op.
+    func testBulkBuryCardsLeavesQueue() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        for i in 0..<3 {
+            _ = try backend.addNote(notetypeID: notetypeID, fields: ["BQ\(i)", "BA\(i)"], deckID: 1)
+        }
+        let cardIDs = try backend.searchCards(query: "")
+        XCTAssertEqual(cardIDs.count, 3, "three cards start queued")
+
+        let buried = try backend.buryCards(cardIDs: cardIDs)
+        XCTAssertEqual(buried, 3, "all three selected cards should be buried")
+        XCTAssertTrue(try backend.queuedCards().cards.isEmpty, "buried cards should leave the queue")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "burying should be undoable")
+    }
+
     // MARK: - Deck management
 
     /// `createDeck` adds a normal deck (new_deck + add_deck), `renameDeck`

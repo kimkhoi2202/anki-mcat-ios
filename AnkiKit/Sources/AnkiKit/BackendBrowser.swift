@@ -252,4 +252,78 @@ public extension Backend {
         let resp = try run(service: 25, method: 7, req, returning: Anki_Collection_OpChangesWithCount.self)
         return Int(resp.count)
     }
+
+    // MARK: - Multi-select bulk actions
+    //
+    // The Card Browser's bulk operations all take an array of *card* ids (the
+    // browser's selection is a set of card ids). Card-level ops (`setDeck`,
+    // `setFlag`, `suspendCards`, `buryCards`, `removeNotesForCards`) hit the
+    // engine directly with those ids; note-level ops (tags / marked) resolve
+    // the cards to their owning notes first (`noteIDs(forCardIDs:)`). Mirrors
+    // AnkiDroid's CardBrowser bulk actions, which likewise dispatch the
+    // selection to the matching backend ops.
+
+    /// CardsService.setDeck (5, 3). Moves the given cards to `deckID` (a normal,
+    /// non-filtered deck), returning the number of cards moved. Mirrors
+    /// AnkiDroid's browser "Change deck" (`col.setDeck(cardIds, deckId)`); the
+    /// op is undoable. A card already in a filtered deck keeps that filtered
+    /// placement's home set to the new deck, as the core handles.
+    @discardableResult
+    func setDeck(cardIDs: [Int64], deckID: Int64) throws -> Int {
+        var req = Anki_Cards_SetDeckRequest()
+        req.cardIds = cardIDs
+        req.deckID = deckID
+        let resp = try run(service: 5, method: 3, req, returning: Anki_Collection_OpChangesWithCount.self)
+        return Int(resp.count)
+    }
+
+    /// Resolves a list of card ids to their owning note ids, de-duplicated and in
+    /// first-seen order (sibling cards of one note collapse to a single note id).
+    /// Used by the note-level bulk actions (tags / marked) so a selection of
+    /// cards maps onto the notes the engine's tag RPCs operate on. A card that
+    /// can't be read (e.g. concurrently deleted) is skipped.
+    func noteIDs(forCardIDs cardIDs: [Int64]) throws -> [Int64] {
+        var seen = Set<Int64>()
+        var noteIDs: [Int64] = []
+        for cardID in cardIDs {
+            guard let noteID = try? getCard(cardID: cardID).noteID else { continue }
+            if seen.insert(noteID).inserted { noteIDs.append(noteID) }
+        }
+        return noteIDs
+    }
+
+    /// Adds the given space-separated tag(s) to the notes behind the cards,
+    /// returning the number of notes changed. Card-id wrapper over
+    /// `addNoteTags` for the browser's bulk "Add tags". Undoable.
+    @discardableResult
+    func addTags(cardIDs: [Int64], tags: String) throws -> Int {
+        let noteIDs = try noteIDs(forCardIDs: cardIDs)
+        guard !noteIDs.isEmpty else { return 0 }
+        return try addNoteTags(noteIDs: noteIDs, tags: tags)
+    }
+
+    /// Removes the given space-separated tag(s) from the notes behind the cards,
+    /// returning the number of notes changed. Card-id wrapper over
+    /// `removeNoteTags` for the browser's bulk "Remove tags". Undoable.
+    @discardableResult
+    func removeTags(cardIDs: [Int64], tags: String) throws -> Int {
+        let noteIDs = try noteIDs(forCardIDs: cardIDs)
+        guard !noteIDs.isEmpty else { return 0 }
+        return try removeNoteTags(noteIDs: noteIDs, tags: tags)
+    }
+
+    /// Marks or unmarks the notes behind the cards by bulk add/removing the
+    /// `marked` tag (Anki's marked convention; see `toggleMark`). Unlike the
+    /// reviewer's per-note `toggleMark`, this sets an explicit state across the
+    /// whole selection — the browser exposes separate Mark / Unmark actions, so a
+    /// mixed selection lands on a single, predictable result. Returns the number
+    /// of notes changed.
+    @discardableResult
+    func setMarked(cardIDs: [Int64], marked: Bool) throws -> Int {
+        let noteIDs = try noteIDs(forCardIDs: cardIDs)
+        guard !noteIDs.isEmpty else { return 0 }
+        return marked
+            ? try addNoteTags(noteIDs: noteIDs, tags: Backend.markedTag)
+            : try removeNoteTags(noteIDs: noteIDs, tags: Backend.markedTag)
+    }
 }

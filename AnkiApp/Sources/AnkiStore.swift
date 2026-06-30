@@ -477,6 +477,56 @@ final class AnkiStore: ObservableObject {
         return removed
     }
 
+    // MARK: - Card Browser bulk actions (multi-select)
+    //
+    // Each applies one backend op to every selected card off the main actor (a
+    // big selection mustn't block the UI), then refreshes derived state. The
+    // browser updates the affected rows in place afterwards. Mirrors AnkiDroid's
+    // CardBrowser bulk operations. All are undoable through the engine.
+
+    /// Moves the selected cards to `deckID` (a normal deck), off the main actor.
+    /// Cards leaving/entering decks change deck counts, so the deck list is
+    /// refreshed.
+    func setDeck(forCards cardIDs: [Int64], deckID: Int64) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try await runDetached { try backend.setDeck(cardIDs: cardIDs, deckID: deckID) }
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Buries the selected cards (manual bury), off the main actor. Buried cards
+    /// leave the study queue, so deck counts are refreshed.
+    func buryCards(_ cardIDs: [Int64]) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try await runDetached { try backend.buryCards(cardIDs: cardIDs) }
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Adds the given space-separated tag(s) to the notes behind the selected
+    /// cards, off the main actor.
+    func addTags(forCards cardIDs: [Int64], tags: String) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try await runDetached { try backend.addTags(cardIDs: cardIDs, tags: tags) }
+        refreshUndo()
+    }
+
+    /// Removes the given space-separated tag(s) from the notes behind the
+    /// selected cards, off the main actor.
+    func removeTags(forCards cardIDs: [Int64], tags: String) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try await runDetached { try backend.removeTags(cardIDs: cardIDs, tags: tags) }
+        refreshUndo()
+    }
+
+    /// Marks or unmarks the notes behind the selected cards (toggling the
+    /// `marked` tag), off the main actor.
+    func setMarked(forCards cardIDs: [Int64], marked: Bool) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try await runDetached { try backend.setMarked(cardIDs: cardIDs, marked: marked) }
+        refreshUndo()
+    }
+
     // MARK: - Statistics
 
     /// Loads the stats summary for the whole collection over the given period,
