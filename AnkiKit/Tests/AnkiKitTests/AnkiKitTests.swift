@@ -1037,6 +1037,68 @@ final class AnkiKitTests: XCTestCase {
         }
     }
 
+    // MARK: - Subdeck collapse / unbury
+
+    /// `setDeckCollapsed` (DecksService 7, 11) persists a deck's collapsed state,
+    /// which the deck tree reflects on its node — the data behind the DeckPicker's
+    /// expand/collapse chevron. A parent with a subdeck reports `hasChildren`;
+    /// collapsing it sets `collapsed` and hides the child from the flattened deck
+    /// list, and expanding it re-shows the child. Round-trips through the real
+    /// engine. (The initial collapsed state of a freshly created parent is left
+    /// to the engine — AnkiDroid renders from this same tree — so the test sets
+    /// the state explicitly rather than assuming a default.)
+    func testSetDeckCollapsedHidesAndShowsSubdecks() throws {
+        let backend = try freshCollection()
+        // `Parent::Child` auto-creates the parent plus the nested subdeck.
+        _ = try backend.createDeck(name: "Parent::Child")
+
+        func parent(in tree: [DeckTreeEntry]) throws -> DeckTreeEntry {
+            try XCTUnwrap(tree.first { $0.fullName == "Parent" }, "the Parent deck should exist")
+        }
+
+        // The parent advertises a subdeck regardless of its collapse state.
+        XCTAssertTrue(try parent(in: backend.deckTree()).hasChildren, "the parent has a subdeck")
+
+        // Force expanded: the parent reads not-collapsed and the child row shows.
+        try backend.setDeckCollapsed(deckID: try parent(in: backend.deckTree()).id, collapsed: false)
+        let expanded = try backend.deckTree()
+        XCTAssertFalse(try parent(in: expanded).collapsed, "an expanded parent reads as not collapsed")
+        XCTAssertTrue(expanded.contains { $0.fullName == "Parent::Child" },
+                      "the child shows while the parent is expanded")
+
+        // Collapse the parent: the child row disappears; the parent reads collapsed.
+        try backend.setDeckCollapsed(deckID: try parent(in: expanded).id, collapsed: true)
+        let collapsed = try backend.deckTree()
+        XCTAssertTrue(try parent(in: collapsed).collapsed, "the parent should read as collapsed")
+        XCTAssertFalse(collapsed.contains { $0.fullName == "Parent::Child" },
+                       "a collapsed parent hides its subdecks from the list")
+
+        // Expand again: the child reappears.
+        try backend.setDeckCollapsed(deckID: try parent(in: collapsed).id, collapsed: false)
+        let reexpanded = try backend.deckTree()
+        XCTAssertFalse(try parent(in: reexpanded).collapsed, "the parent should read as expanded again")
+        XCTAssertTrue(reexpanded.contains { $0.fullName == "Parent::Child" },
+                      "expanding restores the subdeck row")
+    }
+
+    /// `unburyDeck` (SchedulerService 13, 13) returns a deck's buried cards to the
+    /// study queue — the deck "Unbury" action. Burying the only card empties the
+    /// queue; unburying the deck restores it, and the op is undoable.
+    func testUnburyDeckRestoresBuriedCards() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "").first)
+
+        _ = try backend.buryCards(cardIDs: [cardID])
+        XCTAssertTrue(try backend.queuedCards().cards.isEmpty, "burying the only card empties the queue")
+
+        try backend.unburyDeck(deckID: 1)
+        XCTAssertFalse(try backend.queuedCards().cards.isEmpty,
+                       "unburying the deck restores its buried card to the queue")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "unbury should be undoable")
+    }
+
     // MARK: - Reviewer card actions
 
     /// `buryCards` (bury_or_suspend, BURY_USER on card ids) removes the card from

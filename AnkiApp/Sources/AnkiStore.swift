@@ -338,8 +338,12 @@ final class AnkiStore: ObservableObject {
 
     /// Select `id` as the current deck (so the scheduler scopes study to it and
     /// its subdecks), reset reviewer state, and load the first queued card.
-    func selectDeck(id: Int64) {
-        guard let backend else { return }
+    /// Returns whether the selection succeeded so a caller (e.g. the deck
+    /// overview's "Study") can guard navigation on it, only entering the reviewer
+    /// when the deck was actually selected.
+    @discardableResult
+    func selectDeck(id: Int64) -> Bool {
+        guard let backend else { return false }
         do {
             try backend.setCurrentDeck(id: id)
             currentDeckID = id
@@ -356,8 +360,10 @@ final class AnkiStore: ObservableObject {
             reviewCount = 0
             currentCard = nil
             loadNext()
+            return true
         } catch {
             status = "Select error: \(error)"
+            return false
         }
     }
 
@@ -393,6 +399,57 @@ final class AnkiStore: ObservableObject {
         _ = try await runDetached { try backend.removeDecks(ids: [id]) }
         // Deleting the current deck falls study back to the Default deck.
         if currentDeckID == id { currentDeckID = 1 }
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Toggles whether a deck is collapsed in the deck list (hiding/showing its
+    /// subdecks), persisting it to the engine so it round-trips and syncs.
+    /// Fire-and-forget like the other deck mutations: the set + reload run off
+    /// the main actor, then `refreshDecks()` republishes the tree (whose nodes
+    /// now carry the new collapsed state). Clone of AnkiDroid's DeckPicker
+    /// expand/collapse chevron.
+    func toggleDeckCollapsed(_ deck: DeckTreeEntry) {
+        guard let backend else { return }
+        let newValue = !deck.collapsed
+        Task { @MainActor in
+            do {
+                try await runDetached { try backend.setDeckCollapsed(deckID: deck.id, collapsed: newValue) }
+                refreshDecks()
+            } catch {
+                status = "Collapse error: \(error)"
+            }
+        }
+    }
+
+    /// Creates a subdeck (`Parent::Child`) under an existing deck, then refreshes
+    /// the list. If the parent was collapsed (Anki creates parents collapsed by
+    /// default), it's expanded so the freshly created child is actually visible —
+    /// matching the user's intent of adding a subdeck they can see. Runs the
+    /// backend writes off the main actor. Throws so the caller can surface a
+    /// clear message (e.g. an invalid/duplicate name).
+    func createSubdeck(under parent: DeckTreeEntry, name: String) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let fullName = "\(parent.fullName)::\(name)"
+        let wasCollapsed = parent.collapsed
+        try await runDetached {
+            _ = try backend.createDeck(name: fullName)
+            // Reveal the new child if its parent was collapsed.
+            if wasCollapsed {
+                try backend.setDeckCollapsed(deckID: parent.id, collapsed: false)
+            }
+        }
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Returns a deck's buried cards (both scheduler- and user-buried) to the
+    /// study queue, then refreshes the deck counts (unburying changes how many
+    /// cards are due). Runs off the main actor. Clone of AnkiDroid's deck
+    /// "Unbury" context action. Undoable via the engine.
+    func unburyDeck(id: Int64) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.unburyDeck(deckID: id) }
         refreshDecks()
         refreshUndo()
     }
@@ -1417,6 +1474,53 @@ final class AnkiStore: ObservableObject {
         }
         refreshDecks()
         refreshUndo()
+    }
+
+    /// Debug-only screenshot hook for the deck-list subdeck collapse feature.
+    /// `-demoSubdecks` seeds a nested `Languages` deck tree (Spanish/French, with
+    /// Spanish::Verbs) and a couple of cards so counts show, then EXPANDS it;
+    /// `-demoSubdecksCollapsed` seeds the same tree but COLLAPSES the parent so
+    /// its subdecks are hidden — the two states for the collapse/expand
+    /// screenshots. Idempotent (skips re-creating an existing `Languages` tree)
+    /// and excluded from release builds.
+    func prepareSubdeckDemoIfRequested() {
+        let args = ProcessInfo.processInfo.arguments
+        let wantExpanded = args.contains("-demoSubdecks")
+        let wantCollapsed = args.contains("-demoSubdecksCollapsed")
+        guard wantExpanded || wantCollapsed else { return }
+        guard let backend else { return }
+        let parentName = "Languages"
+        do {
+            let existing = try backend.deckNames()
+            let alreadySeeded = existing.contains {
+                $0.name == parentName || $0.name.hasPrefix("\(parentName)::")
+            }
+            if !alreadySeeded {
+                let spanish = try backend.createDeck(name: "\(parentName)::Spanish")
+                _ = try backend.createDeck(name: "\(parentName)::French")
+                _ = try backend.createDeck(name: "\(parentName)::Spanish::Verbs")
+                let notetypes = try backend.notetypeNames()
+                if let basic = notetypes.first(where: {
+                    $0.name.hasPrefix("Basic") && !$0.name.lowercased().contains("type")
+                }) {
+                    _ = try backend.addNote(notetypeID: basic.id, fields: ["Hola", "Hello"], deckID: spanish)
+                    _ = try backend.addNote(notetypeID: basic.id, fields: ["Gato", "Cat"], deckID: spanish)
+                }
+            }
+            // Set the parent (and, when expanding, the Spanish subdeck) collapse
+            // state so the screenshot shows the intended tree.
+            let names = try backend.deckNames()
+            func deckID(_ full: String) -> Int64? { names.first { $0.name == full }?.id }
+            if let parentID = deckID(parentName) {
+                try backend.setDeckCollapsed(deckID: parentID, collapsed: wantCollapsed)
+            }
+            if wantExpanded, let spanishID = deckID("\(parentName)::Spanish") {
+                try backend.setDeckCollapsed(deckID: spanishID, collapsed: false)
+            }
+            refreshDecks()
+        } catch {
+            status = "Subdeck demo seed error: \(error)"
+        }
     }
 
     /// Debug-only screenshot hooks for the reviewer features. `-demoRemainingCounts`

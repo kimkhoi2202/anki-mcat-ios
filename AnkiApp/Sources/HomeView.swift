@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import AnkiKit
 
 /// Home screen: the deck list, cloning AnkiDroid's DeckPicker.
@@ -28,6 +29,23 @@ struct HomeView: View {
     // deck — Anki's custom-study essentials.
     @State private var showCreateFilteredDeck = false
     @State private var deckActionResult: String?
+
+    // Deck-list parity (full-parity): subdeck collapse, the deck overview shown
+    // on tap, and the expanded per-deck context menu (browse / add note /
+    // create subdeck / export / unbury), cloning AnkiDroid's DeckPicker.
+    /// Drives pushing the deck overview; `overviewDeckID` is the tapped deck.
+    @State private var overviewDeckID: Int64?
+    @State private var goOverview = false
+    /// "Browse" for a specific deck: pre-filtered card browser.
+    @State private var browseDeckQuery = ""
+    @State private var goDeckBrowse = false
+    /// "Add note" targeting a specific deck (its id), driving the editor sheet.
+    @State private var addNoteTarget: AddNoteTarget?
+    /// "Create subdeck": the parent deck being added under, plus the typed name.
+    @State private var createSubdeckParent: DeckTreeEntry?
+    @State private var subdeckNameInput = ""
+    /// A produced per-deck `.apkg` export awaiting the share sheet.
+    @State private var deckExportShare: ExportShareItem?
     // Card Info / Change Note Type (T3.3) screenshot/automation hooks.
     @State private var cardInfoTarget: CardInfoTarget?
     @State private var changeNotetypeNoteID: HomeNoteTarget?
@@ -51,6 +69,16 @@ struct HomeView: View {
                     store.refreshDecks()
                 }
             }
+            // "Add note" from a deck's context menu, defaulting to that deck.
+            .sheet(item: $addNoteTarget) { target in
+                NoteEditorView(store: store, mode: .add(defaultDeckID: target.deckID)) {
+                    store.refreshDecks()
+                }
+            }
+            // The produced per-deck export handed to the system share sheet.
+            .sheet(item: $deckExportShare) { item in
+                ShareSheet(items: [item.url])
+            }
             .navigationTitle("Decks")
             .navigationDestination(isPresented: $goReview) {
                 ReviewerView(store: store)
@@ -66,6 +94,18 @@ struct HomeView: View {
             }
             .navigationDestination(isPresented: $goImportExport) {
                 ImportExportView(store: store)
+            }
+            // Tapping a deck opens its overview (counts + Study + quick links)
+            // rather than jumping straight into the reviewer.
+            .navigationDestination(isPresented: $goOverview) {
+                if let id = overviewDeckID {
+                    DeckOverviewView(store: store, deckID: id)
+                }
+            }
+            // "Browse" from a deck's context menu: the card browser pre-filtered
+            // to that deck.
+            .navigationDestination(isPresented: $goDeckBrowse) {
+                CardBrowserView(store: store, initialQuery: browseDeckQuery)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -148,6 +188,16 @@ struct HomeView: View {
             } message: {
                 Text("Enter a new name for this deck.")
             }
+            // Create subdeck — prompts for a child name added under the deck,
+            // cloning AnkiDroid's "Create subdeck" deck action.
+            .alert("New Subdeck", isPresented: createSubdeckPresented) {
+                TextField("Subdeck name", text: $subdeckNameInput)
+                    .autocorrectionDisabled()
+                Button("Create") { performCreateSubdeck() }
+                Button("Cancel", role: .cancel) { createSubdeckParent = nil; subdeckNameInput = "" }
+            } message: {
+                Text(createSubdeckMessage)
+            }
             // Delete deck — confirmation clone of DeckPickerConfirmDeleteDeckDialog.
             .confirmationDialog(
                 "Delete deck?",
@@ -165,7 +215,9 @@ struct HomeView: View {
             } message: {
                 Text(deckActionError ?? "")
             }
-            .alert("Filtered deck", isPresented: deckResultPresented) {
+            // Shared result banner for deck actions that report an outcome
+            // (filtered rebuild/empty, unbury).
+            .alert("Deck", isPresented: deckResultPresented) {
                 Button("OK", role: .cancel) { deckActionResult = nil }
             } message: {
                 Text(deckActionResult ?? "")
@@ -196,6 +248,10 @@ struct HomeView: View {
             #if DEBUG
             // Launch-argument automation hooks for UI tests / screenshots.
             // Compiled only into debug builds; release ships none of this.
+            // Seed a nested subdeck tree (expanded or collapsed) for the
+            // collapse/expand screenshots before any deck-dependent hooks read
+            // the deck list.
+            store.prepareSubdeckDemoIfRequested()
             if ProcessInfo.processInfo.arguments.contains("-startInReview") {
                 goReview = true
             }
@@ -248,6 +304,13 @@ struct HomeView: View {
             }
             if ProcessInfo.processInfo.arguments.contains("-startInDeckOptions") {
                 optionsTarget = store.decks.first
+            }
+            // Open the deck overview (study options) for the first deck.
+            if ProcessInfo.processInfo.arguments.contains("-startInDeckOverview") {
+                if let first = store.decks.first {
+                    overviewDeckID = first.id
+                    goOverview = true
+                }
             }
             if ProcessInfo.processInfo.arguments.contains("-startInCreateFilteredDeck") {
                 showCreateFilteredDeck = true
@@ -324,13 +387,13 @@ struct HomeView: View {
                         .overlay(DS.separator)
                         .padding(.leading, DS.Spacing.l)
                 }
-                Button {
-                    store.selectDeck(id: deck.id)
-                    goReview = true
-                } label: {
-                    DeckRow(deck: deck)
-                }
-                .buttonStyle(.plain)
+                // Tapping the row opens the deck overview; the leading chevron
+                // (on decks with subdecks) toggles collapse without navigating.
+                DeckRow(
+                    deck: deck,
+                    onSelect: { openDeckOverview(deck) },
+                    onToggleCollapse: { store.toggleDeckCollapsed(deck) }
+                )
                 // Long-press deck actions, cloning AnkiDroid's DeckPickerContextMenu.
                 .contextMenu { deckRowMenu(deck) }
             }
@@ -345,16 +408,37 @@ struct HomeView: View {
         )
     }
 
-    /// Per-deck long-press menu: rename, options (limits), and delete — the
-    /// subset of AnkiDroid's deck context menu in T2.3's scope. "Options" is
-    /// hidden for filtered decks (they have no new/review-per-day limits) and
-    /// "Delete" for the Default deck (which Anki always keeps).
+    /// Per-deck long-press menu, cloning AnkiDroid's DeckPicker context menu:
+    /// Browse, Add note, Rename, Create subdeck, Custom study / Options (normal)
+    /// or Rebuild / Empty (filtered), Unbury, Export deck, and Delete. "Options"
+    /// and "Custom study" only apply to normal decks (filtered decks have no
+    /// per-day limits and are themselves the custom-study target); "Delete" is
+    /// hidden for the Default deck (which Anki always keeps).
     @ViewBuilder
     private func deckRowMenu(_ deck: DeckTreeEntry) -> some View {
+        // Open the deck's cards or jump to adding one.
+        Button {
+            browseDeck(deck)
+        } label: {
+            Label("Browse", systemImage: "magnifyingglass")
+        }
+        Button {
+            addNoteTarget = AddNoteTarget(deckID: deck.id)
+        } label: {
+            Label("Add note", systemImage: "square.and.pencil")
+        }
+
+        Divider()
+
         Button {
             beginRename(deck)
         } label: {
             Label("Rename", systemImage: "pencil")
+        }
+        Button {
+            beginCreateSubdeck(deck)
+        } label: {
+            Label("Create subdeck", systemImage: "folder.badge.plus")
         }
 
         if deck.filtered {
@@ -376,6 +460,25 @@ struct HomeView: View {
             } label: {
                 Label("Options", systemImage: "slider.horizontal.3")
             }
+            // Custom study reuses the existing filtered-deck builder for now.
+            Button {
+                showCreateFilteredDeck = true
+            } label: {
+                Label("Custom study", systemImage: "graduationcap")
+            }
+        }
+
+        // Return this deck's buried cards to the study queue.
+        Button {
+            unburyDeck(deck)
+        } label: {
+            Label("Unbury", systemImage: "eye")
+        }
+        // Export this deck (and its subdecks) as a shareable .apkg.
+        Button {
+            exportDeck(deck)
+        } label: {
+            Label("Export deck", systemImage: "square.and.arrow.up")
         }
 
         if deck.id != Self.defaultDeckID {
@@ -481,6 +584,15 @@ struct HomeView: View {
         Binding(get: { deckActionResult != nil }, set: { if !$0 { deckActionResult = nil } })
     }
 
+    private var createSubdeckPresented: Binding<Bool> {
+        Binding(get: { createSubdeckParent != nil }, set: { if !$0 { createSubdeckParent = nil } })
+    }
+
+    private var createSubdeckMessage: String {
+        guard let parent = createSubdeckParent else { return "" }
+        return "Create a subdeck under “\(parent.fullName)”."
+    }
+
     private func beginCreateDeck() {
         deckNameInput = ""
         showCreateDeck = true
@@ -489,6 +601,60 @@ struct HomeView: View {
     private func beginRename(_ deck: DeckTreeEntry) {
         deckNameInput = deck.fullName
         renameTarget = deck
+    }
+
+    /// Opens the deck overview (counts + Study + quick links) for a tapped deck.
+    /// AnkiDroid shows this study-options screen instead of dropping the user
+    /// straight into the reviewer (which, at 0 due, would be a bare "caught up").
+    private func openDeckOverview(_ deck: DeckTreeEntry) {
+        overviewDeckID = deck.id
+        goOverview = true
+    }
+
+    /// Opens the card browser pre-filtered to a deck (and its subdecks). The full
+    /// `::` name is quoted so decks with spaces still match.
+    private func browseDeck(_ deck: DeckTreeEntry) {
+        browseDeckQuery = "deck:\"\(deck.fullName)\""
+        goDeckBrowse = true
+    }
+
+    private func beginCreateSubdeck(_ deck: DeckTreeEntry) {
+        subdeckNameInput = ""
+        createSubdeckParent = deck
+    }
+
+    private func performCreateSubdeck() {
+        guard let parent = createSubdeckParent else { return }
+        let name = subdeckNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        createSubdeckParent = nil
+        subdeckNameInput = ""
+        guard !name.isEmpty else { return }
+        runDeckAction { try await store.createSubdeck(under: parent, name: name) }
+    }
+
+    /// Returns a deck's buried cards to the study queue, reporting the outcome.
+    private func unburyDeck(_ deck: DeckTreeEntry) {
+        runDeckAction {
+            try await store.unburyDeck(id: deck.id)
+            deckActionResult = "Returned any buried cards in “\(deck.name)” to study."
+        }
+    }
+
+    /// Exports a deck (and its subdecks) as a `.apkg`, then hands it to the share
+    /// sheet — reusing the same engine export the Import & Export screen uses.
+    /// The export runs as an exclusive backend op (so the busy indicator shows
+    /// and backend-touching controls disable for its duration).
+    private func exportDeck(_ deck: DeckTreeEntry) {
+        Task { @MainActor in
+            do {
+                let url = try await store.exportDeck(
+                    id: deck.id, name: deck.fullName, includeMedia: true
+                )
+                deckExportShare = ExportShareItem(url: url)
+            } catch {
+                deckActionError = describe(error)
+            }
+        }
     }
 
     private func createDeck() {
@@ -685,20 +851,63 @@ private struct SyncBanner: View {
     }
 }
 
-/// A single deck row: indented leaf name on the left, three colored counts on
-/// the right. Count colors mirror AnkiDroid's deck picker (new = indigo/accent,
-/// learning = red, review = green); zero counts are muted.
+/// A single deck row: an expand/collapse chevron (on decks with subdecks) and
+/// the indented leaf name on the left, three colored counts on the right. Count
+/// colors mirror AnkiDroid's deck picker (new = indigo/accent, learning = red,
+/// review = green); zero counts are muted.
+///
+/// The expander and the deck body are *sibling* buttons (not nested), so tapping
+/// the chevron toggles collapse while tapping the rest opens the deck overview.
 private struct DeckRow: View {
     let deck: DeckTreeEntry
+    let onSelect: () -> Void
+    let onToggleCollapse: () -> Void
 
     var body: some View {
+        HStack(spacing: DS.Spacing.s) {
+            // Indentation lives on the expander so names line up under it; the
+            // chevron rotates to point down when expanded, right when collapsed.
+            expander
+                .padding(.leading, CGFloat(deck.depth) * DS.Spacing.l)
+
+            Button(action: onSelect) {
+                deckBody
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, DS.Spacing.l)
+        .frame(minHeight: DS.minTapTarget)
+        .contentShape(Rectangle())
+    }
+
+    /// Expand/collapse control for decks with subdecks; a matching spacer for
+    /// leaf decks so all names stay aligned regardless of whether they expand.
+    @ViewBuilder
+    private var expander: some View {
+        if deck.hasChildren {
+            Button(action: onToggleCollapse) {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(DS.textSecondary)
+                    .rotationEffect(.degrees(deck.collapsed ? 0 : 90))
+                    .frame(width: 28, height: DS.minTapTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(deck.collapsed ? "Expand \(deck.name)" : "Collapse \(deck.name)")
+            .accessibilityIdentifier("deckExpander")
+        } else {
+            Color.clear.frame(width: 28, height: DS.minTapTarget)
+        }
+    }
+
+    private var deckBody: some View {
         HStack(spacing: DS.Spacing.m) {
             Text(deck.name)
                 .font(DS.Typography.body)
                 .foregroundStyle(deck.filtered ? DS.good : DS.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .padding(.leading, CGFloat(deck.depth) * DS.Spacing.l)
 
             Spacer(minLength: DS.Spacing.s)
 
@@ -712,7 +921,6 @@ private struct DeckRow: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(DS.textSecondary)
         }
-        .padding(.horizontal, DS.Spacing.l)
         .frame(minHeight: DS.minTapTarget)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
@@ -720,6 +928,33 @@ private struct DeckRow: View {
             "\(deck.fullName), \(deck.newCount) new, \(deck.learnCount) learning, \(deck.reviewCount) to review"
         )
     }
+}
+
+/// Identifiable wrapper so the Add-note sheet can be driven by `.sheet(item:)`
+/// from a chosen deck id (the deck's context-menu "Add note").
+private struct AddNoteTarget: Identifiable {
+    let id = UUID()
+    let deckID: Int64
+}
+
+/// Identifiable wrapper so a produced per-deck export file can drive
+/// `.sheet(item:)` for the system share sheet.
+private struct ExportShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+/// Minimal `UIActivityViewController` bridge for the system share sheet, used to
+/// hand a produced `.apkg` to AirDrop, Files, Mail, etc. (Mirrors the share
+/// sheet in `ImportExportView`; kept file-private here to avoid coupling.)
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 /// A single deck count: a monospaced-digit number, colored when non-zero and
