@@ -24,9 +24,12 @@ final class CardAudioPlayer: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesize
         synthesizer.delegate = self
     }
 
-    /// Plays `items` in sequence, stopping any current playback first.
+    /// Plays `items` in sequence, cancelling any current playback first. Uses
+    /// `cancelPlayback()` (not `stop()`) so the audio session stays active across
+    /// card/side changes — only leaving the reviewer deactivates it, avoiding a
+    /// deactivate/reactivate bounce on every card.
     func play(_ items: [CardAudio], mediaFolder: URL) {
-        stop()
+        cancelPlayback()
         guard !items.isEmpty else { return }
         self.items = items
         self.mediaFolder = mediaFolder
@@ -35,7 +38,17 @@ final class CardAudioPlayer: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesize
         advance()
     }
 
+    /// Stops all playback and releases the audio session, so other apps' audio
+    /// is no longer ducked once the user leaves the reviewer (or the session
+    /// finishes). The next `play()` reconfigures and reactivates the session.
     func stop() {
+        cancelPlayback()
+        deactivateSession()
+    }
+
+    /// Cancels any in-flight playback without touching the audio session.
+    /// Bumping the generation counter invalidates pending finish callbacks.
+    private func cancelPlayback() {
         generation &+= 1
         player?.stop()
         player = nil
@@ -87,6 +100,16 @@ final class CardAudioPlayer: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesize
         // `.playback` so review audio is audible even with the ringer muted.
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         try? AVAudioSession.sharedInstance().setActive(true)
+    }
+
+    /// Deactivates the shared audio session, notifying other apps so their audio
+    /// (e.g. music) can resume instead of staying ducked after the reviewer is
+    /// left. Paired with `configureSessionIfNeeded`, which the next `play()`
+    /// calls to reactivate it.
+    private func deactivateSession() {
+        guard sessionConfigured else { return }
+        sessionConfigured = false
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {

@@ -148,6 +148,13 @@ struct CardWebView: UIViewRepresentable {
         /// Adds a tap recognizer and the four swipe recognizers to the scroll
         /// view. `cancelsTouchesInView = false` keeps card links/buttons working,
         /// and the shared delegate lets them recognize alongside scrolling.
+        ///
+        /// The vertical (up = Good / down = Hard) grade swipes are made to
+        /// `require(toFail:)` the scroll view's own pan: on a scrollable card a
+        /// real scroll wins and the card isn't silently graded, while on a card
+        /// that fits (the pan has nothing to scroll, so it fails) the swipe still
+        /// grades. The horizontal Again/Easy swipes don't collide with vertical
+        /// scrolling, so they're left to recognize freely.
         func attachGestures(to webView: WKWebView) {
             let scrollView = webView.scrollView
 
@@ -161,6 +168,9 @@ struct CardWebView: UIViewRepresentable {
                 swipe.direction = direction
                 swipe.delegate = gestureDelegate
                 swipe.cancelsTouchesInView = false
+                if direction == .up || direction == .down {
+                    swipe.require(toFail: scrollView.panGestureRecognizer)
+                }
                 scrollView.addGestureRecognizer(swipe)
             }
         }
@@ -177,10 +187,21 @@ struct CardWebView: UIViewRepresentable {
             switch recognizer.direction {
             case .left: onSwipe?(.left)
             case .right: onSwipe?(.right)
-            case .up: onSwipe?(.up)
-            case .down: onSwipe?(.down)
+            // Only grade on a vertical swipe when the card can't scroll, so a
+            // flick meant to scroll a long answer never silently grades it.
+            // (Backs up the `require(toFail:)` on these recognizers above.)
+            case .up where !isVerticallyScrollable(recognizer.view): onSwipe?(.up)
+            case .down where !isVerticallyScrollable(recognizer.view): onSwipe?(.down)
             default: break
             }
+        }
+
+        /// Whether the card's scroll view has content taller than its bounds (so
+        /// a vertical drag is a real scroll). The 1pt epsilon absorbs sub-pixel
+        /// rounding in the measured content size.
+        private func isVerticallyScrollable(_ view: UIView?) -> Bool {
+            guard let scrollView = view as? UIScrollView else { return false }
+            return scrollView.contentSize.height > scrollView.bounds.height + 1
         }
     }
 
@@ -476,7 +497,10 @@ struct ReviewerView: View {
                             color: Color) -> some View {
         Button { store.rate(rating) } label: {
             VStack(spacing: 2) {
-                if index < store.currentIntervals.count, !store.currentIntervals[index].isEmpty {
+                // Gated on "Show next review time above answer buttons"
+                // (engine `show_intervals_on_buttons`), matching AnkiDroid.
+                if store.reviewingPrefs.showIntervalsOnButtons,
+                   index < store.currentIntervals.count, !store.currentIntervals[index].isEmpty {
                     Text(store.currentIntervals[index])
                         .font(DS.Typography.caption)
                         .monospacedDigit()
@@ -490,9 +514,12 @@ struct ReviewerView: View {
         .accessibilityLabel(intervalAccessibilityLabel(label, index: index))
     }
 
-    /// "Good, interval 1d" so the projected interval is announced too.
+    /// "Good, interval 1d" so the projected interval is announced too — but only
+    /// when the interval is actually shown (the `show_intervals_on_buttons`
+    /// preference is on), so VoiceOver matches the visible label.
     private func intervalAccessibilityLabel(_ label: String, index: Int) -> String {
-        guard index < store.currentIntervals.count, !store.currentIntervals[index].isEmpty else {
+        guard store.reviewingPrefs.showIntervalsOnButtons,
+              index < store.currentIntervals.count, !store.currentIntervals[index].isEmpty else {
             return label
         }
         return "\(label), interval \(store.currentIntervals[index])"

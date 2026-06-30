@@ -122,6 +122,13 @@ final class AnkiStore: ObservableObject {
     /// the question side on show and the answer side on reveal.
     private var currentQuestionAudio: [CardAudio] = []
     private var currentAnswerAudio: [CardAudio] = []
+    /// The current card's answer HTML exactly as rendered, with any `[[type:…]]`
+    /// placeholder still intact. `currentAnswer` is *derived* from this on every
+    /// reveal — substituting the type-in diff, or stripping the placeholder —
+    /// rather than mutating it in place, so re-revealing after a flip-back or an
+    /// in-place note edit recomputes correctly instead of consuming the
+    /// placeholder once.
+    private var pristineAnswer = ""
     private let cardAudioPlayer = CardAudioPlayer()
 
     /// The card currently shown in the reviewer, if any — used to open Card Info
@@ -551,7 +558,10 @@ final class AnkiStore: ObservableObject {
         typeAnswer = Self.parseTypeField(in: q.text)
         typedAnswer = ""
         currentQuestion = Self.stripTypePlaceholders(q.text)
-        currentAnswer = a.text
+        pristineAnswer = a.text
+        // Not shown until reveal() derives it; keep a placeholder-free default so
+        // a raw `[[type:…]]` can never appear, even transiently.
+        currentAnswer = Self.stripTypePlaceholders(pristineAnswer)
         // One interval label per button: [again, hard, good, easy].
         // Ignore an unexpected shape rather than mislabeling buttons.
         let intervals = (try? backend.describeNextStates(queued.states)) ?? []
@@ -586,29 +596,39 @@ final class AnkiStore: ObservableObject {
 
     func reveal() {
         showingAnswer = true
-        if let typeAnswer { applyTypeAnswerDiff(typeAnswer) }
+        // Recompute the shown answer from the pristine copy every time, so a
+        // flip-back → edit-typed-answer → reveal recomputes the diff instead of
+        // reusing an already-consumed placeholder.
+        currentAnswer = renderedAnswer()
         // Autoplay the answer side's audio, as Anki does on flipping to the back.
         cardAudioPlayer.play(currentAnswerAudio, mediaFolder: mediaFolderURL)
     }
 
-    /// Computes the type-in-the-answer diff (typed vs the expected field value)
-    /// and substitutes it into the answer HTML where the `[[type:…]]` placeholder
-    /// is, mirroring Anki's reviewer.
-    private func applyTypeAnswerDiff(_ field: TypeAnswerField) {
-        guard let backend, let card = currentCard else { return }
+    /// Builds the answer HTML to display from `pristineAnswer`: substitutes the
+    /// type-in-the-answer diff (typed vs the expected field value) for the
+    /// `[[type:…]]` placeholder when the card has a supported type field, and
+    /// otherwise strips any placeholder so a raw `[[type:…]]` — e.g. an
+    /// unsupported `[[type:cloze:…]]` — never leaks onto the back. Pure function
+    /// of `pristineAnswer`/`typedAnswer`, so it's safe to call repeatedly.
+    /// Mirrors Anki's reviewer typeans substitution.
+    private func renderedAnswer() -> String {
+        // No supported type-in field (plain card, or an unsupported cloze
+        // type-in): never show a raw placeholder.
+        guard let field = typeAnswer, let backend, let card = currentCard else {
+            return Self.stripTypePlaceholders(pristineAnswer)
+        }
         let expected = expectedFieldValue(field.fieldName, noteID: card.card.noteID) ?? ""
         let diff = (try? backend.compareAnswer(
             expected: expected, typed: typedAnswer, combining: field.combining
         )) ?? ""
         guard !diff.isEmpty else {
-            currentAnswer = Self.stripTypePlaceholders(currentAnswer)
-            return
+            return Self.stripTypePlaceholders(pristineAnswer)
         }
         // Escape regex-replacement metacharacters so the diff HTML inserts literally.
         let safe = diff
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "$", with: "\\$")
-        currentAnswer = currentAnswer.replacingOccurrences(
+        return pristineAnswer.replacingOccurrences(
             of: "\\[\\[type:[^\\]]*\\]\\]", with: safe, options: .regularExpression
         )
     }
@@ -651,7 +671,10 @@ final class AnkiStore: ObservableObject {
 
     func rate(_ rating: Anki_Scheduler_CardAnswer.Rating) {
         guard let backend, let card = currentCard else { return }
-        let ms = UInt32(min(60_000, Date().timeIntervalSince(cardShownAt) * 1000))
+        // Clamp to non-negative: if the wall clock moves backward (NTP/manual
+        // change) the elapsed product is negative, and `UInt32(negativeDouble)`
+        // is a fatal trap. Cap at 60s as Anki does.
+        let ms = UInt32(min(60_000, max(0, Date().timeIntervalSince(cardShownAt) * 1000)))
         do {
             try backend.answer(card: card, rating: rating, millisecondsTaken: ms)
             // Only advance once the answer is actually recorded.
@@ -780,9 +803,16 @@ final class AnkiStore: ObservableObject {
             currentQuestionAudio = q.audio
             currentAnswerAudio = a.audio
             typeAnswer = Self.parseTypeField(in: q.text)
-            typedAnswer = ""
             currentQuestion = Self.stripTypePlaceholders(q.text)
-            currentAnswer = a.text
+            pristineAnswer = a.text
+            // Re-derive the shown answer from the fresh pristine copy (re-applying
+            // the type-in diff if the answer is currently revealed) so an in-place
+            // note edit never leaves a raw `[[type:…]]` placeholder on the back.
+            // Keep the user's typed answer so the recomputed diff still reflects
+            // what they entered.
+            currentAnswer = showingAnswer
+                ? renderedAnswer()
+                : Self.stripTypePlaceholders(pristineAnswer)
             if let fresh = try? backend.getCard(cardID: card.card.id) {
                 currentFlag = Int(fresh.flags)
             }
@@ -1398,8 +1428,10 @@ enum NoteEditorError: LocalizedError {
 /// Plain, view-facing snapshot of the engine's reviewing preferences. Decouples
 /// the SwiftUI layer from the generated protobuf type.
 struct ReviewingPrefs: Equatable {
-    /// "Show next review time above answer buttons".
-    var showIntervalsOnButtons = false
+    /// "Show next review time above answer buttons". Defaults to `true` to match
+    /// the engine's default (`estTimes`), so interval labels stay visible before
+    /// the engine prefs load (or if they can't be read) rather than vanishing.
+    var showIntervalsOnButtons = true
     /// "Show remaining card count" during review.
     var showRemainingDueCounts = false
     /// "Show play buttons on cards with audio" (inverse of the engine's
