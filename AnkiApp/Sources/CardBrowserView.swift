@@ -13,8 +13,11 @@ import AnkiKit
 /// time for only the cards scrolled into view, so the browser opens quickly and
 /// uses bounded memory even on collections with tens of thousands of cards.
 ///
-/// Scope (T2.2): search + results + tap-to-edit + suspend/flag/delete. No column
-/// customization, saved searches, multi-select, or preview pane.
+/// Scope: search + results + tap-to-edit + suspend/flag/delete, multi-select
+/// bulk actions, configurable columns (picker + order, persisted), tap-to-sort
+/// (column + direction, persisted), and Find & Replace. Deferred to a later
+/// task: the notes/cards mode toggle, the filter sidebar (decks/tags/flags/saved
+/// searches/card-state tree), and the card preview pane.
 @MainActor
 struct CardBrowserView: View {
     @ObservedObject var store: AnkiStore
@@ -24,6 +27,12 @@ struct CardBrowserView: View {
     @State private var infoTarget: CardTarget?
     @State private var changeTypeTarget: NoteTarget?
     @State private var pendingDelete: CardBrowserRow?
+
+    // Browser power-feature sheets.
+    /// Presents the column picker (which columns + their order).
+    @State private var showingColumnPicker = false
+    /// Presents the Find & Replace sheet.
+    @State private var showingFindReplace = false
 
     // Multi-select bulk-action UI state.
     /// Presents the "Change deck" picker for the selection.
@@ -65,6 +74,7 @@ struct CardBrowserView: View {
         .textInputAutocapitalization(.never)
         .onSubmit(of: .search) { model.submitSearch() }
         .toolbar { selectionToolbar }
+        .toolbar { overflowToolbar }
         // The bottom bulk-action bar slides in while multi-select is active.
         .safeAreaInset(edge: .bottom) {
             if model.isSelecting { bulkActionBar }
@@ -73,12 +83,59 @@ struct CardBrowserView: View {
             // Initial load (the view's `.task` runs once on appear).
             model.startIfNeeded()
             #if DEBUG
-            // Screenshot/automation hook: open straight into multi-select with a
-            // few rows selected so a screenshot shows the selection UI + bar.
-            if ProcessInfo.processInfo.arguments.contains("-demoBrowserSelect") {
+            // Screenshot/automation hooks for the browser power features.
+            let arguments = ProcessInfo.processInfo.arguments
+            // Open straight into multi-select with a few rows selected so a
+            // screenshot shows the selection UI + bar.
+            if arguments.contains("-demoBrowserSelect") {
                 await model.demoEnterSelectionForScreenshot()
             }
+            // Configure a richer column set so the list shows the N-column row
+            // layout (extra labeled lines) in a screenshot.
+            if arguments.contains("-demoBrowserColumnsApplied") {
+                await model.demoApplyRichColumnsForScreenshot()
+            }
+            // Present the column picker (waits for the engine column list first).
+            if arguments.contains("-demoBrowserColumns") {
+                await model.demoWaitForMetadataForScreenshot()
+                showingColumnPicker = true
+            }
+            // Present the Find & Replace sheet (waits for field names first).
+            if arguments.contains("-demoBrowserFindReplace") {
+                await model.demoWaitForMetadataForScreenshot()
+                showingFindReplace = true
+            }
             #endif
+        }
+        .sheet(isPresented: $showingColumnPicker) {
+            ColumnPickerSheet(
+                available: model.availableColumns,
+                activeKeys: model.activeColumnKeys
+            ) { keys in
+                model.setActiveColumns(keys)
+                showingColumnPicker = false
+            } onCancel: {
+                showingColumnPicker = false
+            }
+        }
+        .sheet(isPresented: $showingFindReplace) {
+            FindReplaceSheet(
+                fieldNames: model.fieldNames,
+                selectedCount: model.selectedCount
+            ) { find, replacement, regex, matchCase, fieldName, onlySelected in
+                showingFindReplace = false
+                model.runFindReplace(
+                    find: find, replacement: replacement, regex: regex,
+                    matchCase: matchCase, fieldName: fieldName, onlySelected: onlySelected
+                )
+            } onCancel: {
+                showingFindReplace = false
+            }
+        }
+        .alert("Find & Replace", isPresented: findReplaceResultPresented) {
+            Button("OK", role: .cancel) { model.findReplaceResult = nil }
+        } message: {
+            Text(model.findReplaceResult ?? "")
         }
         .sheet(isPresented: $showingDeckPicker) {
             DeckPickerSheet(decks: store.decks.filter { !$0.filtered }) { deckID in
@@ -219,7 +276,7 @@ struct CardBrowserView: View {
             Button {
                 openEditor(forCard: row.id)
             } label: {
-                CardBrowserRowView(row: row)
+                CardBrowserRowView(row: row, columns: model.activeColumns)
             }
             .buttonStyle(.plain)
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -269,7 +326,7 @@ struct CardBrowserView: View {
     @ViewBuilder
     private func selectableRowContent(_ cardID: Int64) -> some View {
         if let row = model.rowsByID[cardID] {
-            CardBrowserRowView(row: row)
+            CardBrowserRowView(row: row, columns: model.activeColumns)
         } else {
             CardBrowserRowPlaceholder()
         }
@@ -411,6 +468,56 @@ struct CardBrowserView: View {
                 Button("Select") { model.enterSelection() }
                     .disabled(model.cardIDs.isEmpty)
             }
+        }
+    }
+
+    /// Overflow menu (always present): Sort ▸, Columns…, and Find & Replace… —
+    /// the three browser power features. Mirrors AnkiDroid's browser overflow,
+    /// which gathers sort / column-management / find-replace there. Find &
+    /// Replace auto-scopes to the selection when one exists.
+    @ToolbarContentBuilder
+    private var overflowToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                sortMenu
+                Button {
+                    showingColumnPicker = true
+                } label: {
+                    Label("Columns…", systemImage: "slider.horizontal.3")
+                }
+                Button {
+                    showingFindReplace = true
+                } label: {
+                    Label("Find & Replace…", systemImage: "text.magnifyingglass")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .accessibilityLabel("Browser options")
+        }
+    }
+
+    /// Sort submenu: one entry per sortable column. The active column shows an
+    /// up/down chevron for the current direction; tapping it flips direction,
+    /// tapping another switches to it.
+    private var sortMenu: some View {
+        Menu {
+            ForEach(model.sortMenuColumns) { column in
+                Button {
+                    model.applySort(columnKey: column.key)
+                } label: {
+                    if model.sort.column == column.key {
+                        Label(
+                            column.label,
+                            systemImage: model.sort.reverse ? "chevron.down" : "chevron.up"
+                        )
+                    } else {
+                        Text(column.label)
+                    }
+                }
+            }
+        } label: {
+            Label("Sort", systemImage: "arrow.up.arrow.down")
         }
     }
 
@@ -573,6 +680,10 @@ struct CardBrowserView: View {
         Binding(get: { model.actionError != nil }, set: { if !$0 { model.actionError = nil } })
     }
 
+    private var findReplaceResultPresented: Binding<Bool> {
+        Binding(get: { model.findReplaceResult != nil }, set: { if !$0 { model.findReplaceResult = nil } })
+    }
+
     /// Drives the add/remove-tag prompt; clearing it resets the typed text so a
     /// dismissed prompt doesn't leak its input into the next one.
     private var tagAlertPresented: Binding<Bool> {
@@ -647,6 +758,212 @@ private struct DeckPickerSheet: View {
     }
 }
 
+/// The browser column picker: choose which columns show and in what order,
+/// mirroring AnkiDroid's "Manage columns". A "Shown" section holds the active
+/// columns (reorder + remove via Edit), and an "Available" section lists the
+/// rest (tap to add). Reports the chosen ordered keys on Done.
+private struct ColumnPickerSheet: View {
+    let available: [BrowserColumn]
+    let onApply: ([String]) -> Void
+    let onCancel: () -> Void
+
+    /// Working copy of the active columns (full metadata), edited locally and
+    /// only committed on Done.
+    @State private var active: [BrowserColumn]
+    @State private var editMode: EditMode = .inactive
+
+    init(
+        available: [BrowserColumn],
+        activeKeys: [String],
+        onApply: @escaping ([String]) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.available = available
+        self.onApply = onApply
+        self.onCancel = onCancel
+        // Resolve the active keys to full columns in their saved order, dropping
+        // any the engine no longer knows.
+        let byKey = Dictionary(uniqueKeysWithValues: available.map { ($0.key, $0) })
+        _active = State(initialValue: activeKeys.compactMap { byKey[$0] })
+    }
+
+    /// Columns not currently shown (the "add" candidates).
+    private var inactive: [BrowserColumn] {
+        let activeKeys = Set(active.map(\.key))
+        return available.filter { !activeKeys.contains($0.key) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                DS.background.ignoresSafeArea()
+                if available.isEmpty {
+                    ProgressView("Loading columns…")
+                        .font(DS.Typography.caption)
+                        .foregroundStyle(DS.textSecondary)
+                } else {
+                    list
+                }
+            }
+            .navigationTitle("Columns")
+            .navigationBarTitleDisplayMode(.inline)
+            .environment(\.editMode, $editMode)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onCancel() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    EditButton()
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { onApply(active.map(\.key)) }
+                        .disabled(active.isEmpty)
+                }
+            }
+        }
+    }
+
+    private var list: some View {
+        List {
+            Section {
+                ForEach(active) { column in
+                    Text(column.label)
+                        .font(DS.Typography.body)
+                        .foregroundStyle(DS.textPrimary)
+                        .listRowBackground(DS.surface)
+                }
+                .onMove { active.move(fromOffsets: $0, toOffset: $1) }
+                .onDelete(perform: remove)
+            } header: {
+                Text("Shown")
+            } footer: {
+                Text("Tap Edit to reorder or remove. The first column is the row's headline.")
+            }
+
+            if !inactive.isEmpty {
+                Section("Add") {
+                    ForEach(inactive) { column in
+                        Button {
+                            active.append(column)
+                        } label: {
+                            HStack(spacing: DS.Spacing.m) {
+                                Image(systemName: "plus.circle.fill")
+                                    .foregroundStyle(DS.accent)
+                                Text(column.label)
+                                    .font(DS.Typography.body)
+                                    .foregroundStyle(DS.textPrimary)
+                                Spacer(minLength: 0)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(DS.surface)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+    }
+
+    /// Removes shown columns, but never the last one (an empty row is meaningless).
+    private func remove(at offsets: IndexSet) {
+        guard active.count - offsets.count >= 1 else { return }
+        active.remove(atOffsets: offsets)
+    }
+}
+
+/// The browser Find & Replace sheet (AnkiDroid's browser find&replace): a find
+/// term + replacement, regex / match-case options, an "in field" picker (all
+/// fields or one named field), and a scope toggle — selected notes when a
+/// selection exists, else all notes matching the current search. Reports the
+/// inputs on Replace; the caller resolves the note scope and runs the engine op.
+private struct FindReplaceSheet: View {
+    let fieldNames: [String]
+    let selectedCount: Int
+    let onReplace: (
+        _ find: String, _ replacement: String, _ regex: Bool,
+        _ matchCase: Bool, _ fieldName: String?, _ onlySelected: Bool
+    ) -> Void
+    let onCancel: () -> Void
+
+    @State private var find = ""
+    @State private var replacement = ""
+    @State private var regex = false
+    @State private var matchCase = false
+    /// Empty tag = "All fields"; otherwise the chosen field name.
+    @State private var fieldSelection = ""
+    @State private var onlySelected: Bool
+
+    init(
+        fieldNames: [String],
+        selectedCount: Int,
+        onReplace: @escaping (String, String, Bool, Bool, String?, Bool) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.fieldNames = fieldNames
+        self.selectedCount = selectedCount
+        self.onReplace = onReplace
+        self.onCancel = onCancel
+        // Default to the selection when there is one (AnkiDroid's default scope).
+        _onlySelected = State(initialValue: selectedCount > 0)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Find", text: $find)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    TextField("Replace with", text: $replacement)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                }
+
+                Section {
+                    Toggle("Treat input as regular expression", isOn: $regex)
+                    Toggle("Match case", isOn: $matchCase)
+                    Picker("In", selection: $fieldSelection) {
+                        Text("All fields").tag("")
+                        ForEach(fieldNames, id: \.self) { name in
+                            Text(name).tag(name)
+                        }
+                    }
+                }
+
+                Section {
+                    if selectedCount > 0 {
+                        Toggle("Only selected notes (\(selectedCount))", isOn: $onlySelected)
+                    } else {
+                        Text("Applies to all notes matching the current search.")
+                            .font(DS.Typography.caption)
+                            .foregroundStyle(DS.textSecondary)
+                    }
+                } footer: {
+                    Text("Find & Replace runs over the chosen notes' fields and is undoable.")
+                }
+            }
+            .navigationTitle("Find & Replace")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onCancel() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Replace") {
+                        onReplace(
+                            find, replacement, regex, matchCase,
+                            fieldSelection.isEmpty ? nil : fieldSelection, onlySelected
+                        )
+                    }
+                    .disabled(find.isEmpty)
+                }
+            }
+        }
+    }
+}
+
 /// Owns the Card Browser's windowed data and search state, off the View so the
 /// paging/caching logic stays contained and testable.
 ///
@@ -681,6 +998,26 @@ final class CardBrowserModel: ObservableObject {
     /// that never left the viewport.
     @Published private(set) var loadGeneration = 0
 
+    // MARK: Configurable columns + sort (persisted)
+
+    /// Every selectable column the engine offers (labels + sort capability),
+    /// loaded once from `all_browser_columns`. Empty until loaded; the picker and
+    /// sort menu read from it.
+    @Published private(set) var availableColumns: [BrowserColumn] = []
+    /// The active columns, in display order — the keys passed to the engine for
+    /// each row's cells. Persisted in UserDefaults; defaults to question/answer/
+    /// deck (the out-of-the-box AnkiDroid layout).
+    @Published private(set) var activeColumnKeys: [String]
+    /// The current sort (builtin column + direction). Persisted; defaults to the
+    /// engine's sort-field-ascending. Re-running the search applies it.
+    @Published private(set) var sort: BrowserSort
+    /// Candidate field names for Find & Replace's "in field" picker (union over
+    /// note types), loaded lazily.
+    @Published private(set) var fieldNames: [String] = []
+    /// Result banner after a Find & Replace run ("Updated N notes." or an empty-
+    /// scope note); drives a short confirmation alert.
+    @Published var findReplaceResult: String?
+
     /// Whether the browser is in multi-select mode (AnkiDroid's CardBrowser
     /// multiselect). Entered from the toolbar "Select" button or a row's "Select"
     /// context action; while on, a row tap toggles selection instead of opening
@@ -712,18 +1049,209 @@ final class CardBrowserModel: ObservableObject {
     /// Debounce window for live typing.
     private static let debounceNanos: UInt64 = 300_000_000
 
+    // UserDefaults keys for the persisted column set + sort choice.
+    private static let columnsDefaultsKey = "cardBrowser.activeColumns"
+    private static let sortColumnDefaultsKey = "cardBrowser.sortColumn"
+    private static let sortReverseDefaultsKey = "cardBrowser.sortReverse"
+
     init(store: AnkiStore, initialQuery: String) {
         self.store = store
         self.query = initialQuery
+
+        // Restore the persisted column set + sort, falling back to Anki's
+        // defaults. Stored as plain keys/booleans so a schema-less restore is
+        // safe; unknown column keys are pruned once the engine list loads.
+        let defaults = UserDefaults.standard
+        let savedColumns = defaults.stringArray(forKey: Self.columnsDefaultsKey) ?? []
+        self.activeColumnKeys = savedColumns.isEmpty ? Backend.defaultBrowserColumns : savedColumns
+        if let savedSortColumn = defaults.string(forKey: Self.sortColumnDefaultsKey),
+           !savedSortColumn.isEmpty {
+            self.sort = BrowserSort(
+                column: savedSortColumn,
+                reverse: defaults.bool(forKey: Self.sortReverseDefaultsKey)
+            )
+        } else {
+            self.sort = .default
+        }
     }
 
     // MARK: Search
 
-    /// Runs the initial search once, when the view first appears.
+    /// Runs the initial search once, when the view first appears, and loads the
+    /// engine's column/field metadata that the picker, sort menu, and Find &
+    /// Replace draw from.
     func startIfNeeded() {
         guard !didStart else { return }
         didStart = true
         runSearch()
+        loadMetadataIfNeeded()
+    }
+
+    // MARK: Configurable columns + sort
+
+    /// Lazily loads the engine's full column list (for the picker + sort menu)
+    /// and the field-name list (for Find & Replace). Prunes any persisted active
+    /// column key the engine no longer recognizes so the row builder never asks
+    /// for an invalid column.
+    func loadMetadataIfNeeded() {
+        if availableColumns.isEmpty {
+            Task {
+                let columns = await store.allBrowserColumns()
+                guard !columns.isEmpty else { return }
+                availableColumns = columns
+                let known = Set(columns.map(\.key))
+                let pruned = activeColumnKeys.filter { known.contains($0) }
+                let resolved = pruned.isEmpty
+                    ? Backend.defaultBrowserColumns.filter { known.contains($0) }
+                    : pruned
+                if resolved != activeColumnKeys, !resolved.isEmpty {
+                    activeColumnKeys = resolved
+                    persistColumns()
+                    rowsByID = [:]
+                    loadGeneration += 1
+                }
+            }
+        }
+        if fieldNames.isEmpty {
+            Task { fieldNames = await store.browserFieldNames() }
+        }
+    }
+
+    /// The active columns resolved to full metadata (label / sortable). Falls
+    /// back to a humanized key when the engine list hasn't loaded yet, so rows
+    /// still render sensible headers immediately on first open.
+    var activeColumns: [BrowserColumn] {
+        activeColumnKeys.map { key in
+            availableColumns.first { $0.key == key }
+                ?? BrowserColumn(key: key, label: Self.humanize(key), sortable: false, defaultReverse: false)
+        }
+    }
+
+    /// The columns the sort menu offers (only engine-sortable ones). If the
+    /// engine list hasn't loaded yet, expose at least the current sort column so
+    /// the menu can still show/flip it.
+    var sortMenuColumns: [BrowserColumn] {
+        let sortable = availableColumns.filter(\.sortable)
+        if sortable.isEmpty {
+            return [BrowserColumn(
+                key: sort.column, label: label(forColumnKey: sort.column),
+                sortable: true, defaultReverse: sort.reverse
+            )]
+        }
+        return sortable
+    }
+
+    /// The display label for a column key (engine label if loaded, else a
+    /// humanized fallback).
+    func label(forColumnKey key: String) -> String {
+        availableColumns.first { $0.key == key }?.label ?? Self.humanize(key)
+    }
+
+    /// Applies a new active-column set (order + membership) from the picker:
+    /// persists it, then drops cached rows and re-triggers loading so the new
+    /// cells appear — no re-search needed, since the id list/order is unchanged.
+    /// Always keeps at least one column (an empty row would be meaningless).
+    func setActiveColumns(_ keys: [String]) {
+        let cleaned = keys.isEmpty ? Backend.defaultBrowserColumns : keys
+        guard cleaned != activeColumnKeys else { return }
+        activeColumnKeys = cleaned
+        persistColumns()
+        // Invalidate any in-flight page loads, which fetched cells for the OLD
+        // column set: bumping `searchSeq` makes their results be discarded so
+        // they can't land afterward and populate rows whose cells no longer line
+        // up with the new active columns. Clearing `loadingIDs` then lets the
+        // fresh loads (re-triggered by the `loadGeneration` bump) run for the
+        // on-screen rows. Re-using the search guard keeps the windowing intact;
+        // the id list/order is unchanged, so no re-search is needed.
+        searchSeq += 1
+        loadingIDs.removeAll()
+        rowsByID = [:]
+        loadGeneration += 1
+    }
+
+    /// Applies a sort column (from the sort menu): tapping the current column
+    /// flips its direction; tapping a different column switches to it in its
+    /// natural default direction — matching desktop/AnkiDroid header-tap
+    /// behavior. Persists the choice and re-runs the search (ids must be
+    /// re-resolved in the new order), preserving the windowing + out-of-order
+    /// guard inside `runSearch`.
+    func applySort(columnKey: String) {
+        if sort.column == columnKey {
+            sort = BrowserSort(column: columnKey, reverse: !sort.reverse)
+        } else {
+            let reverse = availableColumns.first { $0.key == columnKey }?.defaultReverse ?? false
+            sort = BrowserSort(column: columnKey, reverse: reverse)
+        }
+        persistSort()
+        runSearch()
+    }
+
+    private func persistColumns() {
+        UserDefaults.standard.set(activeColumnKeys, forKey: Self.columnsDefaultsKey)
+    }
+
+    private func persistSort() {
+        UserDefaults.standard.set(sort.column, forKey: Self.sortColumnDefaultsKey)
+        UserDefaults.standard.set(sort.reverse, forKey: Self.sortReverseDefaultsKey)
+    }
+
+    /// Turns a camelCase column key into a readable label ("cardDue" → "Card
+    /// Due") as a fallback before the engine's localized labels load.
+    private static func humanize(_ key: String) -> String {
+        guard !key.isEmpty else { return key }
+        var out = ""
+        for (i, ch) in key.enumerated() {
+            if i == 0 {
+                out.append(Character(ch.uppercased()))
+            } else if ch.isUppercase {
+                out.append(" ")
+                out.append(ch)
+            } else {
+                out.append(ch)
+            }
+        }
+        return out
+    }
+
+    // MARK: Find & Replace
+
+    /// Runs Find & Replace, resolving the note scope from the current selection
+    /// (when `onlySelected` and a selection exists) or the whole current search
+    /// (all matching notes), off-main. On success, refreshes the list so changed
+    /// fields — and any re-ordering under a field-based sort — appear, and reports
+    /// the number of notes changed.
+    func runFindReplace(
+        find: String, replacement: String, regex: Bool, matchCase: Bool,
+        fieldName: String?, onlySelected: Bool
+    ) {
+        guard !find.isEmpty else { return }
+        let currentQuery = query
+        let selectionIDs = Array(selection)
+        Task {
+            do {
+                let noteIDs: [Int64]
+                if onlySelected, !selectionIDs.isEmpty {
+                    noteIDs = await store.noteIDs(forCards: selectionIDs)
+                } else {
+                    noteIDs = try await store.searchNotes(query: currentQuery)
+                }
+                guard !noteIDs.isEmpty else {
+                    findReplaceResult = "No notes in scope."
+                    return
+                }
+                let changed = try await store.findAndReplace(
+                    noteIDs: noteIDs, search: find, replacement: replacement,
+                    regex: regex, matchCase: matchCase, fieldName: fieldName
+                )
+                // Plain runtime string (shown via Text(String)), so pluralize
+                // manually rather than with ^[…](inflect:) markup, which only the
+                // LocalizedStringKey initializer would interpret.
+                findReplaceResult = "Updated \(changed) note\(changed == 1 ? "" : "s")."
+                refresh()
+            } catch {
+                actionError = describeBrowserError(error)
+            }
+        }
     }
 
     /// Live-search entry point from the search field. Debounces so we don't
@@ -767,11 +1295,12 @@ final class CardBrowserModel: ObservableObject {
         loadGeneration += 1
         let seq = searchSeq
         let currentQuery = query
+        let currentSort = sort
         loadingIDs.removeAll()
         if cardIDs.isEmpty { phase = .loading }
         Task {
             do {
-                let ids = try await store.browserCardIDs(query: currentQuery)
+                let ids = try await store.browserCardIDs(query: currentQuery, sort: currentSort)
                 guard seq == searchSeq else { return }
                 setIDs(ids)
                 phase = .loaded
@@ -801,8 +1330,9 @@ final class CardBrowserModel: ObservableObject {
         guard !pageIDs.isEmpty else { return }
         pageIDs.forEach { loadingIDs.insert($0) }
         let seq = searchSeq
+        let columns = activeColumnKeys
         Task {
-            let fetched = await store.browserRows(forCardIDs: pageIDs)
+            let fetched = await store.browserRows(forCardIDs: pageIDs, columns: columns)
             // Discard a page that belongs to a superseded search; its loadingIDs
             // were already cleared by the newer `runSearch`.
             guard seq == searchSeq else { return }
@@ -868,8 +1398,9 @@ final class CardBrowserModel: ObservableObject {
     /// that row in place (or dropping it if the card vanished).
     private func reloadRow(cardID: Int64) {
         let seq = searchSeq
+        let columns = activeColumnKeys
         Task {
-            let fetched = await store.browserRows(forCardIDs: [cardID])
+            let fetched = await store.browserRows(forCardIDs: [cardID], columns: columns)
             guard seq == searchSeq else { return }
             if let row = fetched.first {
                 rowsByID[cardID] = row
@@ -926,6 +1457,42 @@ final class CardBrowserModel: ObservableObject {
         }
         isSelecting = true
         selection = Set(cardIDs.prefix(3))
+    }
+
+    /// Screenshot/automation hook: wait until the engine's column list (and the
+    /// F&R field names) have loaded, so the column picker / Find & Replace sheet
+    /// captures real content.
+    func demoWaitForMetadataForScreenshot() async {
+        for _ in 0..<60 {
+            if !availableColumns.isEmpty { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if fieldNames.isEmpty { fieldNames = await store.browserFieldNames() }
+    }
+
+    /// Screenshot/automation hook: configure a richer column set so the row
+    /// layout shows its N-column (labeled-line) form. Prefers columns (by their
+    /// localized label) that have visible content for fresh cards, falling back
+    /// to appending any extra columns.
+    func demoApplyRichColumnsForScreenshot() async {
+        await demoWaitForMetadataForScreenshot()
+        let preferredLabels = ["Question", "Answer", "Deck", "Due", "Note Type", "Created", "Tags"]
+        var keys: [String] = []
+        for label in preferredLabels {
+            if let column = availableColumns.first(where: { $0.label == label }),
+               !keys.contains(column.key) {
+                keys.append(column.key)
+            }
+            if keys.count >= 5 { break }
+        }
+        if keys.count < 3 {
+            keys = activeColumnKeys
+            for column in availableColumns where !keys.contains(column.key) {
+                keys.append(column.key)
+                if keys.count >= 5 { break }
+            }
+        }
+        setActiveColumns(Array(keys.prefix(5)))
     }
     #endif
 
@@ -1063,36 +1630,54 @@ private func describeBrowserError(_ error: Error) -> String {
     return error.localizedDescription
 }
 
-/// One results row: question (primary) + answer (secondary) + deck, with flag
-/// and suspended indicators. Mirrors AnkiDroid's browser row content.
+/// One results row, rendering the user's configured columns. The first column is
+/// the prominent headline (the question by default, keeping question/answer
+/// primary); the second renders unlabeled beneath it (the answer by default);
+/// any further columns render as compact "LABEL value" lines so the extra data
+/// stays scannable on a phone. Flag + suspended indicators are always shown
+/// regardless of the column set. Mirrors AnkiDroid's browser row content.
 private struct CardBrowserRowView: View {
     let row: CardBrowserRow
+    /// The active columns (label + order), aligned 1:1 with `row.cells`.
+    let columns: [BrowserColumn]
 
     var body: some View {
         HStack(spacing: DS.Spacing.m) {
             VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-                Text(displayQuestion)
-                    .font(DS.Typography.body.weight(.semibold))
-                    .foregroundStyle(DS.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                // Primary line: first column, prominent, with the suspended badge.
+                HStack(spacing: DS.Spacing.s) {
+                    Text(primaryText)
+                        .font(DS.Typography.body.weight(.semibold))
+                        .foregroundStyle(DS.textPrimary)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                    if row.suspended {
+                        suspendedBadge
+                    }
+                }
 
-                if !row.answer.isEmpty {
-                    Text(row.answer)
+                // Second column: unlabeled secondary line (the answer by default).
+                if columns.count > 1, !row.cell(1).isEmpty {
+                    Text(row.cell(1))
                         .font(DS.Typography.caption)
                         .foregroundStyle(DS.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
 
-                HStack(spacing: DS.Spacing.s) {
-                    Label(row.deck, systemImage: "rectangle.stack")
-                        .font(DS.Typography.caption)
-                        .foregroundStyle(DS.textSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if row.suspended {
-                        suspendedBadge
+                // Remaining columns: compact labeled lines, skipping empties.
+                ForEach(extraColumnIndices, id: \.self) { index in
+                    if !row.cell(index).isEmpty {
+                        HStack(spacing: DS.Spacing.xs) {
+                            Text(columns[index].label.uppercased())
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(DS.textSecondary)
+                            Text(row.cell(index))
+                                .font(DS.Typography.caption)
+                                .foregroundStyle(DS.textSecondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                     }
                 }
             }
@@ -1114,8 +1699,16 @@ private struct CardBrowserRowView: View {
         .accessibilityHint("Edit note")
     }
 
-    private var displayQuestion: String {
-        row.question.isEmpty ? "(empty)" : row.question
+    /// The headline (first column) text, or a placeholder when empty.
+    private var primaryText: String {
+        let first = row.cell(0)
+        return first.isEmpty ? "(empty)" : first
+    }
+
+    /// Column indices rendered as labeled lines (everything past the first two).
+    private var extraColumnIndices: [Int] {
+        guard columns.count > 2 else { return [] }
+        return Array(2..<columns.count)
     }
 
     private var suspendedBadge: some View {
@@ -1131,9 +1724,13 @@ private struct CardBrowserRowView: View {
     }
 
     private var accessibilityLabel: String {
-        var parts = [displayQuestion]
-        if !row.answer.isEmpty { parts.append(row.answer) }
-        parts.append("deck \(row.deck)")
+        var parts: [String] = []
+        for (index, column) in columns.enumerated() {
+            let value = row.cell(index)
+            guard !value.isEmpty else { continue }
+            parts.append(index == 0 ? value : "\(column.label) \(value)")
+        }
+        if parts.isEmpty { parts.append("(empty)") }
         if let name = CardFlag(rawValue: row.flag)?.spokenName { parts.append(name) }
         if row.suspended { parts.append("suspended") }
         return parts.joined(separator: ", ")

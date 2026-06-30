@@ -290,9 +290,10 @@ final class AnkiKitTests: XCTestCase {
 
     /// `cardBrowserRows(cardIDs:)` assembles the display rows the list renders —
     /// the windowed page fetch: resolve ids first, then build a row per id from a
-    /// single browser-row call (state derived from the row's color). It returns
-    /// the engine-stripped question/answer snippet, the deck name, and the
-    /// default (unflagged, unsuspended) state for a fresh card.
+    /// single browser-row call (state derived from the row's color). With the
+    /// default columns it returns the engine-stripped question/answer snippet and
+    /// the deck name as the ordered cells, plus the default (unflagged,
+    /// unsuspended) state for a fresh card.
     func testCardBrowserRowReturnsSnippetDeckAndState() throws {
         let backend = try freshCollection()
         let notetypeID = try basicNotetypeID(backend)
@@ -301,15 +302,159 @@ final class AnkiKitTests: XCTestCase {
         let ids = try backend.searchCards(query: "")
         let rows = try backend.cardBrowserRows(cardIDs: ids)
         let row = try XCTUnwrap(rows.first, "the added card should produce a browser row")
-        XCTAssertTrue(row.question.contains("Front Q"), "question snippet should show the front")
-        XCTAssertTrue(row.answer.contains("Back A"), "answer snippet should show the back")
-        XCTAssertEqual(row.deck, "Default", "card lives in the Default deck")
+        // Default columns are question / answer / deck, so the cells line up.
+        XCTAssertEqual(row.cells.count, 3, "default config yields three cells")
+        XCTAssertTrue(row.cell(0).contains("Front Q"), "cell 0 (question) should show the front")
+        XCTAssertTrue(row.cell(1).contains("Back A"), "cell 1 (answer) should show the back")
+        XCTAssertEqual(row.cell(2), "Default", "cell 2 (deck) is the Default deck")
         XCTAssertEqual(row.flag, 0, "a new card has no flag")
         XCTAssertFalse(row.suspended, "a new card is not suspended")
         // The owning note id (used to open the editor) is resolved on demand via
         // getCard rather than carried on every row, so verify that linkage here.
         XCTAssertEqual(try backend.getCard(cardID: row.id).noteID, nid,
                        "the row's card should resolve back to its note")
+    }
+
+    // MARK: - Card Browser: configurable columns
+
+    /// `allBrowserColumns` (SearchService 29, 6) lists the engine's selectable
+    /// columns with display labels and sort capability — the source for the
+    /// column picker and sort menu. The default question/answer/deck keys are
+    /// present, every column has a non-empty label, and at least one column is
+    /// sortable (so the sort menu is never empty).
+    func testAllBrowserColumnsListsSelectableColumns() throws {
+        let backend = try freshCollection()
+        let columns = try backend.allBrowserColumns()
+        XCTAssertFalse(columns.isEmpty, "the engine should offer selectable columns")
+
+        let keys = Set(columns.map(\.key))
+        for expected in ["question", "answer", "deck"] {
+            XCTAssertTrue(keys.contains(expected), "columns should include '\(expected)'")
+        }
+        XCTAssertTrue(columns.allSatisfy { !$0.label.isEmpty }, "every column has a display label")
+        XCTAssertTrue(columns.contains { $0.sortable }, "at least one column should be sortable")
+    }
+
+    /// `cardBrowserRows(cardIDs:columns:)` honors an arbitrary column set and
+    /// order: requesting `[deck, question]` returns those two cells in that
+    /// order, proving the rows are generalized from the hardcoded three.
+    func testCardBrowserRowsHonorConfiguredColumnsAndOrder() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Front Q", "Back A"], deckID: 1)
+
+        let ids = try backend.searchCards(query: "")
+        let rows = try backend.cardBrowserRows(cardIDs: ids, columns: ["deck", "question"])
+        let row = try XCTUnwrap(rows.first, "the added card should produce a browser row")
+        XCTAssertEqual(row.cells.count, 2, "two configured columns yield two cells")
+        XCTAssertEqual(row.cell(0), "Default", "cell 0 should be the deck (first configured column)")
+        XCTAssertTrue(row.cell(1).contains("Front Q"), "cell 1 should be the question (second column)")
+    }
+
+    // MARK: - Card Browser: tap-to-sort
+
+    /// A non-default sort reorders the ids: with two notes whose sort fields are
+    /// "Apple"/"Banana", ascending sort-field order differs from descending, and
+    /// descending is exactly the reverse — proving the `BrowserSort` is applied to
+    /// `browserCardIDs` and that direction matters. (Creation order is Banana
+    /// then Apple, so the sort is doing real work, not echoing insertion order.)
+    func testNonDefaultSortOrdersIDsDifferently() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Banana", "B"], deckID: 1)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Apple", "A"], deckID: 1)
+
+        let ascending = try backend.browserCardIDs(
+            query: "", sort: BrowserSort(column: "noteFld", reverse: false))
+        let descending = try backend.browserCardIDs(
+            query: "", sort: BrowserSort(column: "noteFld", reverse: true))
+
+        XCTAssertEqual(ascending.count, 2, "both cards should be returned")
+        XCTAssertNotEqual(ascending, descending, "reversing the sort must change the order")
+        XCTAssertEqual(descending, ascending.reversed(), "descending is the ascending order reversed")
+
+        // Sanity-check the ascending direction is actually by sort field: the
+        // first id's note should be "Apple".
+        let firstNoteID = try backend.getCard(cardID: try XCTUnwrap(ascending.first)).noteID
+        XCTAssertEqual(try backend.getNote(noteID: firstNoteID).fields.first, "Apple",
+                       "ascending sort-field order should put 'Apple' first")
+    }
+
+    // MARK: - Card Browser: find & replace
+
+    /// `findAndReplace` (SearchService 29, 5) replaces literal text across a
+    /// note's fields, returns the number of notes changed, and is undoable —
+    /// the browser's Find & Replace. With no field name it touches all fields.
+    func testFindAndReplaceChangesFieldAndIsUndoable() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Hello world", "world"], deckID: 1)
+
+        let changed = try backend.findAndReplace(
+            noteIDs: [nid], search: "world", replacement: "there")
+        XCTAssertEqual(changed, 1, "the one note should be changed")
+
+        let note = try backend.getNote(noteID: nid)
+        XCTAssertEqual(note.fields[0], "Hello there", "all-fields replace updates the front")
+        XCTAssertEqual(note.fields[1], "there", "all-fields replace updates the back too")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "find & replace should be undoable")
+    }
+
+    /// `findAndReplace` scoped to a single field by name changes only that field,
+    /// leaving the other untouched — the "in: <field>" option of the dialog.
+    func testFindAndReplaceFieldScopedLeavesOtherFields() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["cat", "cat"], deckID: 1)
+
+        let changed = try backend.findAndReplace(
+            noteIDs: [nid], search: "cat", replacement: "dog", fieldName: "Front")
+        XCTAssertEqual(changed, 1, "the note should be changed")
+
+        let note = try backend.getNote(noteID: nid)
+        XCTAssertEqual(note.fields[0], "dog", "the named field (Front) should be replaced")
+        XCTAssertEqual(note.fields[1], "cat", "the other field (Back) should be untouched")
+    }
+
+    /// `findAndReplace` with `regex: true` applies a regular expression with
+    /// capture-group replacement (`$1`), matching desktop/AnkiDroid's regex mode.
+    func testFindAndReplaceRegexUsesCaptureGroups() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["abc123", "B"], deckID: 1)
+
+        _ = try backend.findAndReplace(
+            noteIDs: [nid], search: #"(\d+)"#, replacement: "[$1]", regex: true)
+        XCTAssertEqual(try backend.getNote(noteID: nid).fields[0], "abc[123]",
+                       "the regex capture group should be wrapped in brackets")
+    }
+
+    /// `searchNotes` (SearchService 29, 2) resolves a search to NOTE ids (the
+    /// "all matching notes" Find & Replace scope): a reversed note's two cards
+    /// collapse to a single note id.
+    func testSearchNotesResolvesToNoteIDs() throws {
+        let backend = try freshCollection()
+        let notetypes = try backend.notetypeNames()
+        let reversed = try XCTUnwrap(
+            notetypes.first { $0.name == "Basic (and reversed card)" },
+            "fresh collection ships the reversed Basic note type"
+        )
+        let nid = try backend.addNote(notetypeID: reversed.id, fields: ["Q", "A"], deckID: 1)
+
+        XCTAssertEqual(try backend.searchCards(query: "").count, 2, "the reversed note has two cards")
+        XCTAssertEqual(try backend.searchNotes(query: ""), [nid],
+                       "the two sibling cards collapse to one matching note id")
+    }
+
+    /// `allFieldNames` returns the union of field names across note types — the
+    /// Find & Replace "in field" candidates. A fresh collection's Basic types
+    /// contribute Front/Back.
+    func testAllFieldNamesUnionsNotetypeFields() throws {
+        let backend = try freshCollection()
+        let names = try backend.allFieldNames()
+        XCTAssertTrue(names.contains("Front"), "Basic note types contribute a Front field")
+        XCTAssertTrue(names.contains("Back"), "Basic note types contribute a Back field")
+        XCTAssertEqual(Set(names).count, names.count, "field names should be de-duplicated")
     }
 
     /// Suspending then unsuspending a card flips its `suspended` state (read back

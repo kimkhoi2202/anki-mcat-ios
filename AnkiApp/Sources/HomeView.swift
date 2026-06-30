@@ -218,10 +218,14 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInAddNote") {
                 showAddNote = true
             }
-            // Open the browser; `-demoBrowserSelect` additionally enters
-            // multi-select with a few rows selected (for the bulk-action shot).
+            // Open the browser; the `-demoBrowser…` variants additionally drive a
+            // specific feature for its screenshot (multi-select, extra columns,
+            // the column picker, or Find & Replace). CardBrowserView reads them.
             if ProcessInfo.processInfo.arguments.contains("-startInBrowser")
-                || ProcessInfo.processInfo.arguments.contains("-demoBrowserSelect") {
+                || ProcessInfo.processInfo.arguments.contains("-demoBrowserSelect")
+                || ProcessInfo.processInfo.arguments.contains("-demoBrowserColumnsApplied")
+                || ProcessInfo.processInfo.arguments.contains("-demoBrowserColumns")
+                || ProcessInfo.processInfo.arguments.contains("-demoBrowserFindReplace") {
                 goBrowse = true
             }
             // Answer a few cards first so the stats screen has real review

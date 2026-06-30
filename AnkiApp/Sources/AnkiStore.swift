@@ -397,25 +397,37 @@ final class AnkiStore: ObservableObject {
 
     // MARK: - Card Browser
 
-    /// Resolves a Card Browser search to its matching card ids (in Anki's default
-    /// browser sort), off the main actor. Cheap even on a huge collection — it
-    /// returns ids only; the browser then fetches row DATA lazily, a page at a
-    /// time, via `browserRows(forCardIDs:)`. Throws so the browser can show an
+    /// Resolves a Card Browser search to its matching card ids in the given sort
+    /// order, off the main actor. Cheap even on a huge collection — it returns
+    /// ids only; the browser then fetches row DATA lazily, a page at a time, via
+    /// `browserRows(forCardIDs:columns:)`. Throws so the browser can show an
     /// invalid-search / not-ready message; an empty result is a normal empty list.
-    func browserCardIDs(query: String) async throws -> [Int64] {
+    func browserCardIDs(query: String, sort: BrowserSort = .default) async throws -> [Int64] {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        return try await runDetached { try backend.browserCardIDs(query: query) }
+        return try await runDetached { try backend.browserCardIDs(query: query, sort: sort) }
+    }
+
+    /// The full set of selectable browser columns (labels + sort behavior) for
+    /// the column picker and the sort menu, off the main actor. Best-effort:
+    /// returns [] if the collection isn't ready or the call fails, so the UI just
+    /// shows no extra options and keeps its persisted defaults.
+    func allBrowserColumns() async -> [BrowserColumn] {
+        guard let backend else { return [] }
+        return (try? await runDetached { try backend.allBrowserColumns() }) ?? []
     }
 
     /// Builds the display rows for one page of card ids (the cards currently on
-    /// screen), off the main actor — one backend call per row. Concurrently
-    /// deleted cards are skipped, so the result may be shorter than the input. A
-    /// page-level failure (e.g. the collection isn't ready) yields an empty page
-    /// rather than throwing, so the browser simply leaves those rows as
-    /// placeholders to retry later instead of erroring the whole list.
-    func browserRows(forCardIDs cardIDs: [Int64]) async -> [CardBrowserRow] {
+    /// screen) for the given active `columns`, off the main actor — one backend
+    /// call per row. Concurrently deleted cards are skipped, so the result may be
+    /// shorter than the input. A page-level failure (e.g. the collection isn't
+    /// ready) yields an empty page rather than throwing, so the browser simply
+    /// leaves those rows as placeholders to retry later instead of erroring the
+    /// whole list.
+    func browserRows(
+        forCardIDs cardIDs: [Int64], columns: [String] = Backend.defaultBrowserColumns
+    ) async -> [CardBrowserRow] {
         guard let backend else { return [] }
-        return (try? await runDetached { try backend.cardBrowserRows(cardIDs: cardIDs) }) ?? []
+        return (try? await runDetached { try backend.cardBrowserRows(cardIDs: cardIDs, columns: columns) }) ?? []
     }
 
     /// Resolves the note id behind a card on demand — for opening the editor or
@@ -525,6 +537,50 @@ final class AnkiStore: ObservableObject {
         guard let backend else { throw NoteEditorError.collectionNotReady }
         _ = try await runDetached { try backend.setMarked(cardIDs: cardIDs, marked: marked) }
         refreshUndo()
+    }
+
+    // MARK: - Card Browser find & replace
+
+    /// Resolves a selection of card ids to their owning note ids (siblings
+    /// collapse to one note), off the main actor — the Find & Replace
+    /// "selected notes" scope. Best-effort: [] on failure.
+    func noteIDs(forCards cardIDs: [Int64]) async -> [Int64] {
+        guard let backend else { return [] }
+        return (try? await runDetached { try backend.noteIDs(forCardIDs: cardIDs) }) ?? []
+    }
+
+    /// Resolves a search to its matching NOTE ids, off the main actor — the Find &
+    /// Replace "all matching notes" scope when there's no explicit selection.
+    func searchNotes(query: String) async throws -> [Int64] {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        return try await runDetached { try backend.searchNotes(query: query) }
+    }
+
+    /// The candidate field names for Find & Replace's "in field" picker (the
+    /// union across note types), off the main actor. Best-effort: [] on failure.
+    func browserFieldNames() async -> [String] {
+        guard let backend else { return [] }
+        return (try? await runDetached { try backend.allFieldNames() }) ?? []
+    }
+
+    /// Runs Find & Replace across the given notes off the main actor (it can touch
+    /// many notes, so it must not block the UI), returning the number of notes
+    /// changed. `fieldName` nil/empty = all fields. Undoable via the engine;
+    /// derived undo state is refreshed.
+    @discardableResult
+    func findAndReplace(
+        noteIDs: [Int64], search: String, replacement: String,
+        regex: Bool, matchCase: Bool, fieldName: String?
+    ) async throws -> Int {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let changed = try await runDetached {
+            try backend.findAndReplace(
+                noteIDs: noteIDs, search: search, replacement: replacement,
+                regex: regex, matchCase: matchCase, fieldName: fieldName
+            )
+        }
+        refreshUndo()
+        return changed
     }
 
     // MARK: - Statistics

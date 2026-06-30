@@ -5,63 +5,138 @@ import SwiftProtobuf
 /// browser-row API. Decouples the SwiftUI layer from the generated protobuf
 /// (the same way `DeckTreeEntry`/`NoteForEditing` do).
 ///
-/// Mirrors AnkiDroid's CardBrowser row: a question/answer snippet, the deck name,
-/// and the per-card flag / suspended indicators. Built from a single
-/// `browser_row_for_id` call (one backend call per displayed row); the owning
-/// note id isn't carried here because the browser only needs it for the rare
-/// single-row edit / change-note-type action, where it's resolved on demand
-/// (see `Backend.getCard`) rather than fetched for every displayed row.
+/// Mirrors AnkiDroid's CardBrowser row: the engine-stripped cell text for each
+/// *active* column (in column order) plus the per-card flag / suspended
+/// indicators. Built from a single `browser_row_for_id` call (one backend call
+/// per displayed row); the owning note id isn't carried here because the
+/// browser only needs it for the rare single-row edit / change-note-type
+/// action, where it's resolved on demand (see `Backend.getCard`) rather than
+/// fetched for every displayed row.
+///
+/// The cells are generalized from the original hardcoded question/answer/deck to
+/// the N columns the user has configured: `cells[i]` is the display text for the
+/// column at index `i` of the active-columns list passed to `cardBrowserRows`.
 public struct CardBrowserRow: Identifiable, Sendable, Equatable {
     /// The card id (the browser lists one entry per card, like AnkiDroid's
     /// default cards mode).
     public let id: Int64
-    /// Engine-stripped question text (HTML reduced to one display line).
-    public let question: String
-    /// Engine-stripped answer text (with the shared question prefix removed).
-    public let answer: String
-    /// Human-readable deck name (including any filtered-deck origin).
-    public let deck: String
+    /// Engine-stripped, display-ready cell text for each active column, in the
+    /// same order the columns were requested. The engine does the HTML→text
+    /// reduction and AV-tag prettifying, so each cell is ready to render.
+    public let cells: [String]
     /// Flag color, 0 = none, 1...7 = red/orange/green/blue/pink/turquoise/purple.
     public let flag: Int
     /// Whether the card is currently suspended.
     public let suspended: Bool
 
-    public init(
-        id: Int64, question: String, answer: String,
-        deck: String, flag: Int, suspended: Bool
-    ) {
+    public init(id: Int64, cells: [String], flag: Int, suspended: Bool) {
         self.id = id
-        self.question = question
-        self.answer = answer
-        self.deck = deck
+        self.cells = cells
         self.flag = flag
         self.suspended = suspended
     }
+
+    /// The cell text at `index`, or "" when out of range — defensive for a row
+    /// built from fewer columns than the renderer happens to expect.
+    public func cell(_ index: Int) -> String {
+        index >= 0 && index < cells.count ? cells[index] : ""
+    }
+}
+
+/// A selectable browser column, decoded from the engine's `all_browser_columns`
+/// list: the `key` the engine identifies it by (used both to activate it and to
+/// sort on it), a human display `label`, and whether/how the engine can sort by
+/// it. Drives the column picker and the sort menu.
+public struct BrowserColumn: Identifiable, Sendable, Equatable, Hashable {
+    /// The engine column key (the camelCase `Column` serialization, e.g.
+    /// `question`, `deck`, `cardDue`, `noteFld`).
+    public let key: String
+    /// The cards-mode display label (e.g. "Question", "Due"), already localized
+    /// by the engine.
+    public let label: String
+    /// Whether the engine can sort the result by this column (some columns, like
+    /// the rendered question/answer, aren't sortable).
+    public let sortable: Bool
+    /// The column's natural default direction when first sorted (some columns —
+    /// e.g. due/created — default to descending on desktop).
+    public let defaultReverse: Bool
+
+    public var id: String { key }
+
+    public init(key: String, label: String, sortable: Bool, defaultReverse: Bool) {
+        self.key = key
+        self.label = label
+        self.sortable = sortable
+        self.defaultReverse = defaultReverse
+    }
+}
+
+/// A browser sort choice: which builtin column to order by, and whether to
+/// reverse it. Generalizes the old fixed "sort field, ascending" default into a
+/// value the UI can change and persist.
+public struct BrowserSort: Sendable, Equatable {
+    /// The builtin column key to sort by (parsed by the core's `Column::from_str`;
+    /// an unknown key is ignored and the core falls back to its default).
+    public var column: String
+    /// Sort descending when true.
+    public var reverse: Bool
+
+    public init(column: String, reverse: Bool) {
+        self.column = column
+        self.reverse = reverse
+    }
+
+    /// Anki's engine default browser sort: by the note's sort field, ascending
+    /// (`"sortType": "noteFld", "sortBackwards": false` in rslib
+    /// `config/schema11.rs`), so the list isn't in arbitrary creation order.
+    public static let `default` = BrowserSort(column: "noteFld", reverse: false)
 }
 
 /// Card Browser convenience methods. Service/method indices come from the
 /// generated `_backend_generated.py` reference; message shapes from the
 /// `search.proto` / `cards.proto` / `notes.proto` / `scheduler.proto` definitions.
 public extension Backend {
-    /// The columns the browser list renders, in display order: a question and
-    /// answer snippet plus the deck. `browser_row_for_id` builds its cells from
-    /// whatever columns are active, so this order is the cells' order. Keys are
-    /// the camelCase `Column` serializations from rslib `browser_table.rs`.
-    private static var browserColumns: [String] { ["question", "answer", "deck"] }
+    /// Anki's default browser columns (question/answer snippet + deck), the
+    /// out-of-the-box layout AnkiDroid/desktop show before any customization.
+    /// `browser_row_for_id` builds its cells from whatever columns are active, so
+    /// this order is the cells' order. Keys are the camelCase `Column`
+    /// serializations from rslib `browser_table.rs`. Used as the fallback when no
+    /// custom column set is configured.
+    static let defaultBrowserColumns: [String] = ["question", "answer", "deck"]
 
-    /// Anki's default browser sort: by the note's sort field, ascending. This is
-    /// the engine's own default (`"sortType": "noteFld", "sortBackwards": false`
-    /// in rslib `config/schema11.rs`), applied so the list isn't in arbitrary
-    /// creation order. A configurable tap-to-sort UI is a separate later task; an
-    /// unknown column would be ignored by the core (`Column::from_str(..)
-    /// .unwrap_or_default()`), so this is always safe.
-    private static var defaultBrowserSort: Anki_Search_SortOrder {
+    /// Builds the engine `SortOrder` for a `BrowserSort`. An unknown column would
+    /// be ignored by the core (`Column::from_str(..).unwrap_or_default()`), so any
+    /// value here is safe.
+    private static func sortOrder(from sort: BrowserSort) -> Anki_Search_SortOrder {
         var order = Anki_Search_SortOrder()
         var builtin = Anki_Search_SortOrder.Builtin()
-        builtin.column = "noteFld"
-        builtin.reverse = false
+        builtin.column = sort.column
+        builtin.reverse = sort.reverse
         order.builtin = builtin
         return order
+    }
+
+    /// SearchService.allBrowserColumns (29, 6).
+    ///
+    /// The full set of columns the browser can show — the source for the column
+    /// picker (which columns + order) and the sort menu (which columns are
+    /// sortable and their default direction). Each entry carries the engine
+    /// `key` (used to activate the column AND to sort by it), the cards-mode
+    /// display label, and the column's sort capability. Mirrors AnkiDroid's
+    /// column manager, which lists the same engine-provided columns.
+    func allBrowserColumns() throws -> [BrowserColumn] {
+        let resp = try run(
+            service: 29, method: 6, Anki_Generic_Empty(),
+            returning: Anki_Search_BrowserColumns.self
+        )
+        return resp.columns.map { col in
+            BrowserColumn(
+                key: col.key,
+                label: col.cardsModeLabel.isEmpty ? col.key : col.cardsModeLabel,
+                sortable: col.sortingCards != .none,
+                defaultReverse: col.sortingCards == .descending
+            )
+        }
     }
 
     /// SearchService.searchCards (29, 1).
@@ -76,17 +151,34 @@ public extension Backend {
         return try run(service: 29, method: 1, req, returning: Anki_Search_SearchResponse.self).ids
     }
 
-    /// Resolves a Card Browser search to its matching card ids in Anki's default
-    /// browser sort order (see `defaultBrowserSort`), mirroring AnkiDroid building
-    /// its browser list with the configured sort. Returns ids only, so it stays
-    /// cheap even on very large collections — the row DATA for the cards actually
-    /// on screen is fetched lazily, a page at a time, via `cardBrowserRows(cardIDs:)`.
-    /// An invalid query throws a backend error, which the UI surfaces.
-    func browserCardIDs(query: String) throws -> [Int64] {
+    /// SearchService.searchNotes (29, 2).
+    ///
+    /// Resolves an Anki search string to the matching NOTE ids (a note's sibling
+    /// cards collapse to a single note). Used to scope Find & Replace to "all
+    /// matching notes" when the browser has no explicit selection.
+    func searchNotes(query: String) throws -> [Int64] {
         var req = Anki_Search_SearchRequest()
         req.search = query
-        req.order = Backend.defaultBrowserSort
+        return try run(service: 29, method: 2, req, returning: Anki_Search_SearchResponse.self).ids
+    }
+
+    /// Resolves a Card Browser search to its matching card ids in the given sort
+    /// order, mirroring AnkiDroid building its browser list with the configured
+    /// sort. Returns ids only, so it stays cheap even on very large collections —
+    /// the row DATA for the cards actually on screen is fetched lazily, a page at
+    /// a time, via `cardBrowserRows(cardIDs:columns:)`. An invalid query throws a
+    /// backend error, which the UI surfaces.
+    func browserCardIDs(query: String, sort: BrowserSort) throws -> [Int64] {
+        var req = Anki_Search_SearchRequest()
+        req.search = query
+        req.order = Backend.sortOrder(from: sort)
         return try run(service: 29, method: 1, req, returning: Anki_Search_SearchResponse.self).ids
+    }
+
+    /// Convenience overload using Anki's default browser sort (sort field,
+    /// ascending). Kept so callers that don't drive a custom sort stay simple.
+    func browserCardIDs(query: String) throws -> [Int64] {
+        try browserCardIDs(query: query, sort: .default)
     }
 
     /// SearchService.setActiveBrowserColumns (29, 8).
@@ -138,25 +230,31 @@ public extension Backend {
         _ = try run(service: 5, method: 1, input: try req.serializedData())
     }
 
-    /// Builds one display row, setting the active columns first so the call is
-    /// self-contained (the batch `cardBrowserRows` sets them once and uses the
-    /// private builder directly to avoid repeating the per-row column write).
-    func cardBrowserRow(cardID: Int64) throws -> CardBrowserRow {
-        try setActiveBrowserColumns(Backend.browserColumns)
+    /// Builds one display row for the given active `columns`, setting them first
+    /// so the call is self-contained (the batch `cardBrowserRows` sets them once
+    /// and uses the private builder directly to avoid repeating the per-row column
+    /// write). Defaults to the question/answer/deck layout.
+    func cardBrowserRow(
+        cardID: Int64, columns: [String] = Backend.defaultBrowserColumns
+    ) throws -> CardBrowserRow {
+        try setActiveBrowserColumns(columns)
         return try buildBrowserRow(cardID: cardID)
     }
 
     /// Builds the display rows for an explicit, already-resolved page of card ids
-    /// — the Card Browser's windowed page fetch. Sets the active columns once,
-    /// then makes exactly ONE backend call per card (`browser_row_for_id`),
-    /// deriving each row's flag/suspended state from that row's `color` rather
-    /// than a second `getCard`. Only the cards currently on screen are passed in,
-    /// so this stays bounded regardless of how large the full result set is.
+    /// — the Card Browser's windowed page fetch — for the given active `columns`.
+    /// Sets the active columns once, then makes exactly ONE backend call per card
+    /// (`browser_row_for_id`), deriving each row's cells from the active columns
+    /// and its flag/suspended state from that row's `color` rather than a second
+    /// `getCard`. Only the cards currently on screen are passed in, so this stays
+    /// bounded regardless of how large the full result set is.
     ///
     /// A card that fails to build (e.g. concurrently deleted) is skipped rather
     /// than failing the whole page, so the result may be shorter than `cardIDs`.
-    func cardBrowserRows(cardIDs: [Int64]) throws -> [CardBrowserRow] {
-        try setActiveBrowserColumns(Backend.browserColumns)
+    func cardBrowserRows(
+        cardIDs: [Int64], columns: [String] = Backend.defaultBrowserColumns
+    ) throws -> [CardBrowserRow] {
+        try setActiveBrowserColumns(columns)
         var rows: [CardBrowserRow] = []
         rows.reserveCapacity(cardIDs.count)
         for id in cardIDs {
@@ -167,21 +265,16 @@ public extension Backend {
         return rows
     }
 
-    /// Builds one display row from a single `browser_row_for_id` call: the
-    /// question / answer / deck snippet cells plus the flag and suspended state,
+    /// Builds one display row from a single `browser_row_for_id` call: the cell
+    /// text for every active column (in order) plus the flag and suspended state,
     /// both decoded from the row's `color`. Assumes the active columns are
     /// already set (`browser_row_for_id` errors otherwise).
     private func buildBrowserRow(cardID: Int64) throws -> CardBrowserRow {
         let row = try browserRow(cardID: cardID)
-        func cell(_ index: Int) -> String {
-            index < row.cells.count ? row.cells[index].text : ""
-        }
         let state = Backend.flagAndSuspended(from: row.color)
         return CardBrowserRow(
             id: cardID,
-            question: cell(0),
-            answer: cell(1),
-            deck: cell(2),
+            cells: row.cells.map { $0.text },
             flag: state.flag,
             suspended: state.suspended
         )
@@ -325,5 +418,49 @@ public extension Backend {
         return marked
             ? try addNoteTags(noteIDs: noteIDs, tags: Backend.markedTag)
             : try removeNoteTags(noteIDs: noteIDs, tags: Backend.markedTag)
+    }
+
+    // MARK: - Find & Replace
+
+    /// SearchService.findAndReplace (29, 5).
+    ///
+    /// Finds `search` in the given notes' fields and replaces it with
+    /// `replacement`, returning the number of notes changed. `regex` treats
+    /// `search` as a regular expression (otherwise a literal substring);
+    /// `matchCase` makes the match case-sensitive. `fieldName` limits the op to a
+    /// single field by name — nil or empty means ALL fields (a field name absent
+    /// from a given note simply matches nothing there). Undoable via the engine
+    /// (records an undo entry). Mirrors AnkiDroid's browser Find & Replace, which
+    /// drives the same RPC. An invalid regex throws a backend error the UI shows.
+    @discardableResult
+    func findAndReplace(
+        noteIDs: [Int64], search: String, replacement: String,
+        regex: Bool = false, matchCase: Bool = false, fieldName: String? = nil
+    ) throws -> Int {
+        var req = Anki_Search_FindAndReplaceRequest()
+        req.nids = noteIDs
+        req.search = search
+        req.replacement = replacement
+        req.regex = regex
+        req.matchCase = matchCase
+        if let fieldName, !fieldName.isEmpty { req.fieldName = fieldName }
+        let resp = try run(service: 29, method: 5, req, returning: Anki_Collection_OpChangesWithCount.self)
+        return Int(resp.count)
+    }
+
+    /// The union of field names across every note type, sorted — the candidate
+    /// "in field" options for Find & Replace (alongside an implicit "all
+    /// fields"). Bounded by the number of note types, so it's cheap. Using the
+    /// union (rather than only the scoped notes' fields) is safe because a field
+    /// name absent from a given note simply matches nothing there.
+    func allFieldNames() throws -> [String] {
+        var seen = Set<String>()
+        var names: [String] = []
+        for notetype in try notetypeNames() {
+            for field in (try? notetypeFields(notetypeID: notetype.id)) ?? [] {
+                if seen.insert(field).inserted { names.append(field) }
+            }
+        }
+        return names.sorted()
     }
 }
