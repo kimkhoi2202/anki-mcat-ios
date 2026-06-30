@@ -29,12 +29,17 @@ struct NoteEditorView: View {
     var onSaved: () -> Void = {}
 
     @Environment(\.dismiss) private var dismiss
-    @FocusState private var focusedField: Int?
+    /// The field index that currently holds (or should take) keyboard focus.
+    /// Backed by plain state, not `@FocusState`, because fields are now
+    /// `UITextView`-backed (``RichFieldView``) rather than SwiftUI `TextField`s.
+    @State private var focusedField: Int?
 
     @State private var notetypes: [NotetypeOption] = []
     @State private var selectedNotetypeID: Int64 = 0
     @State private var fieldNames: [String] = []
     @State private var fieldValues: [String] = []
+    /// Self-sizing heights for each field's editor, keyed by field index.
+    @State private var fieldHeights: [Int: CGFloat] = [:]
     @State private var tagsText = ""
     @State private var selectedDeckID: Int64 = 1
     @State private var errorMessage: String?
@@ -76,7 +81,12 @@ struct NoteEditorView: View {
             } message: {
                 Text(errorMessage ?? "")
             }
-            .task { loadIfNeeded() }
+            .task {
+                loadIfNeeded()
+                #if DEBUG
+                runScreenshotHookIfRequested()
+                #endif
+            }
         }
     }
 
@@ -128,11 +138,21 @@ struct NoteEditorView: View {
                         Text(name)
                             .font(DS.Typography.caption.weight(.semibold))
                             .foregroundStyle(DS.textSecondary)
-                        TextField(name, text: fieldBinding(index), axis: .vertical)
-                            .font(DS.Typography.body)
-                            .foregroundStyle(DS.textPrimary)
-                            .lineLimit(1...6)
-                            .focused($focusedField, equals: index)
+                        RichFieldView(
+                            placeholder: name,
+                            text: fieldBinding(index),
+                            height: heightBinding(index),
+                            isFocused: focusedField == index,
+                            allFieldValues: { fieldValues },
+                            onFocusChange: { focused in
+                                if focused {
+                                    focusedField = index
+                                } else if focusedField == index {
+                                    focusedField = nil
+                                }
+                            }
+                        )
+                        .frame(height: fieldHeights[index] ?? RichFieldView.minHeight)
                     }
                     .padding(.vertical, DS.Spacing.xs)
                 }
@@ -180,6 +200,15 @@ struct NoteEditorView: View {
         )
     }
 
+    /// Self-sizing height for a field's editor, defaulting to the collapsed
+    /// single-line height until ``RichFieldView`` measures its content.
+    private func heightBinding(_ index: Int) -> Binding<CGFloat> {
+        Binding(
+            get: { fieldHeights[index] ?? RichFieldView.minHeight },
+            set: { fieldHeights[index] = $0 }
+        )
+    }
+
     // MARK: - Loading
 
     /// Populates the form once, from the engine, based on the mode.
@@ -218,6 +247,7 @@ struct NoteEditorView: View {
             }
             fieldNames = names
             fieldValues = aligned(note.fields, toCount: names.count)
+            fieldHeights = [:]
             tagsText = note.tags.joined(separator: " ")
         }
     }
@@ -230,6 +260,7 @@ struct NoteEditorView: View {
         fieldValues = preservingValues
             ? aligned(fieldValues, toCount: names.count)
             : Array(repeating: "", count: names.count)
+        fieldHeights = [:]
     }
 
     /// Pads or truncates `values` so it has exactly `count` entries.
@@ -238,6 +269,29 @@ struct NoteEditorView: View {
         if values.count > count { return Array(values.prefix(count)) }
         return values + Array(repeating: "", count: count - values.count)
     }
+
+    #if DEBUG
+    /// Debug screenshot/automation hook: prefill and focus the first field so the
+    /// formatting toolbar is captured above the keyboard. With `-demoFormatting`
+    /// the field's coordinator then scripts a bold + cloze on appear. Mirrors the
+    /// app's other `-startIn…` verification hooks; compiled out of release.
+    private func runScreenshotHookIfRequested() {
+        let arguments = ProcessInfo.processInfo.arguments
+        let demo = arguments.contains("-demoFormatting")
+        guard demo || arguments.contains("-focusFirstField") else { return }
+        Task { @MainActor in
+            // Let the sheet finish presenting (and the note-type onChange settle)
+            // before seeding text / grabbing keyboard focus.
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            // The demo variant seeds its own text in the field coordinator; the
+            // plain focus variant prefills here so the toolbar shows over content.
+            if !demo, !fieldValues.isEmpty {
+                fieldValues[0] = FieldFormattingDemo.sentence
+            }
+            focusedField = 0
+        }
+    }
+    #endif
 
     // MARK: - Saving
 
