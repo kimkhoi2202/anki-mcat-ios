@@ -35,6 +35,12 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
         INFOPLIST_KEY_CFBundleDisplayName: "Anki Speedrun"
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+        # Usage strings for the note editor's media attach actions: camera capture
+        # (image), microphone (audio recording), and the photo library. Required
+        # for the OS permission prompts; without them the app would crash on use.
+        INFOPLIST_KEY_NSCameraUsageDescription: "Take a photo to add to a note's fields."
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Record audio to add to a note's fields."
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Add images from your photo library to a note's fields."
         # We ship an asset catalog (the login logo) but no app icon yet; tell the
         # asset compiler not to require an "AppIcon" set.
         ASSETCATALOG_COMPILER_APPICON_NAME: ""

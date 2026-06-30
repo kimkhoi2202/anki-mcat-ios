@@ -11,6 +11,14 @@ enum FieldFormat: Int, CaseIterable {
     case bold, italic, underline, sup, sub, clear, cloze, clozeSame, mathInline, mathBlock
 }
 
+/// The kind of media the field toolbar can attach, mirroring AnkiDroid's
+/// NoteEditor multimedia actions. Each routes to a source picker in the editor
+/// (image → photo library / camera; audio → record / file) and inserts the
+/// stored reference at the field's caret.
+enum RichFieldMediaKind {
+    case image, audio
+}
+
 #if DEBUG
 /// Constants for the debug-only screenshot/automation hook that scripts a
 /// bold + cloze demo in the first field, mirroring the app's other `-startIn…`
@@ -148,6 +156,12 @@ struct RichFieldView: UIViewRepresentable {
     let allFieldValues: () -> [String]
     /// Reports begin/end editing so the editor can track the focused field.
     var onFocusChange: (Bool) -> Void = { _ in }
+    /// Requests media insertion for this field: the kind tapped plus the caret /
+    /// selection to replace. The editor presents the source picker, stores the
+    /// media, and inserts the `<img>`/`[sound:]` reference back at this range.
+    /// Empty by default so the toolbar's media buttons are inert until wired
+    /// (e.g. in EDIT mode where the editor still provides insertion).
+    var onRequestMedia: (RichFieldMediaKind, NSRange) -> Void = { _, _ in }
 
     /// One line of body text plus insets — the collapsed height.
     static let minHeight: CGFloat = 38
@@ -269,6 +283,23 @@ struct RichFieldView: UIViewRepresentable {
             if recognizer.state == .began { apply(.clozeSame) }
         }
 
+        @objc func imageButtonTapped(_ sender: UIButton) {
+            requestMedia(.image)
+        }
+
+        @objc func audioButtonTapped(_ sender: UIButton) {
+            requestMedia(.audio)
+        }
+
+        /// Hands the editor the kind of media tapped and the field's current
+        /// caret/selection so it can insert the reference exactly where the user
+        /// is editing — captured *now*, while this field is still first responder
+        /// (presenting a picker resigns it).
+        private func requestMedia(_ kind: RichFieldMediaKind) {
+            guard let textView else { return }
+            parent.onRequestMedia(kind, textView.selectedRange)
+        }
+
         /// Applies a format to the focused text view's current selection, writes
         /// the result back through the binding, and restores the new selection.
         func apply(_ format: FieldFormat) {
@@ -378,6 +409,19 @@ struct RichFieldView: UIViewRepresentable {
 
             for spec in buttonSpecs { stack.addArrangedSubview(makeButton(spec)) }
 
+            // Media actions, grouped after a divider so attaching an image/audio
+            // reads as distinct from inline text formatting (as in AnkiDroid,
+            // whose multimedia actions sit apart from the formatting toolbar).
+            stack.addArrangedSubview(makeDivider())
+            stack.addArrangedSubview(
+                makeMediaButton(symbol: "photo", fallback: "IMG",
+                                label: "Insert image", action: #selector(imageButtonTapped(_:)))
+            )
+            stack.addArrangedSubview(
+                makeMediaButton(symbol: "mic", fallback: "AUD",
+                                label: "Insert audio", action: #selector(audioButtonTapped(_:)))
+            )
+
             NSLayoutConstraint.activate([
                 separator.topAnchor.constraint(equalTo: bar.topAnchor),
                 separator.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
@@ -418,6 +462,43 @@ struct RichFieldView: UIViewRepresentable {
                 )
             }
             return button
+        }
+
+        /// A media-attach toolbar button (image / audio), styled like the format
+        /// buttons but wired to its own selector.
+        private func makeMediaButton(
+            symbol: String, fallback: String, label: String, action: Selector
+        ) -> UIButton {
+            let button = UIButton(type: .system)
+            if let image = UIImage(systemName: symbol) {
+                button.setImage(image, for: .normal)
+            } else {
+                button.setTitle(fallback, for: .normal)
+                button.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+            }
+            button.tintColor = UIColor(DS.accent)
+            button.accessibilityLabel = label
+            button.addTarget(self, action: action, for: .touchUpInside)
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 44).isActive = true
+            return button
+        }
+
+        /// A thin vertical hairline separating the formatting and media groups.
+        private func makeDivider() -> UIView {
+            let container = UIView()
+            let line = UIView()
+            line.backgroundColor = UIColor.separator
+            line.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(line)
+            container.widthAnchor.constraint(equalToConstant: 9).isActive = true
+            NSLayoutConstraint.activate([
+                line.widthAnchor.constraint(equalToConstant: 1.0 / UIScreen.main.scale),
+                line.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+                line.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+                line.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+            ])
+            return container
         }
     }
 }

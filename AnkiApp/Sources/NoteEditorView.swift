@@ -45,6 +45,30 @@ struct NoteEditorView: View {
     @State private var errorMessage: String?
     @State private var didLoad = false
 
+    /// Sticky / pinned field indices (ADD mode): a pinned field keeps its value
+    /// for the *next* note instead of being cleared, mirroring AnkiDroid's sticky
+    /// fields (its pin/`toggleSticky` button). Session-scoped to this editor and
+    /// reset when the notetype changes (a different field set); AnkiDroid persists
+    /// per-notetype, which the task allows simplifying to session level.
+    @State private var pinnedFields: Set<Int> = []
+
+    /// Drives the "attach media" source chooser once a field's toolbar image/audio
+    /// button is tapped (carries which field + caret to insert at).
+    @State private var mediaSourceChoice: MediaSourceChoice?
+    /// The concrete media picker currently presented as a sheet.
+    @State private var activeMediaPicker: ActiveMediaPicker?
+    /// True while picked/recorded bytes are being written into the collection.
+    @State private var isStoringMedia = false
+    /// A non-blocking media error (separate from the save-validation alert).
+    @State private var mediaErrorMessage: String?
+
+    /// Transient "note added" confirmation shown after an ADD-mode save while the
+    /// editor stays open for the next note. Cleared after a short delay.
+    @State private var addConfirmation: String?
+    /// Guards the auto-dismiss of `addConfirmation` so rapid successive adds don't
+    /// let an earlier timer clear a newer banner.
+    @State private var addConfirmationToken = UUID()
+
     var body: some View {
         NavigationStack {
             Form {
@@ -62,10 +86,13 @@ struct NoteEditorView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    // ADD mode keeps the editor open across saves, so the leading
+                    // button is the explicit "finish" (Done); EDIT mode keeps the
+                    // familiar discard-and-dismiss "Cancel".
+                    Button(isEditing ? "Cancel" : "Done") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { save() }
+                    Button(isEditing ? "Save" : "Add") { save() }
                         .fontWeight(.semibold)
                         .disabled(!didLoad || fieldNames.isEmpty)
                 }
@@ -81,6 +108,34 @@ struct NoteEditorView: View {
             } message: {
                 Text(errorMessage ?? "")
             }
+            .alert(
+                "Couldn’t attach media",
+                isPresented: Binding(
+                    get: { mediaErrorMessage != nil },
+                    set: { if !$0 { mediaErrorMessage = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { mediaErrorMessage = nil }
+            } message: {
+                Text(mediaErrorMessage ?? "")
+            }
+            .confirmationDialog(
+                mediaSourceChoice?.kind == .audio ? "Add Audio" : "Add Image",
+                isPresented: Binding(
+                    get: { mediaSourceChoice != nil },
+                    set: { if !$0 { mediaSourceChoice = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: mediaSourceChoice
+            ) { choice in
+                mediaSourceButtons(for: choice)
+            }
+            .sheet(item: $activeMediaPicker) { picker in
+                mediaPickerView(for: picker)
+            }
+            .overlay(alignment: .top) { addConfirmationBanner }
+            .animation(.easeInOut(duration: 0.2), value: addConfirmation)
+            .overlay { if isStoringMedia { mediaProgressOverlay } }
             .task {
                 loadIfNeeded()
                 #if DEBUG
@@ -135,9 +190,7 @@ struct NoteEditorView: View {
             } else {
                 ForEach(Array(fieldNames.enumerated()), id: \.offset) { index, name in
                     VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-                        Text(name)
-                            .font(DS.Typography.caption.weight(.semibold))
-                            .foregroundStyle(DS.textSecondary)
+                        fieldHeader(name: name, index: index)
                         RichFieldView(
                             placeholder: name,
                             text: fieldBinding(index),
@@ -150,6 +203,11 @@ struct NoteEditorView: View {
                                 } else if focusedField == index {
                                     focusedField = nil
                                 }
+                            },
+                            onRequestMedia: { kind, caret in
+                                mediaSourceChoice = MediaSourceChoice(
+                                    fieldIndex: index, caret: caret, kind: kind
+                                )
                             }
                         )
                         .frame(height: fieldHeights[index] ?? RichFieldView.minHeight)
@@ -160,7 +218,35 @@ struct NoteEditorView: View {
         } header: {
             sectionHeader("Fields")
         } footer: {
-            sectionFooter("The first field can’t be empty.")
+            sectionFooter(isEditing
+                ? "The first field can’t be empty."
+                : "The first field can’t be empty. Pin a field to keep its value for the next note.")
+        }
+    }
+
+    /// A field's label row: its name plus, in ADD mode, a pin toggle that keeps
+    /// the field's value for the next note (AnkiDroid's sticky field button).
+    private func fieldHeader(name: String, index: Int) -> some View {
+        HStack(spacing: DS.Spacing.s) {
+            Text(name)
+                .font(DS.Typography.caption.weight(.semibold))
+                .foregroundStyle(DS.textSecondary)
+            Spacer(minLength: 0)
+            if !isEditing {
+                let pinned = pinnedFields.contains(index)
+                Button {
+                    togglePin(index)
+                } label: {
+                    Image(systemName: pinned ? "pin.fill" : "pin")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(pinned ? DS.accent : DS.textSecondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(pinned ? "Unpin \(name)" : "Pin \(name)")
+                .accessibilityAddTraits(pinned ? [.isSelected] : [])
+            }
         }
     }
 
@@ -174,6 +260,105 @@ struct NoteEditorView: View {
         } header: {
             sectionHeader("Tags")
         }
+    }
+
+    // MARK: - Media UI
+
+    /// Source options for the attach-media chooser: image → photo library /
+    /// camera (camera only when present); audio → record / pick a file. Mirrors
+    /// AnkiDroid's multimedia source choices.
+    @ViewBuilder
+    private func mediaSourceButtons(for choice: MediaSourceChoice) -> some View {
+        switch choice.kind {
+        case .image:
+            Button("Photo Library") {
+                presentPicker(.photoLibrary(fieldIndex: choice.fieldIndex, caret: choice.caret))
+            }
+            if CameraPicker.isAvailable {
+                Button("Take Photo") {
+                    presentPicker(.camera(fieldIndex: choice.fieldIndex, caret: choice.caret))
+                }
+            }
+        case .audio:
+            Button("Record Audio") {
+                presentPicker(.audioRecorder(fieldIndex: choice.fieldIndex, caret: choice.caret))
+            }
+            Button("Choose File") {
+                presentPicker(.audioFile(fieldIndex: choice.fieldIndex, caret: choice.caret))
+            }
+        }
+        Button("Cancel", role: .cancel) {}
+    }
+
+    /// Presents the chosen picker just after the source dialog has dismissed —
+    /// presenting a sheet straight from a confirmationDialog button can otherwise
+    /// drop the sheet, so we defer briefly.
+    private func presentPicker(_ picker: ActiveMediaPicker) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            activeMediaPicker = picker
+        }
+    }
+
+    /// Builds the concrete picker for the active media sheet, routing its result
+    /// through `finishMedia`.
+    @ViewBuilder
+    private func mediaPickerView(for picker: ActiveMediaPicker) -> some View {
+        switch picker {
+        case let .photoLibrary(index, caret):
+            PhotoLibraryPicker { media in
+                finishMedia(media, kind: .image, fieldIndex: index, caret: caret)
+            }
+            .ignoresSafeArea()
+        case let .camera(index, caret):
+            CameraPicker { media in
+                finishMedia(media, kind: .image, fieldIndex: index, caret: caret)
+            }
+            .ignoresSafeArea()
+        case let .audioRecorder(index, caret):
+            AudioRecorderView { media in
+                finishMedia(media, kind: .audio, fieldIndex: index, caret: caret)
+            }
+        case let .audioFile(index, caret):
+            AudioDocumentPicker { media in
+                finishMedia(media, kind: .audio, fieldIndex: index, caret: caret)
+            }
+            .ignoresSafeArea()
+        }
+    }
+
+    /// The transient "note added" banner shown after an ADD-mode save, anchored
+    /// at the top so it stays visible above the keyboard while the editor stays
+    /// open for the next note.
+    @ViewBuilder
+    private var addConfirmationBanner: some View {
+        if let addConfirmation {
+            Label(addConfirmation, systemImage: "checkmark.circle.fill")
+                .font(DS.Typography.body.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, DS.Spacing.l)
+                .padding(.vertical, DS.Spacing.s)
+                .background(Capsule().fill(DS.easy))
+                .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
+                .padding(.top, DS.Spacing.s)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// A lightweight modal spinner shown while picked media bytes are written
+    /// into the collection (a large photo/clip can take a beat).
+    private var mediaProgressOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.2).ignoresSafeArea()
+            ProgressView("Adding media…")
+                .padding(DS.Spacing.l)
+                .background(
+                    RoundedRectangle(cornerRadius: DS.Radius.medium)
+                        .fill(DS.surface)
+                )
+        }
+        .allowsHitTesting(true)
     }
 
     // MARK: - Derived state
@@ -261,6 +446,12 @@ struct NoteEditorView: View {
             ? aligned(fieldValues, toCount: names.count)
             : Array(repeating: "", count: names.count)
         fieldHeights = [:]
+        // A reset means a new/changed notetype, so the old field indices no longer
+        // map to the same fields — drop any sticky pins (AnkiDroid tracks sticky
+        // per-notetype; clearing on switch keeps the session-level set coherent).
+        if !preservingValues {
+            pinnedFields = []
+        }
     }
 
     /// Pads or truncates `values` so it has exactly `count` entries.
@@ -273,19 +464,59 @@ struct NoteEditorView: View {
     #if DEBUG
     /// Debug screenshot/automation hook: prefill and focus the first field so the
     /// formatting toolbar is captured above the keyboard. With `-demoFormatting`
-    /// the field's coordinator then scripts a bold + cloze on appear. Mirrors the
-    /// app's other `-startIn…` verification hooks; compiled out of release.
+    /// the field's coordinator then scripts a bold + cloze on appear. With
+    /// `-demoEditorExtras` it seeds inserted media references, pins the first
+    /// field, and shows the "note added" banner so the media/sticky/add-another
+    /// additions are visible in one shot. Mirrors the app's other `-startIn…`
+    /// verification hooks; compiled out of release.
     private func runScreenshotHookIfRequested() {
         let arguments = ProcessInfo.processInfo.arguments
         let demo = arguments.contains("-demoFormatting")
-        guard demo || arguments.contains("-focusFirstField") else { return }
+        let extras = arguments.contains("-demoEditorExtras")
+        let mediaSource = arguments.contains("-demoMediaSource")
+        let realMedia = arguments.contains("-demoInsertRealMedia")
+        guard demo || extras || mediaSource || realMedia
+            || arguments.contains("-focusFirstField") else { return }
         Task { @MainActor in
             // Let the sheet finish presenting (and the note-type onChange settle)
             // before seeding text / grabbing keyboard focus.
             try? await Task.sleep(nanoseconds: 400_000_000)
-            // The demo variant seeds its own text in the field coordinator; the
-            // plain focus variant prefills here so the toolbar shows over content.
-            if !demo, !fieldValues.isEmpty {
+            if realMedia {
+                // Exercise the *real* app-side media path end-to-end: store bytes
+                // via the engine and insert the engine-returned name. The shown
+                // `<img src="…">` proves store.addMediaFile + insertReference work
+                // against the live collection (not just the AnkiKit unit test).
+                let png = Data(base64Encoded:
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                )!
+                await storeAndInsert(
+                    PickedMedia(data: png, desiredName: "demo.png"),
+                    kind: .image, fieldIndex: 0, caret: NSRange(location: 0, length: 0)
+                )
+                return
+            }
+            if mediaSource {
+                // Surface the image source chooser (Photo Library / Take Photo)
+                // for a screenshot of the media-attach affordance.
+                mediaSourceChoice = MediaSourceChoice(
+                    fieldIndex: 0, caret: NSRange(location: 0, length: 0), kind: .image
+                )
+                return
+            }
+            if extras {
+                // Show media references in the fields, a pinned first field, and
+                // the post-add confirmation banner together.
+                if !fieldValues.isEmpty {
+                    fieldValues[0] = "Bonjour <img src=\"hello.png\">"
+                    pinnedFields.insert(0)
+                }
+                if fieldValues.count > 1 {
+                    fieldValues[1] = "Hello [sound:hello.m4a]"
+                }
+                showAddConfirmation()
+            } else if !demo, !fieldValues.isEmpty {
+                // The plain focus variant prefills here so the toolbar shows over
+                // content; the `-demoFormatting` variant seeds in the coordinator.
                 fieldValues[0] = FieldFormattingDemo.sentence
             }
             focusedField = 0
@@ -315,14 +546,128 @@ struct NoteEditorView: View {
                     tags: tags,
                     deckID: selectedDeckID
                 )
+                onSaved()
+                // Keep the editor open for rapid successive entry (AnkiDroid keeps
+                // NoteEditor open on add): retain pinned fields + tags + notetype +
+                // deck, clear the rest, refocus, and confirm.
+                prepareForNextNote()
             case .edit(let noteID):
                 try store.updateNote(noteID: noteID, fields: fieldValues, tags: tags)
+                onSaved()
+                dismiss()
             }
-            onSaved()
-            dismiss()
         } catch {
             errorMessage = describe(error)
         }
+    }
+
+    // MARK: - Sticky fields & add-another
+
+    /// Toggles a field's sticky pin (ADD mode): pinned fields keep their value
+    /// for the next note. Clone of AnkiDroid's per-field sticky toggle.
+    private func togglePin(_ index: Int) {
+        if pinnedFields.contains(index) {
+            pinnedFields.remove(index)
+        } else {
+            pinnedFields.insert(index)
+        }
+    }
+
+    /// After a successful ADD, resets the form for the next note while keeping the
+    /// chosen notetype, deck, tags, and any pinned field values; refocuses the
+    /// first field and shows a brief confirmation. Clone of AnkiDroid's
+    /// `onNoteAdded` (refresh + restore sticky + "cards added" snackbar).
+    private func prepareForNextNote() {
+        for index in fieldValues.indices where !pinnedFields.contains(index) {
+            fieldValues[index] = ""
+        }
+        fieldHeights = [:]
+        showAddConfirmation()
+        // Force a focus change even if the first field was already "focused"
+        // (tapping Add resigned the keyboard), so it re-takes first responder.
+        focusedField = nil
+        Task { @MainActor in focusedField = 0 }
+    }
+
+    /// Shows the transient "note added" banner, auto-dismissing it after a beat.
+    /// A per-show token means a newer add's banner isn't cleared by an older
+    /// add's timer.
+    private func showAddConfirmation() {
+        addConfirmation = "Note added"
+        let token = UUID()
+        addConfirmationToken = token
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            if addConfirmationToken == token { addConfirmation = nil }
+        }
+    }
+
+    // MARK: - Media insertion
+
+    /// Handles a picker's result: dismiss the sheet, then (if media was produced)
+    /// store it and insert the reference. Nil means the user cancelled.
+    private func finishMedia(
+        _ media: PickedMedia?, kind: RichFieldMediaKind, fieldIndex: Int, caret: NSRange
+    ) {
+        activeMediaPicker = nil
+        guard let media else { return }
+        Task { await storeAndInsert(media, kind: kind, fieldIndex: fieldIndex, caret: caret) }
+    }
+
+    /// Stores the bytes in the collection (engine-managed name + dedup), then
+    /// inserts the resulting `<img>`/`[sound:]` reference at the saved caret.
+    @MainActor
+    private func storeAndInsert(
+        _ media: PickedMedia, kind: RichFieldMediaKind, fieldIndex: Int, caret: NSRange
+    ) async {
+        isStoringMedia = true
+        defer { isStoringMedia = false }
+        do {
+            let storedName = try await store.addMediaFile(
+                data: media.data, desiredName: media.desiredName
+            )
+            insertReference(forStoredName: storedName, kind: kind, fieldIndex: fieldIndex, caret: caret)
+        } catch {
+            mediaErrorMessage = describe(error)
+        }
+    }
+
+    /// Inserts the stored media reference into `fieldIndex` at `caret`, replacing
+    /// any selected range. Images use `<img src="NAME">`, audio `[sound:NAME]` —
+    /// the raw HTML/Anki markup fields store, matching the reviewer's renderer.
+    private func insertReference(
+        forStoredName name: String, kind: RichFieldMediaKind, fieldIndex: Int, caret: NSRange
+    ) {
+        guard fieldIndex < fieldValues.count else { return }
+        let reference: String
+        switch kind {
+        case .image: reference = "<img src=\"\(htmlAttributeEscaped(name))\">"
+        case .audio: reference = "[sound:\(name)]"
+        }
+        let current = fieldValues[fieldIndex] as NSString
+        let safe = clampedRange(caret, to: current.length)
+        fieldValues[fieldIndex] = current.replacingCharacters(in: safe, with: reference)
+        // Let the field re-measure with the new content, then refocus it.
+        fieldHeights[fieldIndex] = nil
+        focusedField = fieldIndex
+    }
+
+    /// Escapes a filename for safe use inside an `src="…"` attribute. Engine names
+    /// are already filesystem-sanitized; this is defensive against `&"<>`.
+    private func htmlAttributeEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    /// Clamps an NSRange into `[0, length]` so a stale caret can't read out of
+    /// bounds when inserting media into a field whose text changed.
+    private func clampedRange(_ range: NSRange, to length: Int) -> NSRange {
+        let location = min(max(range.location, 0), length)
+        let extent = min(max(range.length, 0), length - location)
+        return NSRange(location: location, length: extent)
     }
 
     /// Extracts a human-readable message from a thrown error, decoding the
@@ -362,4 +707,33 @@ struct NoteEditorView: View {
 private struct NotetypeOption: Identifiable, Hashable {
     let id: Int64
     let name: String
+}
+
+/// A pending media attach request: which field and caret/selection the toolbar
+/// button targeted, plus the kind of media, so the source chooser can route to
+/// the right picker and the result is inserted back at the same spot.
+private struct MediaSourceChoice: Identifiable {
+    let id = UUID()
+    let fieldIndex: Int
+    let caret: NSRange
+    let kind: RichFieldMediaKind
+}
+
+/// The concrete media picker presented as a sheet, carrying the field + caret to
+/// insert the stored reference at once the user finishes.
+private enum ActiveMediaPicker: Identifiable {
+    case photoLibrary(fieldIndex: Int, caret: NSRange)
+    case camera(fieldIndex: Int, caret: NSRange)
+    case audioRecorder(fieldIndex: Int, caret: NSRange)
+    case audioFile(fieldIndex: Int, caret: NSRange)
+
+    /// Stable identity for `.sheet(item:)` (case + target field + caret start).
+    var id: String {
+        switch self {
+        case let .photoLibrary(index, caret): return "photo-\(index)-\(caret.location)"
+        case let .camera(index, caret): return "camera-\(index)-\(caret.location)"
+        case let .audioRecorder(index, caret): return "rec-\(index)-\(caret.location)"
+        case let .audioFile(index, caret): return "audiofile-\(index)-\(caret.location)"
+        }
+    }
 }

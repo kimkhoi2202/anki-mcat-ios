@@ -874,4 +874,52 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(removed, 1, "one note should be removed")
         XCTAssertTrue(try backend.searchCards(query: "").isEmpty, "the note's card should be gone after delete")
     }
+
+    // MARK: - Media
+
+    /// A tiny but valid 1×1 PNG, used to exercise `addMediaFile` with real bytes.
+    private static let onePixelPNG = Data(base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    )!
+
+    /// `addMediaFile` (MediaService, service 41, method 1) writes bytes into the
+    /// collection's `collection.media` folder and returns the stored filename —
+    /// the engine-managed name to embed in a field as `<img src="NAME">`. Proves
+    /// the service/method indices and that the file actually lands on disk (so a
+    /// later media sync can upload it), mirroring AnkiDroid's `Media.addFile`.
+    func testAddMediaFileStoresBytesAndReturnsStoredName() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let backend = try openCollection(in: dir)
+        let mediaFolder = dir.appendingPathComponent("collection.media")
+
+        let stored = try backend.addMediaFile(desiredName: "front.png", data: Self.onePixelPNG)
+        XCTAssertEqual(stored, "front.png", "an un-colliding name should be kept as-is")
+
+        let onDisk = mediaFolder.appendingPathComponent(stored)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: onDisk.path),
+                      "the stored file should exist in collection.media")
+        XCTAssertEqual(try Data(contentsOf: onDisk), Self.onePixelPNG,
+                       "the stored bytes should match what was added")
+    }
+
+    /// Adding the *same* name with *different* bytes makes the engine pick a new,
+    /// non-colliding name (e.g. `front_<hash>.png`) rather than overwriting —
+    /// the deduplication that makes the returned name the safe one to reference.
+    /// Identical bytes under the same name reuse the existing file.
+    func testAddMediaFileDeduplicatesCollidingName() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let backend = try openCollection(in: dir)
+
+        let first = try backend.addMediaFile(desiredName: "audio.mp3", data: Data("one".utf8))
+        XCTAssertEqual(first, "audio.mp3")
+
+        // Same name, different content → renamed to avoid clobbering the first.
+        let second = try backend.addMediaFile(desiredName: "audio.mp3", data: Data("two".utf8))
+        XCTAssertNotEqual(second, first, "colliding different bytes must not reuse the name")
+        XCTAssertTrue(second.hasSuffix(".mp3"), "the dedup name keeps the extension")
+
+        // Same name, identical content → the engine reuses the existing file.
+        let third = try backend.addMediaFile(desiredName: "audio.mp3", data: Data("one".utf8))
+        XCTAssertEqual(third, first, "identical bytes under the same name reuse the stored file")
+    }
 }

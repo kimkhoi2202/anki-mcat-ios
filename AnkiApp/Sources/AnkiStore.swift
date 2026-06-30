@@ -381,6 +381,20 @@ final class AnkiStore: ObservableObject {
         refreshUndo()
     }
 
+    /// Stores picked/recorded media into the open collection's `collection.media`
+    /// folder (via the engine, so the name is sanitized + deduplicated and the
+    /// media DB is updated for the next sync) and returns the *stored* filename to
+    /// embed in a field as `<img src="NAME">` or `[sound:NAME]`. Mirrors
+    /// AnkiDroid's NoteEditor saving multimedia through `col.media.addFile`.
+    ///
+    /// Runs off the main actor because the bytes (a photo or audio clip) can be
+    /// large and the write touches disk; `Backend` is `Sendable`/thread-safe.
+    /// Throws so the editor can surface a clear message.
+    func addMediaFile(data: Data, desiredName: String) async throws -> String {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        return try await runDetached { try backend.addMediaFile(desiredName: desiredName, data: data) }
+    }
+
     // MARK: - Card Browser
 
     /// Resolves a Card Browser search to its matching card ids (in Anki's default
