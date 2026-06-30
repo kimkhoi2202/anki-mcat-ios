@@ -65,8 +65,7 @@ public extension Backend {
     /// Clones Anki's create-filtered-deck flow: fetch a default template
     /// (`get_or_create_filtered_deck` with id 0), set the name and one search
     /// term (query / limit / order), then `add_or_update_filtered_deck`, which
-    /// also gathers the matching cards and returns the new deck id. The card
-    /// count comes from an immediate `rebuild` (the add RPC only returns the id).
+    /// also gathers the matching cards and returns the new deck id.
     ///
     /// The engine aborts the build (and the whole creation) if the search is
     /// invalid or matches no cards — `allow_empty` is left false, matching the
@@ -93,8 +92,11 @@ public extension Backend {
 
         let created = try run(service: 7, method: 20, update, returning: Anki_Collection_OpChangesWithId.self)
         let deckID = created.id
-        // add_or_update already built the deck; rebuild to read back the count.
-        let count = try rebuildFilteredDeck(deckID: deckID)
+        // `add_or_update_filtered_deck` already built the deck and gathered its
+        // cards; count them with a cheap search (`did:` matches cards whose deck
+        // is this one) instead of calling rebuild, which would gather a second
+        // time. A freshly created filtered deck has no subdecks, so this is exact.
+        let count = try searchCards(query: "did:\(deckID)").count
         return FilteredDeckResult(deckID: deckID, cardCount: count)
     }
 

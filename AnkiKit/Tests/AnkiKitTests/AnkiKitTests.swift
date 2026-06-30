@@ -385,9 +385,9 @@ final class AnkiKitTests: XCTestCase {
     }
 
     /// A created deck reports the default preset limits (20 new / 200 reviews),
-    /// and `setDeckLimits` persists per-deck overrides that read back through
-    /// `deckLimits` — the get/set behind the deck-options new/day & reviews/day
-    /// controls. Setting is undoable (UpdateDeck records an undo entry).
+    /// and `setDeckLimits` persists new values that read back through `deckLimits`
+    /// — the get/set behind the deck-options new/day & reviews/day controls.
+    /// Setting is undoable (update_deck_configs records an undo entry).
     func testDeckLimitsGetSetRoundTrip() throws {
         let backend = try freshCollection()
         let deckID = try backend.createDeck(name: "Limits")
@@ -418,6 +418,43 @@ final class AnkiKitTests: XCTestCase {
         let limits = try backend.deckLimits(deckID: deckID)
         XCTAssertEqual(limits.newPerDay, 9999, "an over-large new/day should clamp to 9999")
         XCTAssertEqual(limits.reviewsPerDay, 0, "a negative reviews/day should clamp to 0")
+    }
+
+    /// `setDeckLimits` edits the deck's PRESET (deck config), like desktop and
+    /// AnkiDroid — not a per-deck override — and `deckLimits` reads that preset
+    /// value back, never a hardcoded 20/200. Proves both halves of the fix: the
+    /// read falls back to the real preset when there's no override, and the write
+    /// lands on the preset config rather than on the deck.
+    func testDeckLimitsEditPresetNotOverride() throws {
+        let backend = try freshCollection()
+        let deckID = try backend.createDeck(name: "Preset")
+
+        // With no per-deck override, the read returns the deck's actual preset
+        // (the default preset's 20/200) — not a hardcoded constant.
+        let defaults = try backend.deckLimits(deckID: deckID)
+        XCTAssertEqual(defaults.newPerDay, 20, "reads the preset new/day, not a constant")
+        XCTAssertEqual(defaults.reviewsPerDay, 200, "reads the preset reviews/day, not a constant")
+
+        try backend.setDeckLimits(deckID: deckID, newPerDay: 42, reviewsPerDay: 99)
+
+        // The new values read back…
+        let updated = try backend.deckLimits(deckID: deckID)
+        XCTAssertEqual(updated.newPerDay, 42)
+        XCTAssertEqual(updated.reviewsPerDay, 99)
+
+        // …and are stored on the PRESET, not as a per-deck override on the deck.
+        let deck = try backend.deck(id: deckID)
+        XCTAssertFalse(deck.normal.hasNewLimit, "no per-deck new override should be written")
+        XCTAssertFalse(deck.normal.hasReviewLimit, "no per-deck review override should be written")
+
+        let forUpdate = try backend.deckConfigsForUpdate(deckID: deckID)
+        let configID = forUpdate.currentDeck.configID
+        let config = try XCTUnwrap(
+            forUpdate.allConfig.first { $0.config.id == configID }?.config,
+            "the deck's assigned preset should be among the configs"
+        )
+        XCTAssertEqual(config.config.newPerDay, 42, "the preset holds the new/day value")
+        XCTAssertEqual(config.config.reviewsPerDay, 99, "the preset holds the reviews/day value")
     }
 
     // MARK: - Import / Export
@@ -540,6 +577,27 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(summary.totalCards, 3, "total cards should sum every state bucket")
     }
 
+    /// Card Counts separates suspended/buried cards into their own buckets
+    /// (desktop's default `card_counts_separate_inactive = true`): suspending one
+    /// of three new cards leaves two `new` and one `suspended`, rather than
+    /// folding the suspended card back into `new`. Proves `makeStatsSummary` reads
+    /// the inactive-*excluding* counts, so Suspended/Buried can actually render.
+    func testStatsSummarySeparatesSuspendedCards() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        for i in 0..<3 {
+            _ = try backend.addNote(notetypeID: notetypeID, fields: ["SQ\(i)", "SA\(i)"], deckID: 1)
+        }
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "").first)
+        _ = try backend.suspendCards(cardIDs: [cardID])
+
+        let summary = try backend.statsSummary(period: .allTime)
+        XCTAssertEqual(summary.cardCounts.suspended, 1,
+                       "a suspended card is its own bucket, not folded into new/young")
+        XCTAssertEqual(summary.cardCounts.new, 2, "the two non-suspended cards stay new")
+        XCTAssertEqual(summary.totalCards, 3, "every card is still counted once")
+    }
+
     /// Answering a card is recorded in the engine's revlog and surfaces in the
     /// graphs' Today block: after one answer, today's answer count is 1. This
     /// proves `statsSummary` reads live review data, not a static snapshot.
@@ -563,10 +621,11 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(after.today.retentionPercent, 100, "today's retention is 100%")
     }
 
-    /// `makeStatsSummary` applies desktop Anki's period windows: Future Due drops
-    /// the backlog (day < 0) and caps to the range's upper bound, while Reviews
-    /// keeps past days (day <= 0) down to the range's lower bound. Tested as a
-    /// pure mapping on a hand-built response, with no backend.
+    /// `makeStatsSummary` applies desktop Anki's period windows: Future Due keeps
+    /// the backlog (day < 0, matching desktop's default `future_due_show_backlog`)
+    /// and caps to the range's upper bound, while Reviews keeps past days
+    /// (day <= 0) down to the range's lower bound. Tested as a pure mapping on a
+    /// hand-built response, with no backend.
     func testMakeStatsSummaryClipsToPeriod() {
         var resp = Anki_Stats_GraphsResponse()
         // Future due across backlog, today, near future, and far future.
@@ -584,14 +643,14 @@ final class AnkiKitTests: XCTestCase {
         resp.reviews = rcat
 
         let month = Backend.makeStatsSummary(from: resp, period: .month)
-        XCTAssertEqual(month.futureDue.map(\.day), [0, 1],
-                       "month future-due drops the backlog (-2) and the >31d bar (40)")
+        XCTAssertEqual(month.futureDue.map(\.day), [-2, 0, 1],
+                       "month future-due keeps the backlog (-2) but drops the >31d bar (40)")
         XCTAssertEqual(month.reviews.map(\.day), [-5, 0],
                        "month reviews keep only the last 30 days (drops -40)")
 
         let all = Backend.makeStatsSummary(from: resp, period: .allTime)
-        XCTAssertEqual(all.futureDue.map(\.day), [0, 1, 40],
-                       "all-time keeps every future bar but still drops the backlog")
+        XCTAssertEqual(all.futureDue.map(\.day), [-2, 0, 1, 40],
+                       "all-time keeps every future bar including the backlog")
         XCTAssertEqual(all.reviews.map(\.day), [-40, -5, 0],
                        "all-time keeps every past review day")
     }

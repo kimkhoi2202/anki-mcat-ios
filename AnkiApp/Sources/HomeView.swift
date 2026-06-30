@@ -194,6 +194,11 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInImportExport") {
                 goImportExport = true
             }
+            // Open Import & Export and surface the destructive replace
+            // confirmation (used for the import-replace screenshot).
+            if ProcessInfo.processInfo.arguments.contains("-startInImportReplaceConfirm") {
+                goImportExport = true
+            }
             if ProcessInfo.processInfo.arguments.contains("-startInAddNote") {
                 showAddNote = true
             }
@@ -438,7 +443,7 @@ struct HomeView: View {
         let name = deckNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
         deckNameInput = ""
         guard !name.isEmpty else { return }
-        runDeckAction { try store.createDeck(name: name) }
+        runDeckAction { try await store.createDeck(name: name) }
     }
 
     private func performRename() {
@@ -447,12 +452,12 @@ struct HomeView: View {
         renameTarget = nil
         deckNameInput = ""
         guard !name.isEmpty, name != deck.fullName else { return }
-        runDeckAction { try store.renameDeck(id: deck.id, name: name) }
+        runDeckAction { try await store.renameDeck(id: deck.id, name: name) }
     }
 
     private func performDelete(_ deck: DeckTreeEntry) {
         pendingDelete = nil
-        runDeckAction { try store.deleteDeck(id: deck.id) }
+        runDeckAction { try await store.deleteDeck(id: deck.id) }
     }
 
     /// Re-gathers a filtered deck's cards, reporting the count (Anki's "Rebuild").
@@ -475,13 +480,16 @@ struct HomeView: View {
         }
     }
 
-    /// Runs a deck mutation, surfacing a readable message on failure (the store
-    /// already refreshes the deck list on success).
-    private func runDeckAction(_ work: () throws -> Void) {
-        do {
-            try work()
-        } catch {
-            deckActionError = describe(error)
+    /// Runs a deck mutation off the main actor, surfacing a readable message on
+    /// failure (the store already refreshes the deck list on success). The work
+    /// runs in a `Task` so the backend write doesn't block the main thread.
+    private func runDeckAction(_ work: @escaping () async throws -> Void) {
+        Task { @MainActor in
+            do {
+                try await work()
+            } catch {
+                deckActionError = describe(error)
+            }
         }
     }
 

@@ -57,9 +57,10 @@ public struct StatsSummary: Sendable, Equatable {
     public let cardCounts: CardCounts
     /// Total number of cards (the sum of every `cardCounts` bucket).
     public let totalCards: Int
-    /// Cards becoming due over the coming days (day 0 = today), for the Future
-    /// Due graph. Backlog (overdue, day < 0) is excluded, matching desktop's
-    /// default `future_due_show_backlog = false`.
+    /// Cards becoming due per day for the Future Due graph. Day 0 = today and
+    /// negative days are the backlog (overdue cards), which is included to match
+    /// desktop's default `future_due_show_backlog = true` (see
+    /// `rslib/src/config/bool.rs`).
     public let futureDue: [DayCount]
     /// Reviews answered per past day (day 0 = today), split by card type, for
     /// the Reviews graph.
@@ -222,14 +223,16 @@ public extension Backend {
     }
 
     /// Pure mapping from the engine response to a `StatsSummary`, split out so it
-    /// can be unit-tested without a backend. Faithful to desktop Anki's graph
-    /// semantics: card counts use the inactive-inclusive bucket (the default when
-    /// `card_counts_separate_inactive` is off), future due drops the backlog, and
-    /// each graph is clipped to the selected period's day window.
+    /// can be unit-tested without a backend. Faithful to desktop Anki's default
+    /// graph preferences (both `true` — see `rslib/src/config/bool.rs`): card
+    /// counts use the inactive-*excluding* bucket so Suspended/Buried are their
+    /// own categories (`card_counts_separate_inactive`), and Future Due keeps the
+    /// backlog (`future_due_show_backlog`). Each graph is still clipped to the
+    /// selected period's day window.
     static func makeStatsSummary(
         from resp: Anki_Stats_GraphsResponse, period: StatsPeriod
     ) -> StatsSummary {
-        let counts = resp.cardCounts.includingInactive
+        let counts = resp.cardCounts.excludingInactive
         let cardCounts = StatsSummary.CardCounts(
             new: Int(counts.newCards),
             learn: Int(counts.learn),
@@ -242,10 +245,11 @@ public extension Backend {
         let totalCards = cardCounts.new + cardCounts.learn + cardCounts.relearn
             + cardCounts.young + cardCounts.mature + cardCounts.suspended + cardCounts.buried
 
-        // Future due: forward-looking only (day >= 0), capped to the period.
+        // Future due: include the backlog (day < 0) like desktop's default, and
+        // cap the forward end to the selected period.
         let maxDay = period.futureDueMaxDay
         let futureDue = resp.futureDue.futureDue
-            .filter { day, _ in day >= 0 && (maxDay.map { Int(day) <= $0 } ?? true) }
+            .filter { day, _ in maxDay.map { Int(day) <= $0 } ?? true }
             .map { StatsSummary.DayCount(day: Int($0.key), count: Int($0.value)) }
             .sorted { $0.day < $1.day }
 
