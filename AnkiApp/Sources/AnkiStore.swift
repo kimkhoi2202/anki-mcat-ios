@@ -82,6 +82,11 @@ final class AnkiStore: ObservableObject {
     /// The group's self-hosted sync server (deployed on Fly.io).
     static let mcatSyncServerURL = "https://anki-mcat-sync.fly.dev/"
     private static let preferredServerKey = "preferredSyncServerEndpoint"
+    /// Wall-clock cap on the media-sync poll loop, so a stuck server-side media
+    /// sync can't spin the banner (and keep the Sync button disabled) forever.
+    /// Generous enough for a large first media download; on timeout media is
+    /// reported as a non-fatal error and the collection sync still succeeds.
+    private static let mediaSyncTimeout: TimeInterval = 300
 
     // MARK: - Preferences state (engine-backed)
 
@@ -144,20 +149,29 @@ final class AnkiStore: ObservableObject {
     func boot() {
         guard backend == nil else { return }
         buildHash = Backend.buildHash()
+        let backend: Backend
         do {
-            let backend = try Backend()
-            self.backend = backend
+            backend = try Backend()
             try openDefaultCollection(backend)
-            try seedIfNeeded(backend)
-            refreshDecks()
-            refreshUndo()
-            loadPreferredSyncServer()
-            loadLoginState()
-            loadPreferences()
-            status = "Engine OK"
         } catch {
-            status = "Error: \(error)"
+            // A failed open (corrupt/locked db, schema too new, disk full) must
+            // not leave a non-nil handle behind, or the `backend == nil` guard
+            // would block every retry — even across relaunches. Keep it nil so
+            // the next boot() can try again.
+            self.backend = nil
+            status = "Couldn't open the collection: \(error)"
+            return
         }
+        // Retain the handle only now that the collection is actually open.
+        self.backend = backend
+        // Seeding demo cards is best-effort; a hiccup must not brick a good open.
+        try? seedIfNeeded(backend)
+        refreshDecks()
+        refreshUndo()
+        loadPreferredSyncServer()
+        loadLoginState()
+        loadPreferences()
+        status = "Engine OK"
     }
 
     /// Opens (or reopens) the collection at the app's standard Documents paths.
@@ -460,6 +474,17 @@ final class AnkiStore: ObservableObject {
     private func seedIfNeeded(_ backend: Backend) throws {
         let key = "seeded_v1"
         if UserDefaults.standard.bool(forKey: key) { return }
+        // Only seed a genuinely fresh collection. Gating on the collection
+        // actually being empty (rather than only the UserDefaults flag) means a
+        // UserDefaults reset can't re-seed a real collection, and a partial seed
+        // failure can't duplicate demo notes on the next launch — the notes
+        // already added leave the collection non-empty, so we skip. Setting the
+        // guard up front too means a mid-seed failure won't re-run the adds.
+        guard try backend.searchCards(query: "").isEmpty else {
+            UserDefaults.standard.set(true, forKey: key)
+            return
+        }
+        UserDefaults.standard.set(true, forKey: key)
         let notetypes = try backend.notetypeNames()
         // A "Basic (type in the answer)" card first, so the type-in flow is easy
         // to find when reviewing the demo deck.
@@ -473,7 +498,6 @@ final class AnkiStore: ObservableObject {
         guard let basic = notetypes.first(where: {
             $0.name.hasPrefix("Basic") && !$0.name.lowercased().contains("type")
         }) else {
-            UserDefaults.standard.set(true, forKey: key)
             return
         }
         let cards: [(String, String)] = [
@@ -484,7 +508,6 @@ final class AnkiStore: ObservableObject {
         for (q, a) in cards {
             _ = try backend.addNote(notetypeID: basic.id, fields: [q, a], deckID: 1)
         }
-        UserDefaults.standard.set(true, forKey: key)
     }
 
     func startReview() {
@@ -629,8 +652,17 @@ final class AnkiStore: ObservableObject {
     func rate(_ rating: Anki_Scheduler_CardAnswer.Rating) {
         guard let backend, let card = currentCard else { return }
         let ms = UInt32(min(60_000, Date().timeIntervalSince(cardShownAt) * 1000))
-        try? backend.answer(card: card, rating: rating, millisecondsTaken: ms)
-        loadNext()
+        do {
+            try backend.answer(card: card, rating: rating, millisecondsTaken: ms)
+            // Only advance once the answer is actually recorded.
+            loadNext()
+        } catch {
+            // A failed answer (DB/scheduler error, stale state) must not be
+            // silently dropped while the UI advances as if the review counted.
+            // Surface it and keep the current card/answer shown so the user can
+            // retry instead of losing study data.
+            status = "Answer error: \(error)"
+        }
     }
 
     // MARK: - Reviewer card actions
@@ -938,6 +970,10 @@ final class AnkiStore: ObservableObject {
     /// server's `required` verdict into a forced upload/download or a conflict
     /// prompt, and finally a background media sync that we poll to completion.
     func sync() async {
+        // Reentrancy guard: programmatic callers (post-login auto-sync, the debug
+        // hook) can fire while a sync is already running; a second run would stomp
+        // `syncPhase` and double-write the keychain. Bail if one is in flight.
+        guard !syncPhase.isActive else { return }
         guard let backend else { return }
         guard let creds = SyncKeychain.load() else {
             showLogin = true
@@ -1028,6 +1064,14 @@ final class AnkiStore: ObservableObject {
         try await runDetached {
             try backend.fullUploadOrDownload(auth: authForFull, upload: upload, serverUsn: mediaUsn)
         }
+        if !upload {
+            // A full download replaced the whole collection, which may not
+            // contain the previously-current deck. Fall back to the Default deck
+            // (id 1) so the next "Add note"/selectDeck doesn't target a missing
+            // deck — mirroring the colpkg-import replace path. Covers both a
+            // server-forced full download and the conflict-resolution download.
+            currentDeckID = 1
+        }
         // full_sync_inner already kicked off media sync; just monitor it.
         await mediaPhase(auth: auth, startNew: false)
         syncPhase = .success(successMessage(upload ? "Uploaded to server" : "Downloaded from server"))
@@ -1042,12 +1086,21 @@ final class AnkiStore: ObservableObject {
         guard let backend else { return }
         lastMediaError = nil
         syncPhase = .mediaSyncing("")
+        // Bound the poll loop: a server-side stuck media sync would otherwise
+        // leave the banner spinning and the Sync button disabled forever.
+        let deadline = Date().addingTimeInterval(Self.mediaSyncTimeout)
         do {
             if startNew {
                 let authForMedia = auth
                 try await runDetached { try backend.syncMedia(auth: authForMedia) }
             }
             while true {
+                if Date() >= deadline {
+                    // Non-fatal: the collection sync already succeeded, so just
+                    // note the media timeout and stop polling.
+                    lastMediaError = "media sync timed out"
+                    break
+                }
                 let status = try await runDetached { try backend.mediaSyncStatus() }
                 if !status.active { break }
                 let progress = status.progress
@@ -1058,6 +1111,11 @@ final class AnkiStore: ObservableObject {
                 )
                 try await Task.sleep(nanoseconds: 150_000_000)
             }
+        } catch is CancellationError {
+            // A cancelled poll (e.g. the surrounding task was torn down, which
+            // makes `Task.sleep` throw) is a clean stop, not a media failure —
+            // same as the user-interrupted case below.
+            return
         } catch {
             if let syncError = SyncError(error), syncError.kind == .interrupted { return }
             lastMediaError = SyncError(error)?.message ?? "media sync failed"
@@ -1194,7 +1252,10 @@ final class AnkiStore: ObservableObject {
         if isColpkg {
             try await runDetached {
                 // .colpkg replaces the collection file: close, import, reopen.
-                try backend.closeCollection()
+                // Tolerate an already-closed collection (e.g. a prior failed
+                // import or a closed handle left it shut) so the replacement can
+                // still be written instead of aborting on a close that throws.
+                try? backend.closeCollection()
                 do {
                     try backend.importCollectionPackage(
                         colPath: colPath, backupPath: packagePath,
