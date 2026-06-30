@@ -32,14 +32,6 @@ struct HomeView: View {
     @State private var cardInfoTarget: CardInfoTarget?
     @State private var changeNotetypeNoteID: HomeNoteTarget?
 
-    // "Focus weak topics" study mode (points-at-stake, PRD 7a): the deck whose
-    // weakest topics the read-out is opened for, and its navigation trigger.
-    @State private var weakTopicsDeck: DeckTreeEntry?
-    @State private var goWeakTopics = false
-
-    // MCAT coverage map (PRD 7c) navigation trigger.
-    @State private var goCoverage = false
-
     var body: some View {
         NavigationStack {
             ZStack {
@@ -54,14 +46,6 @@ struct HomeView: View {
             .navigationTitle("Decks")
             .navigationDestination(isPresented: $goReview) {
                 ReviewerView(store: store)
-            }
-            .navigationDestination(isPresented: $goWeakTopics) {
-                if let deck = weakTopicsDeck {
-                    WeakTopicsView(store: store, deck: deck)
-                }
-            }
-            .navigationDestination(isPresented: $goCoverage) {
-                CoverageView(store: store)
             }
             .navigationDestination(isPresented: $goSettings) {
                 SettingsView(store: store)
@@ -142,7 +126,7 @@ struct HomeView: View {
                 Button("Create") { createDeck() }
                 Button("Cancel", role: .cancel) { deckNameInput = "" }
             } message: {
-                Text("Use “::” to make a subdeck, e.g. MCAT::Biology.")
+                Text("Use “::” to make a subdeck, e.g. Spanish::Verbs.")
             }
             // Rename deck — same dialog AnkiDroid reuses for renames.
             .alert("Rename Deck", isPresented: renamePresented) {
@@ -221,23 +205,6 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInBrowser") {
                 goBrowse = true
             }
-            // Open the "Focus weak topics" read-out for the deck with the most
-            // due reviews (the seeded MCAT deck) — the points-at-stake screenshot.
-            if ProcessInfo.processInfo.arguments.contains("-startInWeakTopics") {
-                openWeakTopics(for: weakTopicsCandidate)
-            }
-            // Open the MCAT coverage map (the PRD 7c coverage screenshot).
-            if ProcessInfo.processInfo.arguments.contains("-startInCoverage") {
-                goCoverage = true
-            }
-            // Drive straight into the weak-topics reviewer (weakest card first),
-            // verifying the points-at-stake review loop runs end-to-end.
-            if ProcessInfo.processInfo.arguments.contains("-startInWeakTopicsReview"),
-               let deck = weakTopicsCandidate {
-                store.loadWeakTopics(deckID: deck.id, deckName: deck.fullName)
-                store.startWeakTopicsReview()
-                goReview = true
-            }
             // Answer a few cards first so the stats screen has real review
             // history to show (used for the T3.1 screenshot).
             store.studySomeIfRequested()
@@ -289,8 +256,6 @@ struct HomeView: View {
             ScrollView {
                 VStack(spacing: DS.Spacing.l) {
                     deckList
-                    weakTopicsButton
-                    coverageButton
                     newDeckButton
                     newFilteredDeckButton
                 }
@@ -361,14 +326,6 @@ struct HomeView: View {
             }
         }
 
-        // Study this deck weakest-topic-first (points-at-stake), the Rust-change
-        // study mode. Offered for every deck since any deck can carry MCAT tags.
-        Button {
-            openWeakTopics(for: deck)
-        } label: {
-            Label("Focus Weak Topics", systemImage: "scope")
-        }
-
         if deck.id != Self.defaultDeckID {
             Divider()
             Button(role: .destructive) {
@@ -377,71 +334,6 @@ struct HomeView: View {
                 Label("Delete", systemImage: "trash")
             }
         }
-    }
-
-    /// Full-width "Focus weak topics" action: opens the points-at-stake read-out
-    /// (the Rust change's study mode) for the deck with the most due reviews,
-    /// where the ranking is most useful. Per-deck access is also in the long-press
-    /// menu. Accent-tinted to stand out as the headline study feature.
-    private var weakTopicsButton: some View {
-        Button {
-            openWeakTopics(for: weakTopicsCandidate)
-        } label: {
-            Label("Focus Weak Topics", systemImage: "scope")
-                .font(DS.Typography.body.weight(.semibold))
-                .foregroundStyle(Color.white)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: DS.minTapTarget)
-                .background(
-                    DS.accent,
-                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
-                )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Focus weak topics")
-        .accessibilityHint("Study your weakest topics first, ranked by the engine")
-    }
-
-    /// The deck the global "Focus Weak Topics" button targets: the one with the
-    /// most due reviews (where weak-topic ranking matters most), falling back to
-    /// the first deck so the read-out can still explain itself when nothing's due.
-    private var weakTopicsCandidate: DeckTreeEntry? {
-        store.decks.max { $0.reviewCount < $1.reviewCount } ?? store.decks.first
-    }
-
-    /// Opens the weak-topics read-out for a deck (shared by the global button and
-    /// the per-deck menu).
-    private func openWeakTopics(for deck: DeckTreeEntry?) {
-        guard let deck else { return }
-        weakTopicsDeck = deck
-        goWeakTopics = true
-    }
-
-    /// Full-width "MCAT Coverage" action: opens the coverage map (PRD 7c), the
-    /// dashboard of how many outline topics the collection touches, with the
-    /// abstain banner when coverage is under the give-up line. Styled as a
-    /// surface card to sit a step below the headline weak-topics action.
-    private var coverageButton: some View {
-        Button {
-            goCoverage = true
-        } label: {
-            Label("MCAT Coverage", systemImage: "checklist")
-                .font(DS.Typography.body.weight(.semibold))
-                .foregroundStyle(DS.accent)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: DS.minTapTarget)
-                .background(
-                    DS.surface,
-                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
-                        .strokeBorder(DS.separator, lineWidth: 1)
-                )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("MCAT coverage map")
-        .accessibilityHint("See how many MCAT topics your deck covers")
     }
 
     /// Full-width "New Deck" action below the list, keeping deck creation out of
