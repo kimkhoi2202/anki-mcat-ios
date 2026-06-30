@@ -942,4 +942,84 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(report.percentCovered, 25)
         XCTAssertFalse(report.meetsCoverageThreshold, "25% is below the 50% line, so the app abstains")
     }
+
+    // MARK: - Reviewer card actions
+
+    /// `buryCards` (bury_or_suspend, BURY_USER on card ids) removes the card from
+    /// the study queue and is undoable — the reviewer's "Bury card" action.
+    func testBuryCardLeavesQueueAndIsUndoable() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1)
+        let card = try XCTUnwrap(try backend.queuedCards().cards.first, "the added card should be queued")
+
+        let buried = try backend.buryCards(cardIDs: [card.card.id])
+        XCTAssertEqual(buried, 1, "one card should be buried")
+        XCTAssertTrue(try backend.queuedCards().cards.isEmpty, "the buried card should leave the queue")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "burying should be undoable")
+
+        _ = try backend.undo()
+        XCTAssertFalse(try backend.queuedCards().cards.isEmpty, "undo should restore the buried card")
+    }
+
+    /// `buryNotes` (bury_or_suspend, BURY_USER on note ids) buries every card of
+    /// the note — the reviewer's "Bury note" action. With one card this matches
+    /// burying the card, but it targets the note id rather than the card id.
+    func testBuryNoteLeavesQueue() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1)
+
+        let buried = try backend.buryNotes(noteIDs: [nid])
+        XCTAssertEqual(buried, 1, "the note's one card should be buried")
+        XCTAssertTrue(try backend.queuedCards().cards.isEmpty, "the buried note's card should leave the queue")
+    }
+
+    /// `suspendNotes` (bury_or_suspend, SUSPEND on note ids) suspends the note's
+    /// card, visible on the browser row — the reviewer's "Suspend note" action.
+    func testSuspendNoteSuspendsCard() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "").first)
+
+        let suspended = try backend.suspendNotes(noteIDs: [nid])
+        XCTAssertEqual(suspended, 1, "the note's one card should be suspended")
+        XCTAssertTrue(try backend.cardBrowserRow(cardID: cardID).suspended, "the card should read as suspended")
+    }
+
+    /// `toggleMark` flips the note's `marked` tag and reports the new state, and
+    /// `isNoteMarked` reads it back — the reviewer's Mark/Unmark action, which
+    /// AnkiDroid implements as a tag toggle.
+    func testToggleMarkAddsAndRemovesMarkedTag() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1)
+
+        XCTAssertFalse(try backend.isNoteMarked(noteID: nid), "a new note is not marked")
+
+        XCTAssertTrue(try backend.toggleMark(noteID: nid), "marking should report the marked state")
+        XCTAssertTrue(try backend.isNoteMarked(noteID: nid), "the note should now be marked")
+        XCTAssertTrue(try backend.getNote(noteID: nid).tags.contains("marked"),
+                      "marking should add the 'marked' tag")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "marking should be undoable")
+
+        XCTAssertFalse(try backend.toggleMark(noteID: nid), "unmarking should report the unmarked state")
+        XCTAssertFalse(try backend.isNoteMarked(noteID: nid), "the note should no longer be marked")
+        XCTAssertFalse(try backend.getNote(noteID: nid).tags.contains("marked"),
+                       "unmarking should remove the 'marked' tag")
+    }
+
+    /// `removeNotes(noteIDs:)` deletes the note (and its cards) so a follow-up
+    /// search no longer finds it — the reviewer's Delete-note action, which knows
+    /// the current card's note id.
+    func testRemoveNotesByNoteIDDeletes() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Doomed", "Note"], deckID: 1)
+
+        let removed = try backend.removeNotes(noteIDs: [nid])
+        XCTAssertEqual(removed, 1, "one note should be removed")
+        XCTAssertTrue(try backend.searchCards(query: "").isEmpty, "the note's card should be gone after delete")
+    }
 }
