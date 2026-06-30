@@ -17,7 +17,11 @@ DerivedData/
 *.xcuserstate
 *.xcuserdatad
 
-# Scratch / screenshots
+# Secrets (e.g. OpenAI API key) — injected into the app at build time
+.env
+
+# Scratch / screenshots (but keep bundled image assets in the asset catalog)
 *.png
+!**/Assets.xcassets/**/*.png
 
 .DS_Store
