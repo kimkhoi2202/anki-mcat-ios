@@ -57,6 +57,14 @@ struct HomeView: View {
     @State private var cardInfoTarget: CardInfoTarget?
     @State private var changeNotetypeNoteID: HomeNoteTarget?
 
+    // Note-type management (full-parity) screenshot/automation hooks: jump
+    // straight to the manager list, a note type's Fields editor, or its Card
+    // Template editor.
+    @State private var goManageNotetypes = false
+    @State private var fieldsEditorTarget: NotetypeScreenTarget?
+    @State private var goFieldsEditor = false
+    @State private var templateEditorTarget: NotetypeScreenTarget?
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -101,6 +109,17 @@ struct HomeView: View {
             }
             .navigationDestination(isPresented: $goImportExport) {
                 ImportExportView(store: store)
+            }
+            .navigationDestination(isPresented: $goManageNotetypes) {
+                ManageNotetypesView(store: store)
+            }
+            .navigationDestination(isPresented: $goFieldsEditor) {
+                if let target = fieldsEditorTarget {
+                    NotetypeFieldsEditorView(store: store, notetypeID: target.id, notetypeName: target.name)
+                }
+            }
+            .sheet(item: $templateEditorTarget) { target in
+                CardTemplateEditorView(store: store, notetypeID: target.id, notetypeName: target.name)
             }
             // Tapping a deck opens its overview (counts + Study + quick links)
             // rather than jumping straight into the reviewer.
@@ -350,6 +369,30 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInChangeNotetype") {
                 if let noteID = await store.firstNoteID() {
                     changeNotetypeNoteID = HomeNoteTarget(id: noteID)
+                }
+            }
+            // Note-type management screenshots. `-startInManageNotetypes` opens
+            // the manager (pair with `-startInAddNotetype` for the add dialog);
+            // `-startInNotetypeFields` opens a Basic type's Fields editor; and
+            // `-startInCardTemplate` opens a (reversed) type's Card Template editor
+            // so the live preview and multi-card switcher show.
+            if ProcessInfo.processInfo.arguments.contains("-startInManageNotetypes") {
+                goManageNotetypes = true
+            }
+            if ProcessInfo.processInfo.arguments.contains("-startInNotetypeFields") {
+                let all = store.availableNotetypes()
+                if let target = all.first(where: { $0.name.hasPrefix("Basic") }) ?? all.first {
+                    fieldsEditorTarget = NotetypeScreenTarget(id: target.id, name: target.name)
+                    goFieldsEditor = true
+                }
+            }
+            if ProcessInfo.processInfo.arguments.contains("-startInCardTemplate") {
+                let all = store.availableNotetypes()
+                let target = all.first(where: { $0.name == "Basic (and reversed card)" })
+                    ?? all.first(where: { $0.name.hasPrefix("Basic") })
+                    ?? all.first
+                if let target {
+                    templateEditorTarget = NotetypeScreenTarget(id: target.id, name: target.name)
                 }
             }
             if UserDefaults.standard.bool(forKey: "showLogin") {
@@ -752,6 +795,13 @@ struct HomeView: View {
 /// `.sheet(item:)` from an optional note id (used by the verification hook).
 private struct HomeNoteTarget: Identifiable {
     let id: Int64
+}
+
+/// Identifiable wrapper carrying a note type's id + name for the note-type
+/// management screenshot hooks (Fields / Card Template editors).
+private struct NotetypeScreenTarget: Identifiable {
+    let id: Int64
+    let name: String
 }
 
 /// The Home sync control, cloning AnkiDroid's DeckPicker sync action.

@@ -26,6 +26,7 @@ struct SettingsView: View {
             appearanceSection
             reviewingSection
             autoAdvanceSection
+            notetypesSection
             dataSection
             aboutSection
         }
@@ -217,6 +218,28 @@ struct SettingsView: View {
             Text("\(seconds)s")
                 .foregroundStyle(DS.textSecondary)
                 .monospacedDigit()
+        }
+    }
+
+    // MARK: - Note types
+
+    /// Entry to "Manage note types" — AnkiDroid keeps note-type management in its
+    /// settings; we mirror that with a row into the native manager (add / clone /
+    /// rename / delete note types, edit fields, edit card templates).
+    private var notetypesSection: some View {
+        Section {
+            NavigationLink {
+                ManageNotetypesView(store: store)
+            } label: {
+                Label("Manage note types", systemImage: "square.stack.3d.up")
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+            }
+            .accessibilityIdentifier("manageNotetypes")
+        } header: {
+            sectionHeader("Note types")
+        } footer: {
+            sectionFooter("Add, clone, rename, or delete note types, and edit their fields and card templates.")
         }
     }
 

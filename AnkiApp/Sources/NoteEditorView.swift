@@ -142,6 +142,12 @@ struct NoteEditorView: View {
                 runScreenshotHookIfRequested()
                 #endif
             }
+            // Refresh the note-type options when returning from the manager (a new
+            // type may have been added). Only after the initial load, so it never
+            // races `loadIfNeeded` on first appear.
+            .onAppear {
+                if didLoad { refreshNotetypeOptions() }
+            }
         }
     }
 
@@ -161,6 +167,16 @@ struct NoteEditorView: View {
             .disabled(isEditing)
             .onChange(of: selectedNotetypeID) { _ in
                 if !isEditing { reloadFields(preservingValues: false) }
+            }
+            // Jump to the note-type manager (add/clone/rename/delete, edit fields
+            // and card templates). On return the picker's options are refreshed so
+            // a newly added type is selectable.
+            NavigationLink {
+                ManageNotetypesView(store: store)
+            } label: {
+                Label("Manage note types…", systemImage: "square.stack.3d.up")
+                    .font(DS.Typography.caption)
+                    .foregroundStyle(DS.accent)
             }
         } header: {
             sectionHeader("Note type")
@@ -434,6 +450,22 @@ struct NoteEditorView: View {
             fieldValues = aligned(note.fields, toCount: names.count)
             fieldHeights = [:]
             tagsText = note.tags.joined(separator: " ")
+        }
+    }
+
+    /// Re-reads the available note types after returning from the manager, so a
+    /// newly added/cloned type is selectable. Keeps the current selection when it
+    /// still exists; if the selected type was deleted (ADD mode), falls back to
+    /// the first available type and reloads its fields. EDIT mode keeps its fixed
+    /// (possibly synthesized) type entry untouched.
+    private func refreshNotetypeOptions() {
+        guard !isEditing else { return }
+        let latest = store.availableNotetypes().map { NotetypeOption(id: $0.id, name: $0.name) }
+        guard !latest.isEmpty else { return }
+        notetypes = latest
+        if !latest.contains(where: { $0.id == selectedNotetypeID }) {
+            selectedNotetypeID = latest.first?.id ?? selectedNotetypeID
+            reloadFields(preservingValues: false)
         }
     }
 

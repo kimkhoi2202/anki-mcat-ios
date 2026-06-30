@@ -785,6 +785,138 @@ final class AnkiStore: ObservableObject {
         refreshUndo()
     }
 
+    // MARK: - Note type management
+
+    /// Every note type with its note count, for the "Manage note types" list.
+    /// Off the main actor; best-effort (empty on failure / not ready).
+    func notetypeUseCounts() async -> [NotetypeUseCount] {
+        guard let backend else { return [] }
+        return (try? await runDetached { try backend.notetypeNamesAndCounts() }) ?? []
+    }
+
+    /// Loads a note type's full editable model (fields, templates, CSS) for the
+    /// Fields / Card Template editors. Off the main actor; nil if it can't load.
+    func loadNotetype(id: Int64) async -> Anki_Notetypes_Notetype? {
+        guard let backend else { return nil }
+        return try? await runDetached { try backend.notetype(id: id) }
+    }
+
+    /// The stock note types (kind + display name) offered as bases in the "Add
+    /// note type" dialog, plus the existing note types to clone. Off the main
+    /// actor; best-effort.
+    func addNotetypeBases() async -> (stock: [(kind: Anki_Notetypes_StockNotetype.Kind, name: String)],
+                                      existing: [(id: Int64, name: String)]) {
+        guard let backend else { return ([], []) }
+        let result = try? await runDetached { () -> ([(Anki_Notetypes_StockNotetype.Kind, String)], [(Int64, String)]) in
+            let stock = Anki_Notetypes_StockNotetype.Kind.allCases.compactMap {
+                kind -> (Anki_Notetypes_StockNotetype.Kind, String)? in
+                guard let name = try? backend.stockNotetypeName(kind: kind), !name.isEmpty else { return nil }
+                return (kind, name)
+            }
+            let existing = (try? backend.notetypeNames()) ?? []
+            return (stock, existing.map { ($0.id, $0.name) })
+        }
+        guard let result else { return ([], []) }
+        return (result.0.map { (kind: $0.0, name: $0.1) }, result.1.map { (id: $0.0, name: $0.1) })
+    }
+
+    /// Adds a new note type from a stock kind (the Add dialog's "Add" option),
+    /// off the main actor. Throws so the dialog can surface a clear message.
+    func addStockNotetype(kind: Anki_Notetypes_StockNotetype.Kind, name: String) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try await runDetached { try backend.addStockNotetype(kind: kind, name: name) }
+        refreshUndo()
+    }
+
+    /// Clones an existing note type under a new name (the Add dialog's "Clone"
+    /// option), off the main actor.
+    func cloneNotetype(id: Int64, name: String) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try await runDetached { try backend.cloneNotetype(id: id, name: name) }
+        refreshUndo()
+    }
+
+    /// Renames a note type in place, off the main actor.
+    func renameNotetype(id: Int64, name: String) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.renameNotetype(id: id, name: name) }
+        refreshUndo()
+    }
+
+    /// Deletes a note type and all of its notes/cards, off the main actor (a big
+    /// type can cascade to many notes), then refreshes deck counts. The
+    /// can't-delete-the-last guard lives in the view.
+    func deleteNotetype(id: Int64) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.removeNotetype(id: id) }
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Persists an edited note type (the Card Template editor's Save), off the
+    /// main actor (it can rewrite every note/card of the type). The engine
+    /// validates templates and throws on problems, which the editor surfaces.
+    func saveNotetype(_ notetype: Anki_Notetypes_Notetype) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.updateNotetype(notetype) }
+        refreshDecks()
+        refreshUndo()
+    }
+
+    // MARK: - Fields editor (atomic per-op saves, like AnkiDroid)
+
+    /// Appends a field to a note type (added empty to every note), off the main
+    /// actor.
+    func addNotetypeField(notetypeID: Int64, name: String) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.addNotetypeField(notetypeID: notetypeID, name: name) }
+        refreshUndo()
+    }
+
+    /// Renames the field at `index`, off the main actor.
+    func renameNotetypeField(notetypeID: Int64, at index: Int, to name: String) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.renameNotetypeField(notetypeID: notetypeID, at: index, to: name) }
+        refreshUndo()
+    }
+
+    /// Moves the field at `from` to `to`, off the main actor.
+    func moveNotetypeField(notetypeID: Int64, from: Int, to: Int) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.moveNotetypeField(notetypeID: notetypeID, from: from, to: to) }
+        refreshUndo()
+    }
+
+    /// Removes the field at `index` (refused for the last field), off the main
+    /// actor.
+    func removeNotetypeField(notetypeID: Int64, at index: Int) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.removeNotetypeField(notetypeID: notetypeID, at: index) }
+        refreshUndo()
+    }
+
+    /// Sets the note type's sort field, off the main actor.
+    func setNotetypeSortField(notetypeID: Int64, at index: Int) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.setNotetypeSortField(notetypeID: notetypeID, at: index) }
+        refreshUndo()
+    }
+
+    // MARK: - Card-template preview
+
+    /// Renders a sample card's question/answer for the Card Template editor's live
+    /// preview, off the main actor. Uses the (possibly unsaved) `template` so
+    /// edits show immediately; the CSS is applied by the view from the edited note
+    /// type. Best-effort: nil if rendering fails.
+    func renderNotetypePreview(
+        note: Anki_Notes_Note, cardOrd: Int, template: Anki_Notetypes_Notetype.Template
+    ) async -> (question: String, answer: String)? {
+        guard let backend else { return nil }
+        return try? await runDetached {
+            try backend.renderUncommittedCard(note: note, cardOrd: cardOrd, template: template)
+        }
+    }
+
     // MARK: - Filtered Decks
 
     /// Creates a filtered deck from a single search query / limit / order and

@@ -120,7 +120,10 @@ public extension Backend {
         _ = try run(service: 13, method: 4, input: try ans.serializedData())
     }
 
-    private static func joinNodes(_ nodes: [Anki_CardRendering_RenderedTemplateNode]) -> String {
+    /// Flattens rendered template nodes (literal text + field replacements) into
+    /// the final HTML string. Shared by the reviewer render and the notetype
+    /// preview render.
+    static func joinNodes(_ nodes: [Anki_CardRendering_RenderedTemplateNode]) -> String {
         nodes.map { node -> String in
             if case .text(let s)? = node.value { return s }
             if case .replacement(let r)? = node.value { return r.currentText }

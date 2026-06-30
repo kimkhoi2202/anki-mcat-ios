@@ -976,6 +976,223 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "changing note type should be undoable")
     }
 
+    // MARK: - Manage Note Types
+
+    /// `notetypeNamesAndCounts` (NotetypesService 23, 9) lists every note type
+    /// with its note count — the data behind the "Manage note types" list. A
+    /// fresh collection ships the stock types with zero notes; adding a Basic note
+    /// bumps that type's count to one.
+    func testNotetypeNamesAndCountsReflectsUsage() throws {
+        let backend = try freshCollection()
+        let before = try backend.notetypeNamesAndCounts()
+        XCTAssertFalse(before.isEmpty, "a fresh collection ships stock note types")
+        let basic = try XCTUnwrap(before.first { $0.name == "Basic" })
+        XCTAssertEqual(basic.useCount, 0, "no notes use Basic yet")
+
+        _ = try backend.addNote(notetypeID: basic.id, fields: ["Q", "A"], deckID: 1)
+
+        let after = try backend.notetypeNamesAndCounts()
+        XCTAssertEqual(after.first { $0.id == basic.id }?.useCount, 1,
+                       "the added note should be counted against Basic")
+    }
+
+    /// `addStockNotetype` (get_stock_notetype_legacy 23,5 → add_notetype_legacy
+    /// 23,2) creates a new note type from a stock kind under a chosen name — the
+    /// "Add" path of AnkiDroid's Add-note-type dialog. The new type appears in the
+    /// list and carries the stock kind's fields (Basic → Front/Back).
+    func testAddStockNotetypeCreatesNamedType() throws {
+        let backend = try freshCollection()
+        let newID = try backend.addStockNotetype(kind: .basic, name: "My Basic")
+        XCTAssertGreaterThan(newID, 0, "a created note type has a real id")
+
+        XCTAssertTrue(try backend.notetypeNames().contains { $0.id == newID && $0.name == "My Basic" },
+                      "the new note type should appear in the list")
+        XCTAssertEqual(try backend.notetypeFields(notetypeID: newID), ["Front", "Back"],
+                       "a Basic-derived type has Front/Back fields")
+    }
+
+    /// `cloneNotetype` (get_notetype 23,6 → add_notetype 23,0) copies an existing
+    /// note type's fields/templates under a new name — the "Clone" path of the
+    /// Add dialog.
+    func testCloneNotetypeCopiesFieldsAndTemplates() throws {
+        let backend = try freshCollection()
+        let source = try XCTUnwrap(
+            try backend.notetypeNames().first { $0.name == "Basic (and reversed card)" }
+        )
+        let original = try backend.notetype(id: source.id)
+
+        let cloneID = try backend.cloneNotetype(id: source.id, name: "Reversed Copy")
+        XCTAssertNotEqual(cloneID, source.id, "the clone is a distinct note type")
+
+        let clone = try backend.notetype(id: cloneID)
+        XCTAssertEqual(clone.name, "Reversed Copy")
+        XCTAssertEqual(clone.fieldNames, original.fieldNames, "the clone copies the fields")
+        XCTAssertEqual(clone.templates.count, original.templates.count,
+                       "the clone copies the card templates (two for a reversed type)")
+    }
+
+    /// `renameNotetype` (get_notetype → update_notetype 23,1) changes a note
+    /// type's name in place, keeping its id — AnkiDroid's rename action.
+    func testRenameNotetypeRoundTrips() throws {
+        let backend = try freshCollection()
+        let cloneID = try backend.cloneNotetype(id: try basicNotetypeID(backend), name: "To Rename")
+
+        try backend.renameNotetype(id: cloneID, name: "Renamed")
+        XCTAssertEqual(try backend.notetype(id: cloneID).name, "Renamed",
+                       "the note type keeps its id but changes name")
+        XCTAssertTrue(try backend.notetypeNames().contains { $0.id == cloneID && $0.name == "Renamed" })
+    }
+
+    /// `removeNotetype` (23, 11) deletes a note type so it no longer appears in
+    /// the list — AnkiDroid's delete action (the can't-delete-the-last guard lives
+    /// in the UI).
+    func testRemoveNotetypeDeletesIt() throws {
+        let backend = try freshCollection()
+        let cloneID = try backend.cloneNotetype(id: try basicNotetypeID(backend), name: "Doomed Type")
+        XCTAssertTrue(try backend.notetypeNames().contains { $0.id == cloneID })
+
+        try backend.removeNotetype(id: cloneID)
+        XCTAssertFalse(try backend.notetypeNames().contains { $0.id == cloneID },
+                       "the deleted note type should be gone")
+    }
+
+    // MARK: - Fields editor
+
+    /// Adding, renaming, repositioning, and removing fields each round-trips
+    /// through `update_notetype`, and the engine keeps a note's stored values
+    /// aligned by ordinal: a new field is appended empty, a reposition shuffles
+    /// the values to match, and a removal drops the corresponding value. Mirrors
+    /// AnkiDroid's `ModelFieldEditor`.
+    func testFieldAddRepositionRemoveKeepsNotesAligned() throws {
+        let backend = try freshCollection()
+        let typeID = try backend.cloneNotetype(id: try basicNotetypeID(backend), name: "Fields Type")
+        let noteID = try backend.addNote(notetypeID: typeID, fields: ["Q", "A"], deckID: 1)
+
+        // Add: a new field is appended (empty on existing notes).
+        try backend.addNotetypeField(notetypeID: typeID, name: "Extra")
+        XCTAssertEqual(try backend.notetypeFields(notetypeID: typeID), ["Front", "Back", "Extra"])
+        XCTAssertEqual(try backend.getNote(noteID: noteID).fields, ["Q", "A", ""],
+                       "existing notes gain an empty value for the new field")
+
+        // Rename: the label changes, contents stay put.
+        try backend.renameNotetypeField(notetypeID: typeID, at: 0, to: "Question")
+        XCTAssertEqual(try backend.notetypeFields(notetypeID: typeID), ["Question", "Back", "Extra"])
+
+        // Reposition: moving "Extra" (idx 2) to the front shuffles the values too.
+        try backend.moveNotetypeField(notetypeID: typeID, from: 2, to: 0)
+        XCTAssertEqual(try backend.notetypeFields(notetypeID: typeID), ["Extra", "Question", "Back"])
+        XCTAssertEqual(try backend.getNote(noteID: noteID).fields, ["", "Q", "A"],
+                       "repositioning a field moves each note's value with it")
+
+        // Remove: dropping the first field drops its value.
+        try backend.removeNotetypeField(notetypeID: typeID, at: 0)
+        XCTAssertEqual(try backend.notetypeFields(notetypeID: typeID), ["Question", "Back"])
+        XCTAssertEqual(try backend.getNote(noteID: noteID).fields, ["Q", "A"],
+                       "removing a field drops the matching value")
+    }
+
+    /// A note type must keep at least one field: removing the last field is a
+    /// no-op (the guard in `removeField`), so the field set is unchanged.
+    func testRemoveLastFieldIsRefused() throws {
+        let backend = try freshCollection()
+        let typeID = try backend.cloneNotetype(id: try basicNotetypeID(backend), name: "One Field Type")
+        try backend.removeNotetypeField(notetypeID: typeID, at: 1) // drop "Back"
+        XCTAssertEqual(try backend.notetypeFields(notetypeID: typeID), ["Front"])
+
+        // Attempting to remove the only remaining field changes nothing.
+        try backend.removeNotetypeField(notetypeID: typeID, at: 0)
+        XCTAssertEqual(try backend.notetypeFields(notetypeID: typeID), ["Front"],
+                       "a note type must retain at least one field")
+    }
+
+    /// `setNotetypeSortField` persists the sort-field index through
+    /// `update_notetype`, and repositioning a field keeps the sort field pointing
+    /// at the same field.
+    func testSortFieldSetAndFollowsReposition() throws {
+        let backend = try freshCollection()
+        let typeID = try backend.cloneNotetype(id: try basicNotetypeID(backend), name: "Sort Type")
+
+        try backend.setNotetypeSortField(notetypeID: typeID, at: 1)
+        XCTAssertEqual(try backend.notetype(id: typeID).config.sortFieldIdx, 1,
+                       "the sort field index should persist")
+
+        // Move "Back" (the sort field, idx 1) to the front; sort idx follows to 0.
+        try backend.moveNotetypeField(notetypeID: typeID, from: 1, to: 0)
+        XCTAssertEqual(try backend.notetype(id: typeID).config.sortFieldIdx, 0,
+                       "the sort field should track the moved field")
+    }
+
+    // MARK: - Card Template editor
+
+    /// Editing a template's front/back and the shared styling persists through
+    /// `update_notetype` and reads back via `get_notetype` — the Card Template
+    /// editor's Save.
+    func testEditTemplateFrontBackAndCSSPersist() throws {
+        let backend = try freshCollection()
+        let typeID = try backend.cloneNotetype(id: try basicNotetypeID(backend), name: "Template Type")
+
+        var nt = try backend.notetype(id: typeID)
+        nt.setTemplate(at: 0, front: "Q: {{Front}}", back: "A: {{Back}}")
+        nt.setCSS(".card { color: rgb(1, 2, 3); }")
+        try backend.updateNotetype(nt)
+
+        let reloaded = try backend.notetype(id: typeID)
+        XCTAssertEqual(reloaded.templates[0].config.qFormat, "Q: {{Front}}", "front format persists")
+        XCTAssertEqual(reloaded.templates[0].config.aFormat, "A: {{Back}}", "back format persists")
+        XCTAssertTrue(reloaded.config.css.contains("rgb(1, 2, 3)"), "styling CSS persists")
+    }
+
+    /// Adding a card template creates a new card on each existing note, and
+    /// removing it drops back to one template — the Card Template editor's
+    /// add/remove (a normal note type keeps ≥1 template).
+    func testAddAndRemoveCardTemplate() throws {
+        let backend = try freshCollection()
+        let typeID = try backend.cloneNotetype(id: try basicNotetypeID(backend), name: "Multi-card Type")
+        let noteID = try backend.addNote(notetypeID: typeID, fields: ["Q", "A"], deckID: 1)
+        XCTAssertEqual(try backend.searchCards(query: "nid:\(noteID)").count, 1, "one card to start")
+
+        var nt = try backend.notetype(id: typeID)
+        nt.addTemplate(named: "Card 2")
+        try backend.updateNotetype(nt)
+        let withTwo = try backend.notetype(id: typeID)
+        XCTAssertEqual(withTwo.templates.count, 2, "a second template was added")
+        XCTAssertEqual(withTwo.templateNames.last, "Card 2")
+        XCTAssertEqual(try backend.searchCards(query: "nid:\(noteID)").count, 2,
+                       "adding a template generates a card for the existing note")
+
+        var trimmed = try backend.notetype(id: typeID)
+        trimmed.removeTemplate(at: 1)
+        try backend.updateNotetype(trimmed)
+        XCTAssertEqual(try backend.notetype(id: typeID).templates.count, 1, "the template was removed")
+    }
+
+    /// `renderUncommittedCard` (CardRenderingService 27, 7) renders a sample note
+    /// against an *edited, unsaved* template — the Card Template editor's live
+    /// preview. The edited front shows immediately, with the sample field values
+    /// filled in, without persisting anything.
+    func testPreviewReflectsEditedTemplateWithoutSaving() throws {
+        let backend = try freshCollection()
+        let typeID = try backend.cloneNotetype(id: try basicNotetypeID(backend), name: "Preview Type")
+
+        let nt = try backend.notetype(id: typeID)
+        var edited = nt.templates[0]
+        edited.config.qFormat = "PREVIEW {{Front}}"
+
+        let rendered = try backend.renderUncommittedCard(
+            note: nt.sampleNote(), cardOrd: 0, template: edited
+        )
+        XCTAssertTrue(rendered.question.contains("PREVIEW"),
+                      "the preview reflects the edited (unsaved) front template")
+        XCTAssertTrue(rendered.question.contains("(Front)"),
+                      "the sample note fills the field with its name")
+        XCTAssertTrue(rendered.answer.contains("(Back)"),
+                      "the back renders the sample note's other field")
+
+        // The edit was never saved, so the stored template is untouched.
+        XCTAssertEqual(try backend.notetype(id: typeID).templates[0].config.qFormat, "{{Front}}",
+                       "previewing must not persist the edit")
+    }
+
     // MARK: - Filtered Decks
 
     /// Creating a filtered deck gathers matching cards, the deck shows up in the
