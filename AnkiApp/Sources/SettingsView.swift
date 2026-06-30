@@ -88,7 +88,6 @@ struct SettingsView: View {
     private var serverSection: some View {
         Section {
             Picker(selection: $serverChoice) {
-                Text("MCAT Sync (our server)").tag(ServerChoice.mcat)
                 Text("AnkiWeb (default)").tag(ServerChoice.ankiweb)
                 Text("Other…").tag(ServerChoice.other)
             } label: {
@@ -279,9 +278,6 @@ struct SettingsView: View {
     private func applyServer() {
         guard !store.isLoggedIn else { return }
         switch serverChoice {
-        case .mcat:
-            serverError = nil
-            store.setPreferredSyncServer(AnkiStore.mcatSyncServerURL)
         case .ankiweb:
             serverError = nil
             store.setPreferredSyncServer(nil)
@@ -315,33 +311,23 @@ struct SettingsView: View {
 
 /// Sync server presets offered in the Settings dropdown.
 private enum ServerChoice: Hashable {
-    case mcat
     case ankiweb
     case other
 
     /// Classifies a stored endpoint into a picker choice. A nil/empty endpoint or
     /// any AnkiWeb host — `ankiweb.net` or a `*.ankiweb.net` shard such as
-    /// `sync.ankiweb.net` / `sync-xxx.ankiweb.net` — is AnkiWeb; the MCAT preset
-    /// URL is MCAT; anything else is a custom ("Other") server.
+    /// `sync.ankiweb.net` / `sync-xxx.ankiweb.net` — is AnkiWeb; anything else is
+    /// a custom ("Other") server.
     static func classify(_ endpoint: String?) -> ServerChoice {
         guard let endpoint,
               !endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return .ankiweb }
-        if endpoint.normalizedURL == AnkiStore.mcatSyncServerURL.normalizedURL { return .mcat }
         if endpoint.isAnkiWebHost { return .ankiweb }
         return .other
     }
 }
 
 private extension String {
-    /// Lowercased, trailing-slash-stripped form for comparing server URLs so
-    /// that e.g. `https://host/` and `https://host` match the same preset.
-    var normalizedURL: String {
-        var s = trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        while s.hasSuffix("/") { s.removeLast() }
-        return s
-    }
-
     /// Whether this endpoint points at AnkiWeb — the apex `ankiweb.net` or any
     /// `*.ankiweb.net` shard (e.g. `sync.ankiweb.net`, `sync-xxx.ankiweb.net`) —
     /// so a server-assigned shard isn't misclassified as a custom server.

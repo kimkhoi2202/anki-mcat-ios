@@ -98,9 +98,6 @@ final class AnkiStore: ObservableObject {
     /// screen shows (read-only) to avoid diverging from the server in use.
     @Published private(set) var activeSyncServer: String?
 
-    /// The group's self-hosted sync server (deployed on Fly.io). `nonisolated` so
-    /// the (non-isolated) Settings server classifier can compare against it.
-    nonisolated static let mcatSyncServerURL = "https://anki-mcat-sync.fly.dev/"
     private static let preferredServerKey = "preferredSyncServerEndpoint"
     /// Wall-clock cap on the media-sync poll loop, so a stuck server-side media
     /// sync can't spin the banner (and keep the Sync button disabled) forever.
@@ -647,10 +644,8 @@ final class AnkiStore: ObservableObject {
         }
     }
 
-    /// Renders a queued card into the reviewer's published state. Shared by the
-    /// normal queue loader and the weak-topics loader so both present cards (and
-    /// their answer-button intervals) identically; only the *choice* of card
-    /// differs between modes.
+    /// Renders a queued card into the reviewer's published state, presenting the
+    /// card and its answer-button intervals.
     private func present(_ queued: Anki_Scheduler_QueuedCards.QueuedCard) throws {
         guard let backend else { return }
         reviewDone = false

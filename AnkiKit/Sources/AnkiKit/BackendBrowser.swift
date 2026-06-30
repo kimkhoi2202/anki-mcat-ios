@@ -129,9 +129,8 @@ public extension Backend {
     ///
     /// Persists full `Card` records back to the collection (read-modify-write
     /// from `getCard`). Used to write card-level scheduling fields the higher
-    /// level RPCs don't expose directly — e.g. seeding FSRS memory state for the
-    /// points-at-stake tests. Pass `skipUndoEntry: true` to avoid recording an
-    /// undo step.
+    /// level RPCs don't expose directly — e.g. seeding FSRS memory state. Pass
+    /// `skipUndoEntry: true` to avoid recording an undo step.
     func updateCards(_ cards: [Anki_Cards_Card], skipUndoEntry: Bool = false) throws {
         var req = Anki_Cards_UpdateCardsRequest()
         req.cards = cards

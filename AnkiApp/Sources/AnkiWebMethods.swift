@@ -240,8 +240,6 @@ enum AnkiWebMethods {
         "getOptimalRetentionParametersRaw": (13, 31),
         "getOrCreateFilteredDeck": (7, 19),
         "getOrCreateFilteredDeckRaw": (7, 19),
-        "getPointsAtStakeQueue": (13, 39),
-        "getPointsAtStakeQueueRaw": (13, 39),
         "getPreferences": (9, 9),
         "getPreferencesRaw": (9, 9),
         "getQueuedCards": (13, 3),
