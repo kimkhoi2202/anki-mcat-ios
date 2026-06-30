@@ -7,15 +7,15 @@ cd "$(dirname "$0")"
 
 TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin)
 for t in "${TARGETS[@]}"; do
-  echo "==> building $t"
-  cargo build --target "$t"
+  echo "==> building $t (release)"
+  cargo build --release --target "$t"
 done
 
 rm -rf AnkiCore.xcframework
 xcodebuild -create-xcframework \
-  -library "target/aarch64-apple-ios/debug/libankicore_ffi.a" -headers include \
-  -library "target/aarch64-apple-ios-sim/debug/libankicore_ffi.a" -headers include \
-  -library "target/aarch64-apple-darwin/debug/libankicore_ffi.a" -headers include \
+  -library "target/aarch64-apple-ios/release/libankicore_ffi.a" -headers include \
+  -library "target/aarch64-apple-ios-sim/release/libankicore_ffi.a" -headers include \
+  -library "target/aarch64-apple-darwin/release/libankicore_ffi.a" -headers include \
   -output AnkiCore.xcframework
 
 echo "==> AnkiCore.xcframework rebuilt"
