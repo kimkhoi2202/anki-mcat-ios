@@ -942,4 +942,239 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(report.percentCovered, 25)
         XCTAssertFalse(report.meetsCoverageThreshold, "25% is below the 50% line, so the app abstains")
     }
+
+    /// Deck-scoped coverage isolates one deck from another, so a collection with
+    /// several MCAT decks reports each deck's own coverage. This is what keeps the
+    /// real "MCAT Content" deck reading ~48% (abstain) even after a scored demo
+    /// deck is seeded alongside it — i.e. the demo can't inflate the honest deck.
+    func testCoverageIsDeckScoped() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let d1 = try backend.createDeck(name: "Deck One")
+        let d2 = try backend.createDeck(name: "Deck Two")
+
+        // Alpha lives only in Deck One; Beta only in Deck Two.
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["a", "x"], deckID: d1, tags: ["MCAT::S::Alpha"])
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["b", "x"], deckID: d2, tags: ["MCAT::S::Beta"])
+
+        let topics = [
+            CoverageTopic(id: "S.Alpha", section: "S", name: "Alpha", tag: "MCAT::S::Alpha"),
+            CoverageTopic(id: "S.Beta", section: "S", name: "Beta", tag: "MCAT::S::Beta"),
+        ]
+
+        // Whole-collection: both covered.
+        XCTAssertEqual(try backend.coverage(forTopics: topics).coveredTopics, 2)
+
+        // Deck One sees only Alpha; Deck Two only Beta.
+        let d1Report = try backend.coverage(forTopics: topics, inDeck: "Deck One")
+        XCTAssertEqual(d1Report.coveredTopics, 1)
+        XCTAssertTrue(try XCTUnwrap(d1Report.sections.first?.topics.first { $0.id == "S.Alpha" }).isCovered)
+        XCTAssertFalse(try XCTUnwrap(d1Report.sections.first?.topics.first { $0.id == "S.Beta" }).isCovered)
+
+        let d2Report = try backend.coverage(forTopics: topics, inDeck: "Deck Two")
+        XCTAssertEqual(d2Report.coveredTopics, 1)
+        XCTAssertTrue(try XCTUnwrap(d2Report.sections.first?.topics.first { $0.id == "S.Beta" }).isCovered)
+    }
+
+    // MARK: - The three MCAT scores + give-up rule (PRD)
+
+    /// Seeds a *studied* review card carrying FSRS memory state in `deckID`, with
+    /// a controllable stability, last-review elapsed time, and review count
+    /// (`reps`). The engine then computes the card's real FSRS retrievability from
+    /// this state — lower stability and/or more elapsed days → lower
+    /// retrievability — and reports `reps` as the card's graded-review count.
+    /// Mirrors the app's demo seeder and the points-at-stake test's seed.
+    @discardableResult
+    private func seedStudiedCard(
+        _ backend: Backend, notetypeID: Int64, deckID: Int64,
+        tags: [String], stability: Float, elapsedDays: Int, reps: UInt32
+    ) throws -> Int64 {
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: deckID, tags: tags)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "nid:\(nid)").first)
+        var card = try backend.getCard(cardID: cardID)
+        card.ctype = 2          // CardType::Review
+        card.queue = 2          // CardQueue::Review
+        card.due = 0
+        card.interval = UInt32(max(1, elapsedDays))
+        card.reps = reps
+        var memory = Anki_Cards_FsrsMemoryState()
+        memory.stability = stability
+        memory.difficulty = 5
+        card.memoryState = memory
+        card.lastReviewTimeSecs = Int64(Date().timeIntervalSince1970) - Int64(elapsedDays) * 86_400
+        try backend.updateCards([card], skipUndoEntry: true)
+        return cardID
+    }
+
+    /// Builds a `CoverageReport` with `covered` of `total` topics covered, for the
+    /// pure give-up-gating tests.
+    private func makeCoverageReport(covered: Int, total: Int, section: String = "S") -> CoverageReport {
+        let topics = (0..<total).map { i in
+            TopicCoverage(
+                id: "\(section).\(i)", section: section, name: "T\(i)",
+                tag: "MCAT::\(section)::T\(i)", cardCount: i < covered ? 1 : 0
+            )
+        }
+        return CoverageReport(sections: [SectionCoverage(section: section, topics: topics)])
+    }
+
+    /// Memory is the mean real FSRS retrievability across studied cards, as a
+    /// count-based 95% interval. Pure cases pin the math; the empty case abstains.
+    func testMemoryScoreComputation() throws {
+        XCTAssertNil(ScoreModel.memoryScore(retrievabilities: []),
+                     "no data → no Memory score (abstain)")
+
+        // A single card: spread is undefined, so the interval collapses to the point.
+        let single = try XCTUnwrap(ScoreModel.memoryScore(retrievabilities: [0.7]))
+        XCTAssertEqual(single.point, 0.7, accuracy: 1e-9)
+        XCTAssertEqual(single.low, 0.7, accuracy: 1e-9)
+        XCTAssertEqual(single.high, 0.7, accuracy: 1e-9)
+
+        // Identical values: mean is exact, variance is zero → no spread.
+        let flat = try XCTUnwrap(ScoreModel.memoryScore(retrievabilities: [0.9, 0.9, 0.9]))
+        XCTAssertEqual(flat.point, 0.9, accuracy: 1e-9)
+        XCTAssertEqual(flat.halfWidth, 0, accuracy: 1e-9)
+
+        // A real spread: point is the mean and the interval straddles it within 0…1.
+        let spread = try XCTUnwrap(ScoreModel.memoryScore(retrievabilities: [0.6, 0.8, 1.0]))
+        XCTAssertEqual(spread.point, 0.8, accuracy: 1e-9)
+        XCTAssertLessThan(spread.low, spread.point)
+        XCTAssertGreaterThan(spread.high, spread.point)
+        XCTAssertGreaterThanOrEqual(spread.low, 0)
+        XCTAssertLessThanOrEqual(spread.high, 1)
+    }
+
+    /// Performance is discounted below Memory (the recall→application gap) and is
+    /// a wide, provisional range; Readiness maps it onto the real 472–528 scale.
+    func testPerformanceAndReadinessMapping() {
+        // Scale endpoints and midpoint.
+        XCTAssertEqual(ScoreModel.scaledScore(forProbability: 0), 472)
+        XCTAssertEqual(ScoreModel.scaledScore(forProbability: 1), 528)
+        XCTAssertEqual(ScoreModel.scaledScore(forProbability: 0.5), 500)
+
+        let memory = ScoreRange(low: 0.85, point: 0.9, high: 0.95)
+        let perf = ScoreModel.performanceScore(memory: memory, coverageFraction: 0.6)
+        // 0.6·(0.9·0.675) + 0.4·0.25 = 0.4645
+        XCTAssertEqual(perf.point, 0.4645, accuracy: 1e-4)
+        XCTAssertLessThan(perf.point, memory.point, "performance must discount memory")
+        XCTAssertLessThan(perf.low, perf.point)
+        XCTAssertGreaterThan(perf.high, perf.point)
+
+        let proj = ScoreModel.readinessProjection(performance: perf)
+        XCTAssertGreaterThanOrEqual(proj.low, ScoreModel.scaleMin)
+        XCTAssertLessThanOrEqual(proj.high, ScoreModel.scaleMax)
+        XCTAssertLessThan(proj.low, proj.point)
+        XCTAssertLessThan(proj.point, proj.high)
+        XCTAssertEqual(proj.point, 498) // 472 + 0.4645·56
+    }
+
+    /// The give-up rule (pure): scores appear only when BOTH ≥200 graded reviews
+    /// AND ≥50% coverage are met; below either line the dashboard abstains and
+    /// shows no score numbers at all.
+    func testGiveUpGating() throws {
+        let strong = MemoryEvidence(
+            retrievabilities: [0.95, 0.9, 0.85, 0.8], gradedReviews: 250, studiedCardCount: 4
+        )
+
+        // Both thresholds met → scored.
+        let scored = ReadinessAssessment.make(coverage: makeCoverageReport(covered: 3, total: 5), evidence: strong)
+        XCTAssertTrue(scored.isScored)
+        XCTAssertNotNil(scored.memory)
+        XCTAssertNotNil(scored.performance)
+        let readiness = try XCTUnwrap(scored.readiness)
+        XCTAssertGreaterThanOrEqual(readiness.low, ScoreModel.scaleMin)
+        XCTAssertLessThanOrEqual(readiness.high, ScoreModel.scaleMax)
+        XCTAssertLessThanOrEqual(readiness.low, readiness.high)
+
+        // Enough coverage but too few graded reviews → abstain, no scores shown.
+        let fewReviews = MemoryEvidence(retrievabilities: [0.9, 0.8], gradedReviews: 10, studiedCardCount: 2)
+        let abstainReviews = ReadinessAssessment.make(coverage: makeCoverageReport(covered: 3, total: 5), evidence: fewReviews)
+        XCTAssertFalse(abstainReviews.isScored)
+        XCTAssertNil(abstainReviews.memory, "no Memory number while abstaining")
+        XCTAssertNil(abstainReviews.performance)
+        XCTAssertNil(abstainReviews.readiness)
+        XCTAssertTrue(abstainReviews.missingData.contains { $0.contains("graded reviews") })
+
+        // Enough reviews but coverage below the line → abstain.
+        let lowCoverage = MemoryEvidence(retrievabilities: [0.9, 0.8, 0.7], gradedReviews: 250, studiedCardCount: 3)
+        let abstainCoverage = ReadinessAssessment.make(coverage: makeCoverageReport(covered: 2, total: 5), evidence: lowCoverage)
+        XCTAssertFalse(abstainCoverage.isScored)
+        XCTAssertNil(abstainCoverage.readiness)
+        XCTAssertTrue(abstainCoverage.missingData.contains { $0.contains("coverage") })
+    }
+
+    /// End-to-end on the real engine: seed studied cards with FSRS memory state in
+    /// a deck, then `readinessEvidence` must read back real per-card retrievability
+    /// and the correct graded-review total (summing `reps`), excluding new cards.
+    /// Proves Memory is computed from real FSRS data, not synthesised.
+    func testReadinessEvidenceFromRealFSRS() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let deckID = try backend.createDeck(name: "Mem Deck")
+
+        // A strong card (high stability, just reviewed) and a weak one (low
+        // stability, long ago) → genuinely different retrievabilities.
+        try seedStudiedCard(backend, notetypeID: notetypeID, deckID: deckID,
+                            tags: ["MCAT::S::Strong"], stability: 300, elapsedDays: 1, reps: 40)
+        try seedStudiedCard(backend, notetypeID: notetypeID, deckID: deckID,
+                            tags: ["MCAT::S::Weak"], stability: 2, elapsedDays: 30, reps: 25)
+        try seedStudiedCard(backend, notetypeID: notetypeID, deckID: deckID,
+                            tags: ["MCAT::S::Mid"], stability: 25, elapsedDays: 10, reps: 25)
+        // A brand-new (un-studied) card must be ignored by `-is:new`.
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["new", "x"],
+                                deckID: deckID, tags: ["MCAT::S::New"])
+
+        let evidence = try backend.readinessEvidence(forDeck: "Mem Deck")
+        XCTAssertEqual(evidence.studiedCardCount, 3, "the new card is excluded")
+        XCTAssertEqual(evidence.gradedReviews, 90, "graded reviews = 40 + 25 + 25 reps")
+        XCTAssertEqual(evidence.cardsWithMemoryState, 3, "all three studied cards carry FSRS state")
+        XCTAssertTrue(evidence.retrievabilities.allSatisfy { $0 > 0 && $0 < 1 },
+                      "real FSRS retrievability is strictly within 0…1")
+
+        let memory = try XCTUnwrap(ScoreModel.memoryScore(retrievabilities: evidence.retrievabilities))
+        XCTAssertGreaterThan(memory.high, memory.low, "varied cards produce a real interval")
+        XCTAssertGreaterThan(memory.point, 0)
+        XCTAssertLessThan(memory.point, 1)
+    }
+
+    /// End-to-end give-up rule on the real engine: a deck that clears both lines
+    /// scores (Readiness on the 472–528 scale); a deck that clears neither
+    /// abstains with all three scores hidden.
+    func testReadinessAssessmentScoresAndAbstainsOnEngine() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+
+        // A four-topic outline: 50% coverage needs two covered topics.
+        let topics = (0..<4).map { i in
+            CoverageTopic(id: "S.T\(i)", section: "S", name: "T\(i)", tag: "MCAT::S::T\(i)")
+        }
+
+        // SCORED deck: two topics covered (50%) and 210 graded reviews.
+        let scoredDeck = try backend.createDeck(name: "Scored Deck")
+        try seedStudiedCard(backend, notetypeID: notetypeID, deckID: scoredDeck,
+                            tags: ["MCAT::S::T0"], stability: 120, elapsedDays: 3, reps: 70)
+        try seedStudiedCard(backend, notetypeID: notetypeID, deckID: scoredDeck,
+                            tags: ["MCAT::S::T1"], stability: 8, elapsedDays: 20, reps: 70)
+        try seedStudiedCard(backend, notetypeID: notetypeID, deckID: scoredDeck,
+                            tags: ["MCAT::S::T1"], stability: 40, elapsedDays: 5, reps: 70)
+
+        let scored = try backend.readinessAssessment(forDeck: "Scored Deck", topics: topics)
+        XCTAssertTrue(scored.meetsCoverageThreshold, "two of four topics = 50%")
+        XCTAssertTrue(scored.meetsGradedReviewThreshold, "210 ≥ 200 graded reviews")
+        XCTAssertTrue(scored.isScored)
+        let projection = try XCTUnwrap(scored.readiness)
+        XCTAssertGreaterThanOrEqual(projection.low, 472)
+        XCTAssertLessThanOrEqual(projection.high, 528)
+
+        // ABSTAIN deck: one topic (25%) and few reviews.
+        let abstainDeck = try backend.createDeck(name: "Abstain Deck")
+        try seedStudiedCard(backend, notetypeID: notetypeID, deckID: abstainDeck,
+                            tags: ["MCAT::S::T0"], stability: 30, elapsedDays: 5, reps: 5)
+
+        let abstain = try backend.readinessAssessment(forDeck: "Abstain Deck", topics: topics)
+        XCTAssertFalse(abstain.isScored)
+        XCTAssertNil(abstain.memory)
+        XCTAssertNil(abstain.readiness)
+        XCTAssertFalse(abstain.bestNextThing.isEmpty, "abstain still names the best next thing")
+    }
 }

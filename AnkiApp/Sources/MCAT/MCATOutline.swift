@@ -137,6 +137,14 @@ enum MCATOutline {
 
     static func topic(byID id: String) -> Topic? { topicsByID[id] }
 
+    /// Section display name keyed by its tag token (e.g. `ChemPhys` → `Chem/Phys`).
+    /// The points-at-stake queue reports a card's topic as the component below the
+    /// `MCAT::` prefix — the section token — so this maps that back to a readable
+    /// label for the Readiness dashboard's "best next thing to study".
+    static let sectionNamesByToken: [String: String] = Dictionary(
+        uniqueKeysWithValues: sections.map { ($0.id, $0.name) }
+    )
+
     /// The outline as AnkiKit `CoverageTopic` descriptors for the engine query,
     /// in outline order (so the report's sections come back in exam order). The
     /// `section` key is the short display label, which the CoverageView maps back

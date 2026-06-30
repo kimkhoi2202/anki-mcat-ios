@@ -40,6 +40,11 @@ struct HomeView: View {
     // MCAT coverage map (PRD 7c) navigation trigger.
     @State private var goCoverage = false
 
+    // MCAT readiness dashboard (the three scores) navigation trigger, plus a
+    // flag (set by the screenshot hook) to open straight into the scored demo.
+    @State private var goReadiness = false
+    @State private var readinessAutoDemo = false
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -62,6 +67,9 @@ struct HomeView: View {
             }
             .navigationDestination(isPresented: $goCoverage) {
                 CoverageView(store: store)
+            }
+            .navigationDestination(isPresented: $goReadiness) {
+                ReadinessDashboardView(store: store, autoLoadDemo: readinessAutoDemo)
             }
             .navigationDestination(isPresented: $goSettings) {
                 SettingsView(store: store)
@@ -230,6 +238,19 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInCoverage") {
                 goCoverage = true
             }
+            // Open the readiness dashboard on the real deck (the abstain
+            // screenshot — real "MCAT Content" deck is under the give-up line).
+            if ProcessInfo.processInfo.arguments.contains("-startInReadiness") {
+                store.readinessDeckName = AnkiStore.realReadinessDeckName
+                readinessAutoDemo = false
+                goReadiness = true
+            }
+            // Open the readiness dashboard straight into the scored demo deck
+            // (the scored-state screenshot — seeds the clearly-marked demo).
+            if ProcessInfo.processInfo.arguments.contains("-startInReadinessDemo") {
+                readinessAutoDemo = true
+                goReadiness = true
+            }
             // Drive straight into the weak-topics reviewer (weakest card first),
             // verifying the points-at-stake review loop runs end-to-end.
             if ProcessInfo.processInfo.arguments.contains("-startInWeakTopicsReview"),
@@ -290,6 +311,7 @@ struct HomeView: View {
                 VStack(spacing: DS.Spacing.l) {
                     deckList
                     weakTopicsButton
+                    readinessButton
                     coverageButton
                     newDeckButton
                     newFilteredDeckButton
@@ -415,6 +437,35 @@ struct HomeView: View {
         guard let deck else { return }
         weakTopicsDeck = deck
         goWeakTopics = true
+    }
+
+    /// Full-width "MCAT Readiness" action: opens the readiness dashboard — the
+    /// three scores (Memory / Performance / Readiness) each as a range with the
+    /// honesty read-out, or the abstain state when the deck is below the give-up
+    /// line. Defaults to scoring the real "MCAT Content" deck (which abstains).
+    private var readinessButton: some View {
+        Button {
+            store.readinessDeckName = AnkiStore.realReadinessDeckName
+            readinessAutoDemo = false
+            goReadiness = true
+        } label: {
+            Label("MCAT Readiness", systemImage: "gauge.with.needle")
+                .font(DS.Typography.body.weight(.semibold))
+                .foregroundStyle(DS.accent)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: DS.minTapTarget)
+                .background(
+                    DS.surface,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                        .strokeBorder(DS.separator, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("MCAT readiness dashboard")
+        .accessibilityHint("See your Memory, Performance, and Readiness scores, or what’s missing")
     }
 
     /// Full-width "MCAT Coverage" action: opens the coverage map (PRD 7c), the

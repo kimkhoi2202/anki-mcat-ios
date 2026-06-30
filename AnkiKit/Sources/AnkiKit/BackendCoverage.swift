@@ -105,6 +105,29 @@ public struct CoverageReport: Sendable, Equatable {
     /// True once coverage clears `scoringThreshold`. When false, the app must
     /// abstain from showing a score.
     public var meetsCoverageThreshold: Bool { fractionCovered >= Self.scoringThreshold }
+
+    /// Every uncovered topic across all sections, in outline order.
+    public var missingTopics: [TopicCoverage] {
+        sections.flatMap { $0.topics }.filter { !$0.isCovered }
+    }
+
+    /// The single most impactful missing topic to study next — the first
+    /// uncovered topic in the *least-covered* section (ties broken by the section
+    /// with the most missing topics, then outline order). Drives the honesty
+    /// rule's "single best next thing to study" when no other signal (e.g. a
+    /// weakest studied topic) is available. `nil` only when nothing is missing.
+    public var mostImpactfulMissingTopic: TopicCoverage? {
+        let candidates = sections.filter { $0.coveredCount < $0.totalCount }
+        let target = candidates.min { lhs, rhs in
+            if lhs.fractionCovered != rhs.fractionCovered {
+                return lhs.fractionCovered < rhs.fractionCovered
+            }
+            let lhsMissing = lhs.totalCount - lhs.coveredCount
+            let rhsMissing = rhs.totalCount - rhs.coveredCount
+            return lhsMissing > rhsMissing
+        }
+        return target?.topics.first { !$0.isCovered }
+    }
 }
 
 public extension Backend {
@@ -121,12 +144,20 @@ public extension Backend {
     /// hierarchy — as real decks like AnKing's do — toward the topic, while not
     /// matching a sibling tag that merely shares a name prefix. It expresses the
     /// same intent as the PRD's `tag:MCAT::Section::Topic*` example, boundary-safe.
-    func coverage(forTopics topics: [CoverageTopic]) throws -> CoverageReport {
+    ///
+    /// When `deck` is supplied, coverage is scoped to that deck (and its
+    /// subdecks) so a collection holding several MCAT decks reports each deck's
+    /// own coverage instead of the union — which the Readiness dashboard relies
+    /// on to score one deck at a time (e.g. the real "MCAT Content" deck must
+    /// keep reading ~48% even after a scored demo deck is seeded alongside it).
+    func coverage(forTopics topics: [CoverageTopic], inDeck deck: String? = nil) throws -> CoverageReport {
         var sectionOrder: [String] = []
         var topicsBySection: [String: [TopicCoverage]] = [:]
 
         for topic in topics {
-            let count = try searchCards(query: Backend.coverageQuery(forTag: topic.tag)).count
+            let count = try searchCards(
+                query: Backend.coverageQuery(forTag: topic.tag, inDeck: deck)
+            ).count
             let coverage = TopicCoverage(
                 id: topic.id, section: topic.section, name: topic.name,
                 tag: topic.tag, cardCount: count
@@ -146,8 +177,18 @@ public extension Backend {
 
     /// Builds the tag search for a topic: its exact tag plus any descendant
     /// subtag, so hierarchical decks still count toward the topic without a
-    /// shared-prefix sibling leaking in.
-    internal static func coverageQuery(forTag tag: String) -> String {
-        "tag:\(tag) OR tag:\(tag)::*"
+    /// shared-prefix sibling leaking in. When `deck` is given the match is
+    /// further scoped to that deck (and subdecks) with `deck:"…"`.
+    internal static func coverageQuery(forTag tag: String, inDeck deck: String? = nil) -> String {
+        let tagClause = "(tag:\(tag) OR tag:\(tag)::*)"
+        guard let deck, !deck.isEmpty else { return tagClause }
+        return "deck:\(quoteSearchValue(deck)) AND \(tagClause)"
+    }
+
+    /// Quotes a value for use in an Anki search term (e.g. a deck name with
+    /// spaces): wraps it in double quotes and backslash-escapes any embedded
+    /// quotes, matching Anki's search grammar.
+    internal static func quoteSearchValue(_ value: String) -> String {
+        "\"\(value.replacingOccurrences(of: "\"", with: "\\\""))\""
     }
 }

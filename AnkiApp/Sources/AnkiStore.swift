@@ -53,6 +53,27 @@ final class AnkiStore: ObservableObject {
     /// Message from the most recent failed coverage load, for the CoverageView.
     @Published var coverageError: String?
 
+    // MARK: - MCAT readiness scores (Memory / Performance / Readiness)
+
+    /// The most recent readiness assessment (the three scores + honesty read-out,
+    /// or the abstain state) for `readinessDeckName`. Nil until first loaded.
+    @Published var readiness: ReadinessAssessment?
+    /// Message from the most recent failed readiness load.
+    @Published var readinessError: String?
+    /// Whether a readiness computation is in flight (drives the dashboard spinner).
+    @Published var readinessLoading = false
+    /// Which deck the current readiness assessment is for.
+    @Published var readinessDeckName = MCATSeedDeck.deckName
+    /// Whether the clearly-marked scored *demo* deck has been seeded yet.
+    @Published var readinessDemoSeeded = false
+
+    /// The real MCAT deck the dashboard scores by default — it sits at ~48%
+    /// coverage with no reviews, so it correctly abstains. `nonisolated` so the
+    /// off-main-actor seeding/compute helpers can read it.
+    nonisolated static let realReadinessDeckName = MCATSeedDeck.deckName
+    /// The clearly-marked demo deck that crosses both give-up thresholds.
+    nonisolated static let demoReadinessDeckName = MCATReadinessDemoDeck.deckName
+
     /// Whether the backend has an action to undo (drives the Undo control).
     @Published var canUndo = false
     /// Localized name of the next undoable action (e.g. "Answer Card").
@@ -147,6 +168,7 @@ final class AnkiStore: ObservableObject {
             try seedIfNeeded(backend)
             try seedWeakTopicsIfNeeded(backend)
             try seedMCATCoverageIfNeeded(backend)
+            refreshReadinessDemoState(backend)
             refreshDecks()
             refreshUndo()
             loadLoginState()
@@ -731,6 +753,139 @@ final class AnkiStore: ObservableObject {
         }
     }
 
+    // MARK: - MCAT readiness scores
+
+    /// Computes the three scores + honesty read-out (or the abstain state) for a
+    /// deck, off the main actor. Reuses the engine coverage map (deck-scoped so
+    /// decks don't pollute each other), the real per-card FSRS retrievability and
+    /// graded-review count (`readinessEvidence`), and the points-at-stake queue
+    /// for the "weakest area" best-next-thing. The give-up rule and the score math
+    /// live in AnkiKit (`ReadinessAssessment` / `ScoreModel`).
+    func loadReadiness(forDeck deckName: String) async {
+        guard let backend else { return }
+        readinessDeckName = deckName
+        readinessLoading = true
+        readinessError = nil
+        let topics = MCATOutline.coverageTopics
+        let sectionNames = MCATOutline.sectionNamesByToken
+        do {
+            let assessment = try await runDetached {
+                try Self.computeReadiness(
+                    backend, deckName: deckName, topics: topics, sectionNames: sectionNames
+                )
+            }
+            readiness = assessment
+        } catch {
+            readiness = nil
+            readinessError = "Couldn’t compute scores: \(error)"
+        }
+        readinessLoading = false
+    }
+
+    /// Seeds the clearly-marked scored *demo* deck (idempotent) off the main
+    /// actor, then loads its scored assessment. The seed plan (real MCAT facts +
+    /// a simulated FSRS history per card) is built on the main actor and only
+    /// plain values cross into the backend work.
+    func seedAndShowReadinessDemo() async {
+        guard let backend else { return }
+        readinessLoading = true
+        readinessError = nil
+        let plan = Self.readinessDemoSeedPlan()
+        do {
+            try await runDetached { try Self.applyReadinessDemoSeed(backend, plan: plan) }
+            readinessDemoSeeded = true
+            refreshDecks()
+        } catch {
+            readinessError = "Couldn’t seed the demo deck: \(error)"
+            readinessLoading = false
+            return
+        }
+        await loadReadiness(forDeck: Self.demoReadinessDeckName)
+    }
+
+    /// Sets `readinessDemoSeeded` from whether the demo deck currently exists.
+    private func refreshReadinessDemoState(_ backend: Backend) {
+        readinessDemoSeeded =
+            ((try? backend.deckNames())?.contains { $0.name == Self.demoReadinessDeckName }) ?? false
+    }
+
+    /// Off-main-actor readiness computation. `nonisolated` + only `Sendable`
+    /// inputs so it can run in a detached task. Setting the engine's current deck
+    /// scopes the points-at-stake queue to this deck (as the weak-topics screen
+    /// does); it doesn't change the user's selected study deck.
+    nonisolated private static func computeReadiness(
+        _ backend: Backend, deckName: String, topics: [CoverageTopic], sectionNames: [String: String]
+    ) throws -> ReadinessAssessment {
+        let coverage = try backend.coverage(forTopics: topics, inDeck: deckName)
+        let evidence = try backend.readinessEvidence(forDeck: deckName)
+        var weakest: String?
+        if let deckID = try backend.deckNames().first(where: { $0.name == deckName })?.id {
+            try? backend.setCurrentDeck(id: deckID)
+            let topTopic = (try? backend.pointsAtStakeQueue(topicPrefix: "MCAT::", weightBySize: false))?
+                .topics.max { $0.weakness < $1.weakness }
+            if let topTopic, topTopic.weakness > 0 {
+                weakest = sectionNames[topTopic.topic] ?? topTopic.topic
+            }
+        }
+        return ReadinessAssessment.make(
+            coverage: coverage, evidence: evidence, weakestStudiedTopic: weakest
+        )
+    }
+
+    /// Builds the demo seed plan on the main actor (it reads the app's MCAT
+    /// taxonomy and demo content), returning only plain `Sendable` values.
+    private static func readinessDemoSeedPlan() -> [ReadinessDemoSeedItem] {
+        MCATReadinessDemoDeck.cards.enumerated().compactMap { index, card in
+            guard let topic = MCATOutline.topic(byID: card.topicID) else { return nil }
+            let state = MCATReadinessDemoDeck.seededState(forIndex: index)
+            return ReadinessDemoSeedItem(
+                front: card.front, back: card.back, tag: topic.tag,
+                stability: state.stability, elapsedDays: state.elapsedDays, reps: state.reps
+            )
+        }
+    }
+
+    /// Applies the demo seed plan through the engine (idempotent): one note per
+    /// item, then a single `updateCards` writing each card's simulated FSRS memory
+    /// state, last-review date, and review count. The engine computes real FSRS
+    /// retrievability from that state — nothing here is a hand-written score.
+    nonisolated private static func applyReadinessDemoSeed(
+        _ backend: Backend, plan: [ReadinessDemoSeedItem]
+    ) throws {
+        let demoName = demoReadinessDeckName
+        // Already seeded? (Deck exists with cards.) Then do nothing.
+        if try backend.deckNames().contains(where: { $0.name == demoName }),
+           try backend.searchCards(query: "deck:\"\(demoName)\"").count > 0 {
+            return
+        }
+        guard let basic = try backend.notetypeNames().first(where: { $0.name.hasPrefix("Basic") }) else { return }
+        let deckID = try backend.createDeck(name: demoName)
+        let now = Int64(Date().timeIntervalSince1970)
+        var updated: [Anki_Cards_Card] = []
+        updated.reserveCapacity(plan.count)
+        for item in plan {
+            let nid = try backend.addNote(
+                notetypeID: basic.id, fields: [item.front, item.back], deckID: deckID, tags: [item.tag]
+            )
+            guard let cardID = try backend.searchCards(query: "nid:\(nid)").first else { continue }
+            var card = try backend.getCard(cardID: cardID)
+            card.ctype = 2          // CardType::Review
+            card.queue = 2          // CardQueue::Review
+            card.due = 0
+            card.interval = UInt32(max(1, item.elapsedDays))
+            card.reps = item.reps
+            var memory = Anki_Cards_FsrsMemoryState()
+            memory.stability = item.stability
+            memory.difficulty = 5
+            card.memoryState = memory
+            card.lastReviewTimeSecs = now - Int64(item.elapsedDays) * 86_400
+            updated.append(card)
+        }
+        if !updated.isEmpty {
+            try backend.updateCards(updated, skipUndoEntry: true)
+        }
+    }
+
     /// Refreshes `canUndo`/`undoName` from the backend's undo status.
     private func refreshUndo() {
         guard let backend else { return }
@@ -1281,4 +1436,20 @@ struct WeakTopic: Identifiable, Equatable {
     let pointsAtStake: Double
     /// Mean FSRS retrievability across the topic's memory-state cards, if any.
     let meanRetrievability: Double?
+}
+
+/// One card of the scored readiness *demo* deck, flattened to plain `Sendable`
+/// values so the seed plan (built on the main actor from the app's MCAT
+/// taxonomy) can cross into the off-main-actor backend seeding work.
+private struct ReadinessDemoSeedItem: Sendable {
+    let front: String
+    let back: String
+    /// The card's `MCAT::Section::Topic` tag (for coverage).
+    let tag: String
+    /// Simulated FSRS stability in days.
+    let stability: Float
+    /// Simulated days since the last review (drives retrievability decay).
+    let elapsedDays: Int
+    /// Simulated graded-review count (`reps`).
+    let reps: UInt32
 }
