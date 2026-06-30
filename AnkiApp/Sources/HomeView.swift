@@ -36,8 +36,16 @@ struct HomeView: View {
         NavigationStack {
             ZStack {
                 DS.background.ignoresSafeArea()
+                // Disable backend-touching controls (deck taps → study, deck
+                // create/rename/delete) while an exclusive backend op runs, so a
+                // tap can't hit a closed collection mid import/export/full-sync.
                 content
+                    .disabled(store.isBackendBusy)
             }
+            .overlay(alignment: .top) {
+                if store.isBackendBusy { busyIndicator }
+            }
+            .animation(.easeInOut(duration: 0.2), value: store.isBackendBusy)
             .sheet(isPresented: $showAddNote) {
                 NoteEditorView(store: store, mode: .add(defaultDeckID: store.currentDeckID)) {
                     store.refreshDecks()
@@ -75,6 +83,7 @@ struct HomeView: View {
                         Image(systemName: "chart.bar.xaxis")
                     }
                     .accessibilityLabel("Statistics")
+                    .disabled(store.isBackendBusy)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -83,6 +92,7 @@ struct HomeView: View {
                         Image(systemName: "magnifyingglass")
                     }
                     .accessibilityLabel("Browse cards")
+                    .disabled(store.isBackendBusy)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -91,6 +101,7 @@ struct HomeView: View {
                         Image(systemName: "plus")
                     }
                     .accessibilityLabel("Add note")
+                    .disabled(store.isBackendBusy)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     SyncToolbarButton(store: store)
@@ -181,7 +192,7 @@ struct HomeView: View {
             Text("The collections can’t be combined.\nWhich collection do you want to keep?")
         }
         .task {
-            store.boot()
+            await store.boot()
             #if DEBUG
             // Launch-argument automation hooks for UI tests / screenshots.
             // Compiled only into debug builds; release ships none of this.
@@ -267,6 +278,26 @@ struct HomeView: View {
                 .padding(DS.Spacing.l)
             }
         }
+    }
+
+    /// Lightweight "Working…" affordance shown while an exclusive backend
+    /// operation (import / export / full-sync collection replace) runs, so the
+    /// user has feedback that the (disabled) backend-touching controls are
+    /// intentionally paused for the moment rather than broken.
+    private var busyIndicator: some View {
+        HStack(spacing: DS.Spacing.s) {
+            ProgressView()
+            Text("Working…")
+                .font(DS.Typography.caption.weight(.semibold))
+                .foregroundStyle(DS.textPrimary)
+        }
+        .padding(.horizontal, DS.Spacing.m)
+        .padding(.vertical, DS.Spacing.s)
+        .background(DS.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(DS.separator, lineWidth: 1))
+        .padding(.top, DS.Spacing.s)
+        .transition(.opacity)
+        .accessibilityLabel("Working")
     }
 
     private var deckList: some View {
@@ -540,7 +571,9 @@ private struct SyncToolbarButton: View {
                     : "person.crop.circle.badge.plus")
             }
         }
-        .disabled(store.syncPhase.isActive)
+        // Also disabled during an exclusive backend op (import/export/full-sync)
+        // so a sync can't start mid close→reopen window.
+        .disabled(store.syncPhase.isActive || store.isBackendBusy)
         .accessibilityLabel(store.isLoggedIn ? "Sync now" : "Log in to sync")
         .contextMenu {
             if store.isLoggedIn {

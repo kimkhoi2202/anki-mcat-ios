@@ -13,6 +13,16 @@ final class AnkiStore: ObservableObject {
     /// mirroring how AnkiDroid's NoteEditor defaults to the current deck.
     @Published var currentDeckID: Int64 = 1
 
+    /// True while an *exclusive* backend operation is in flight — import, export,
+    /// or a full-sync collection replace. These run as several FFI calls with the
+    /// Rust mutex released between them (the close→import→reopen / replace window),
+    /// during which another `@MainActor` backend call (a deck tap, add note, rate,
+    /// or a web-page `/_anki` call) could hit a *closed* collection and error, or
+    /// block on the mutex. The UI observes this to disable backend-touching
+    /// controls for the operation's duration, mirroring how AnkiDroid serializes
+    /// these behind its collection lock. Set only via `runExclusive`.
+    @Published private(set) var isBackendBusy = false
+
     @Published var currentQuestion = ""
     @Published var currentAnswer = ""
     /// The current card's notetype CSS, injected into the reviewer WebView.
@@ -122,6 +132,12 @@ final class AnkiStore: ObservableObject {
     private var currentCard: Anki_Scheduler_QueuedCards.QueuedCard?
     private var cardShownAt = Date()
 
+    /// Monotonic token guarding `decks` against out-of-order deck-tree fetches.
+    /// `refreshDecks()` now reads the tree off the main actor, so two rapid
+    /// refreshes can finish in either order; only the most recent request is
+    /// allowed to publish, so a slow earlier fetch can't clobber a newer one.
+    private var decksRefreshToken = 0
+
     /// The backend handle for the embedded Anki web pages (Statistics, Card Info,
     /// Deck Options), which call it off the main actor through the `/_anki` bridge.
     /// `Backend` is `Sendable` and internally thread-safe (mutex-guarded).
@@ -163,13 +179,30 @@ final class AnkiStore: ObservableObject {
         documentsURL.appendingPathComponent("collection.media")
     }
 
-    func boot() {
+    /// Boots the engine: open the collection, seed demo cards on first launch,
+    /// and load derived UI state. `async` so `HomeView`'s `.task` doesn't block
+    /// the first frame — the heavy backend steps (creating the backend, the
+    /// disk-I/O `openCollection`, and the first-launch demo seeding) run off the
+    /// main actor, with `@Published` state assigned back on the main actor.
+    func boot() async {
         guard backend == nil else { return }
         buildHash = Backend.buildHash()
-        let backend: Backend
+        // Capture the on-disk paths on the main actor (they read FileManager
+        // URLs) so the detached open can run with just these `Sendable` values.
+        let mediaFolder = mediaFolderURL
+        let colPath = collectionURL.path
+        let mediaDBPath = mediaDBURL.path
+        let newBackend: Backend
         do {
-            backend = try Backend()
-            try openDefaultCollection(backend)
+            // Create + open the collection off the main actor; the handle stays
+            // local until the open succeeds.
+            newBackend = try await runDetached {
+                let backend = try Backend()
+                try Self.openDefaultCollection(
+                    backend, mediaFolder: mediaFolder, colPath: colPath, mediaDBPath: mediaDBPath
+                )
+                return backend
+            }
         } catch {
             // A failed open (corrupt/locked db, schema too new, disk full) must
             // not leave a non-nil handle behind, or the `backend == nil` guard
@@ -180,10 +213,13 @@ final class AnkiStore: ObservableObject {
             return
         }
         // Retain the handle only now that the collection is actually open.
-        self.backend = backend
-        // Seeding demo cards is best-effort; a hiccup must not brick a good open.
-        try? seedIfNeeded(backend)
-        refreshDecks()
+        self.backend = newBackend
+        // Seeding demo cards is best-effort (and runs note inserts, so it's
+        // offloaded too); a hiccup must not brick a good open.
+        try? await runDetached { try Self.seedIfNeeded(newBackend) }
+        // Initial deck load is awaited (off-main) so the first render and any
+        // launch hooks see a populated deck list.
+        await reloadDeckTree()
         refreshUndo()
         loadPreferredSyncServer()
         loadLoginState()
@@ -192,23 +228,43 @@ final class AnkiStore: ObservableObject {
     }
 
     /// Opens (or reopens) the collection at the app's standard Documents paths.
-    /// Used at launch and to reopen after a `.colpkg` import/export, which close
-    /// the collection around replacing/reading the file.
-    private func openDefaultCollection(_ backend: Backend) throws {
-        try? FileManager.default.createDirectory(at: mediaFolderURL, withIntermediateDirectories: true)
+    /// `nonisolated static` so it can run inside a detached (off-main) task at
+    /// boot; the close→reopen paths in import/export call `openCollection`
+    /// directly.
+    nonisolated private static func openDefaultCollection(
+        _ backend: Backend, mediaFolder: URL, colPath: String, mediaDBPath: String
+    ) throws {
+        try? FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
         try backend.openCollection(
-            path: collectionURL.path,
-            mediaFolder: mediaFolderURL.path,
-            mediaDB: mediaDBURL.path
+            path: colPath,
+            mediaFolder: mediaFolder.path,
+            mediaDB: mediaDBPath
         )
     }
 
     /// Reload the deck list and its counts (e.g. after returning from review).
+    /// Fire-and-forget: the actual deck-tree read is offloaded by `reloadDeckTree`
+    /// so this stays a cheap, synchronous call from every mutation site and the
+    /// UI. Signature is unchanged so all call sites keep working.
     func refreshDecks() {
+        Task { await reloadDeckTree() }
+    }
+
+    /// Fetches the deck tree off the main actor (it's O(collection) and computes
+    /// due counts, so on a large collection it would hitch the UI if run inline),
+    /// then publishes it on the main actor. A generation token drops a stale
+    /// result so rapid successive refreshes never publish out of order.
+    private func reloadDeckTree() async {
         guard let backend else { return }
+        decksRefreshToken &+= 1
+        let token = decksRefreshToken
         do {
-            decks = try backend.deckTree()
+            let tree = try await runDetached { try backend.deckTree() }
+            // A newer refresh started while this one was in flight — drop it.
+            guard token == decksRefreshToken else { return }
+            decks = tree
         } catch {
+            guard token == decksRefreshToken else { return }
             status = "Deck list error: \(error)"
         }
     }
@@ -530,8 +586,10 @@ final class AnkiStore: ObservableObject {
 
     /// Seeds a few plain Basic cards into the Default deck on first launch, so a
     /// fresh install has something to review. Runs once (guarded by a
-    /// `UserDefaults` flag).
-    private func seedIfNeeded(_ backend: Backend) throws {
+    /// `UserDefaults` flag). `nonisolated static` so it can run inside a detached
+    /// (off-main) task at boot — it touches only the backend and `UserDefaults`
+    /// (both thread-safe), never `@Published` state.
+    nonisolated private static func seedIfNeeded(_ backend: Backend) throws {
         let key = "seeded_v1"
         if UserDefaults.standard.bool(forKey: key) { return }
         // Only seed a genuinely fresh collection. Gating on the collection
@@ -1153,16 +1211,23 @@ final class AnkiStore: ObservableObject {
         guard let backend else { return }
         syncPhase = .syncing(upload ? "Uploading to server…" : "Downloading from server…")
         let authForFull = auth
-        try await runDetached {
-            try backend.fullUploadOrDownload(auth: authForFull, upload: upload, serverUsn: mediaUsn)
-        }
-        if !upload {
-            // A full download replaced the whole collection, which may not
-            // contain the previously-current deck. Fall back to the Default deck
-            // (id 1) so the next "Add note"/selectDeck doesn't target a missing
-            // deck — mirroring the colpkg-import replace path. Covers both a
-            // server-forced full download and the conflict-resolution download.
-            currentDeckID = 1
+        // The collection replace is the exclusive critical section: the core
+        // takes/replaces/reopens the collection, so block concurrent
+        // backend-touching UI for just that window. The media phase below polls
+        // a background sync (up to several minutes) while the collection is open,
+        // so it stays *outside* the gate to avoid locking the UI for that long.
+        try await runExclusive {
+            try await runDetached {
+                try backend.fullUploadOrDownload(auth: authForFull, upload: upload, serverUsn: mediaUsn)
+            }
+            if !upload {
+                // A full download replaced the whole collection, which may not
+                // contain the previously-current deck. Fall back to the Default
+                // deck (id 1) so the next "Add note"/selectDeck doesn't target a
+                // missing deck — mirroring the colpkg-import replace path. Covers
+                // both a server-forced full download and the conflict download.
+                currentDeckID = 1
+            }
         }
         // full_sync_inner already kicked off media sync; just monitor it.
         await mediaPhase(auth: auth, startNew: false)
@@ -1340,36 +1405,42 @@ final class AnkiStore: ObservableObject {
         let mediaFolder = mediaFolderURL.path
         let mediaDB = mediaDBURL.path
 
-        let outcome: ImportOutcome
-        if isColpkg {
-            try await runDetached {
-                // .colpkg replaces the collection file: close, import, reopen.
-                // Tolerate an already-closed collection (e.g. a prior failed
-                // import or a closed handle left it shut) so the replacement can
-                // still be written instead of aborting on a close that throws.
-                try? backend.closeCollection()
-                do {
-                    try backend.importCollectionPackage(
-                        colPath: colPath, backupPath: packagePath,
-                        mediaFolder: mediaFolder, mediaDB: mediaDB
-                    )
-                } catch {
-                    // Import failed before swapping the file in; reopen the
-                    // unchanged collection so the app isn't left closed.
-                    try? backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
-                    throw error
+        // Exclusive: a .colpkg replace closes the collection (close→import→reopen
+        // window), and even a deck import holds the backend for the whole call, so
+        // gate concurrent backend-touching UI for the operation's duration.
+        return try await runExclusive {
+            let outcome: ImportOutcome
+            if isColpkg {
+                try await runDetached {
+                    // .colpkg replaces the collection file: close, import, reopen.
+                    // Tolerate an already-closed collection (e.g. a prior failed
+                    // import or a closed handle left it shut) so the replacement
+                    // can still be written instead of aborting on a close that
+                    // throws.
+                    try? backend.closeCollection()
+                    do {
+                        try backend.importCollectionPackage(
+                            colPath: colPath, backupPath: packagePath,
+                            mediaFolder: mediaFolder, mediaDB: mediaDB
+                        )
+                    } catch {
+                        // Import failed before swapping the file in; reopen the
+                        // unchanged collection so the app isn't left closed.
+                        try? backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
+                        throw error
+                    }
+                    try backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
                 }
-                try backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
+                // The replaced collection may not contain the previously-current deck.
+                currentDeckID = 1
+                outcome = .collectionReplaced
+            } else {
+                let result = try await runDetached { try backend.importAnkiPackage(path: packagePath) }
+                outcome = .deckPackage(result)
             }
-            // The replaced collection may not contain the previously-current deck.
-            currentDeckID = 1
-            outcome = .collectionReplaced
-        } else {
-            let result = try await runDetached { try backend.importAnkiPackage(path: packagePath) }
-            outcome = .deckPackage(result)
+            refreshAfterImport()
+            return outcome
         }
-        refreshAfterImport()
-        return outcome
     }
 
     /// Exports a deck (and its subdecks) to a temporary `.apkg`, returning the
@@ -1379,10 +1450,14 @@ final class AnkiStore: ObservableObject {
         guard let backend else { throw NoteEditorError.collectionNotReady }
         let outURL = Self.exportFileURL(name: name, ext: "apkg")
         let path = outURL.path
-        _ = try await runDetached {
-            try backend.exportAnkiPackage(deckID: id, outPath: path, withMedia: includeMedia)
+        // Exclusive: the export holds the backend for the whole (possibly long)
+        // write, so gate concurrent backend-touching UI for its duration.
+        return try await runExclusive {
+            _ = try await runDetached {
+                try backend.exportAnkiPackage(deckID: id, outPath: path, withMedia: includeMedia)
+            }
+            return outURL
         }
-        return outURL
     }
 
     /// Exports the whole collection to a temporary `.colpkg`, returning the file
@@ -1395,16 +1470,21 @@ final class AnkiStore: ObservableObject {
         let colPath = collectionURL.path
         let mediaFolder = mediaFolderURL.path
         let mediaDB = mediaDBURL.path
-        try await runDetached {
-            do {
-                try backend.exportCollectionPackage(outPath: path, includeMedia: includeMedia, legacy: false)
-            } catch {
-                try? backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
-                throw error
+        // Exclusive: exporting the whole collection takes (closes) it and we
+        // reopen afterwards, so gate concurrent backend-touching UI for that
+        // close→reopen window.
+        return try await runExclusive {
+            try await runDetached {
+                do {
+                    try backend.exportCollectionPackage(outPath: path, includeMedia: includeMedia, legacy: false)
+                } catch {
+                    try? backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
+                    throw error
+                }
+                try backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
             }
-            try backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
+            return outURL
         }
-        return outURL
     }
 
     /// Clone of AnkiDroid's `ImportUtils.isCollectionPackage`: a `.colpkg`, or the
@@ -1463,6 +1543,21 @@ final class AnkiStore: ObservableObject {
         _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
         try await Task.detached(priority: .userInitiated, operation: work).value
+    }
+
+    /// Marks an *exclusive* backend operation (import / export / full-sync) so the
+    /// UI can disable backend-touching controls for its whole duration. The op
+    /// spans several FFI calls with the Rust mutex released between them — the
+    /// close→reopen / whole-collection-replace window — so treating it as one
+    /// critical section keeps a concurrent `@MainActor` backend call from hitting
+    /// a closed collection (clone of AnkiDroid serializing behind its collection
+    /// lock). `isBackendBusy` is always cleared on completion, including on throw.
+    /// The body runs on the main actor; only its inner `runDetached` calls go
+    /// off-main.
+    private func runExclusive<T>(_ work: () async throws -> T) async rethrows -> T {
+        isBackendBusy = true
+        defer { isBackendBusy = false }
+        return try await work()
     }
 }
 
