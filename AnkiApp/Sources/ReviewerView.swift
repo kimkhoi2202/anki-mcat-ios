@@ -239,9 +239,6 @@ struct ReviewerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if store.weakTopicsMode {
-                WeakTopicsReviewBanner(topic: store.currentCardTopic)
-            }
             if store.reviewDone {
                 allCaughtUp
             } else {
@@ -250,7 +247,7 @@ struct ReviewerView: View {
                 answerArea
             }
         }
-        .navigationTitle(store.weakTopicsMode ? "Weak Topics" : "Review")
+        .navigationTitle("Review")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { reviewerToolbar }
         // The card-action menu is a self-presented overlay (rather than a
@@ -475,40 +472,6 @@ struct ReviewerView: View {
             return label
         }
         return "\(label), interval \(store.currentIntervals[index])"
-    }
-}
-
-/// A slim header shown while studying in "Focus weak topics" mode, making the
-/// points-at-stake ordering visible: it names the mode and the current card's
-/// topic so the weakest-first progression is legible during review.
-private struct WeakTopicsReviewBanner: View {
-    let topic: String?
-
-    var body: some View {
-        HStack(spacing: DS.Spacing.s) {
-            Image(systemName: "scope")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(DS.accent)
-            Text("Weak topics first")
-                .font(DS.Typography.caption.weight(.semibold))
-                .foregroundStyle(DS.textPrimary)
-            if let topic, !topic.isEmpty {
-                Text("·")
-                    .font(DS.Typography.caption)
-                    .foregroundStyle(DS.textSecondary)
-                Text(topic)
-                    .font(DS.Typography.caption.weight(.semibold))
-                    .foregroundStyle(DS.accent)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, DS.Spacing.l)
-        .padding(.vertical, DS.Spacing.s)
-        .frame(maxWidth: .infinity)
-        .background(DS.accent.opacity(0.12))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(topic.map { "Weak topics first, current topic \($0)" } ?? "Weak topics first")
     }
 }
 
