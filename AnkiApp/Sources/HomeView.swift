@@ -30,6 +30,13 @@ struct HomeView: View {
     @State private var showCreateFilteredDeck = false
     @State private var deckActionResult: String?
 
+    // Custom study (full-parity): Anki's preset dialog, opened per deck from the
+    // deck context menu. `customStudyTarget` drives the sheet; building a session
+    // deck selects it in the store and `customStudyStartedSession` then pushes
+    // the reviewer once the sheet dismisses.
+    @State private var customStudyTarget: CustomStudyTarget?
+    @State private var customStudyStartedSession = false
+
     // Deck-list parity (full-parity): subdeck collapse, the deck overview shown
     // on tap, and the expanded per-deck context menu (browse / add note /
     // create subdeck / export / unbury), cloning AnkiDroid's DeckPicker.
@@ -155,11 +162,23 @@ struct HomeView: View {
                     store.refreshDecks()
                 }
             }
-            // Create filtered deck — clone of AnkiDroid's custom-study / filtered
-            // deck builder.
+            // Create filtered deck — clone of AnkiDroid's filtered-deck builder.
             .sheet(isPresented: $showCreateFilteredDeck) {
                 FilteredDeckView(store: store) { _ in
                     store.refreshDecks()
+                }
+            }
+            // Custom study — Anki's preset dialog for a specific deck. Building a
+            // session deck selects it in the store; we push the reviewer once the
+            // sheet has dismissed (avoids a sheet-dismiss/navigation race).
+            .sheet(item: $customStudyTarget, onDismiss: {
+                if customStudyStartedSession {
+                    customStudyStartedSession = false
+                    goReview = true
+                }
+            }) { target in
+                CustomStudyView(store: store, deckID: target.deckID) {
+                    customStudyStartedSession = true
                 }
             }
             .sheet(item: $cardInfoTarget) { target in
@@ -315,6 +334,12 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInCreateFilteredDeck") {
                 showCreateFilteredDeck = true
             }
+            // Open Custom Study for the first deck (full-parity screenshot hook).
+            if ProcessInfo.processInfo.arguments.contains("-startInCustomStudy") {
+                if let first = store.decks.first {
+                    customStudyTarget = CustomStudyTarget(deckID: first.id)
+                }
+            }
             // Open Card Info for the first card (used for the T3.3 screenshot).
             if ProcessInfo.processInfo.arguments.contains("-startInCardInfo") {
                 if let cardID = await store.firstCardID() {
@@ -460,9 +485,9 @@ struct HomeView: View {
             } label: {
                 Label("Options", systemImage: "slider.horizontal.3")
             }
-            // Custom study reuses the existing filtered-deck builder for now.
+            // Custom study opens Anki's preset dialog scoped to this deck.
             Button {
-                showCreateFilteredDeck = true
+                customStudyTarget = CustomStudyTarget(deckID: deck.id)
             } label: {
                 Label("Custom study", systemImage: "graduationcap")
             }
@@ -935,6 +960,13 @@ private struct DeckRow: View {
 private struct AddNoteTarget: Identifiable {
     let id = UUID()
     let deckID: Int64
+}
+
+/// Identifiable wrapper so the Custom Study sheet can be driven per deck via
+/// `.sheet(item:)` (its id is the deck id).
+private struct CustomStudyTarget: Identifiable {
+    let deckID: Int64
+    var id: Int64 { deckID }
 }
 
 /// Identifiable wrapper so a produced per-deck export file can drive

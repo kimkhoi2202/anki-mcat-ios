@@ -24,6 +24,9 @@ struct DeckOverviewView: View {
     @State private var goBrowse = false
     @State private var showOptions = false
     @State private var showCustomStudy = false
+    /// Set when a Custom Study session deck was built, so the sheet's dismissal
+    /// pushes the reviewer for it (selected by the store on build).
+    @State private var customStudyStartedSession = false
 
     /// The deck being shown, resolved live from the published deck list so its
     /// counts update as the tree refreshes; nil if it was deleted out from under
@@ -55,8 +58,18 @@ struct DeckOverviewView: View {
                 DeckOptionsView(store: store, deck: deck) { store.refreshDecks() }
             }
         }
-        .sheet(isPresented: $showCustomStudy) {
-            FilteredDeckView(store: store) { _ in store.refreshDecks() }
+        // Custom study opens Anki's preset dialog for this deck. Building a
+        // session deck selects it in the store; we then push the reviewer once
+        // the sheet has dismissed (avoids a sheet-dismiss/navigation race).
+        .sheet(isPresented: $showCustomStudy, onDismiss: {
+            if customStudyStartedSession {
+                customStudyStartedSession = false
+                goReview = true
+            }
+        }) {
+            CustomStudyView(store: store, deckID: deckID) {
+                customStudyStartedSession = true
+            }
         }
         // Returning from the reviewer: refresh counts so the overview reflects
         // what was studied.

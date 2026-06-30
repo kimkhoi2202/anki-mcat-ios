@@ -39,6 +39,30 @@ public enum FilteredDeckOrder: Int, Sendable, CaseIterable, Identifiable {
     }
 }
 
+/// One search filter of a filtered deck: an Anki search, a per-filter card
+/// limit, and a gather order. Anki's filtered-deck dialog supports up to two of
+/// these, each with its own search / order / limit (`Deck.Filtered.SearchTerm`).
+public struct FilteredSearchTermInput: Sendable, Equatable {
+    public var search: String
+    public var limit: Int
+    public var order: FilteredDeckOrder
+
+    public init(search: String, limit: Int, order: FilteredDeckOrder) {
+        self.search = search
+        self.limit = limit
+        self.order = order
+    }
+
+    /// Maps to the generated protobuf search-term message.
+    var proto: Anki_Decks_Deck.Filtered.SearchTerm {
+        var term = Anki_Decks_Deck.Filtered.SearchTerm()
+        term.search = search
+        term.limit = UInt32(max(0, limit))
+        term.order = order.proto
+        return term
+    }
+}
+
 /// The outcome of creating a filtered deck: its new id plus how many cards the
 /// engine gathered into it.
 public struct FilteredDeckResult: Sendable, Equatable {
@@ -62,18 +86,36 @@ public struct FilteredDeckResult: Sendable, Equatable {
 public extension Backend {
     /// Creates a filtered deck from a single search term and builds it.
     ///
-    /// Clones Anki's create-filtered-deck flow: fetch a default template
-    /// (`get_or_create_filtered_deck` with id 0), set the name and one search
-    /// term (query / limit / order), then `add_or_update_filtered_deck`, which
-    /// also gathers the matching cards and returns the new deck id.
-    ///
-    /// The engine aborts the build (and the whole creation) if the search is
-    /// invalid or matches no cards — `allow_empty` is left false, matching the
-    /// desktop dialog — so the thrown backend error is surfaced to the user.
+    /// Convenience over `createFilteredDeck(name:terms:reschedule:)` for the
+    /// common one-filter case; see that method for the full behaviour.
     @discardableResult
     func createFilteredDeck(
         name: String, search: String, limit: Int,
         order: FilteredDeckOrder, reschedule: Bool
+    ) throws -> FilteredDeckResult {
+        try createFilteredDeck(
+            name: name,
+            terms: [FilteredSearchTermInput(search: search, limit: limit, order: order)],
+            reschedule: reschedule
+        )
+    }
+
+    /// Creates a filtered deck from one or two search terms and builds it.
+    ///
+    /// Clones Anki's create-filtered-deck flow: fetch a default template
+    /// (`get_or_create_filtered_deck` with id 0), set the name, the search
+    /// terms (each with its own query / limit / order), and the reschedule
+    /// flag, then `add_or_update_filtered_deck`, which also gathers the matching
+    /// cards and returns the new deck id. Anki's dialog supports up to two
+    /// filters, so more than two are trimmed to the first two.
+    ///
+    /// The engine aborts the build (and the whole creation) if a search is
+    /// invalid or the combined filters match no cards — `allow_empty` is left
+    /// false, matching the desktop dialog — so the thrown backend error is
+    /// surfaced to the user.
+    @discardableResult
+    func createFilteredDeck(
+        name: String, terms: [FilteredSearchTermInput], reschedule: Bool
     ) throws -> FilteredDeckResult {
         // Start from a fresh template (id 0 → "create").
         var req = Anki_Decks_DeckId()
@@ -81,11 +123,12 @@ public extension Backend {
         var update = try run(service: 7, method: 19, req, returning: Anki_Decks_FilteredDeckForUpdate.self)
 
         update.name = name
-        var term = Anki_Decks_Deck.Filtered.SearchTerm()
-        term.search = search
-        term.limit = UInt32(max(0, limit))
-        term.order = order.proto
-        update.config.searchTerms = [term]
+        // Anki filtered decks carry at most two search terms; keep the first two
+        // (dropping any empty-search filters so a blank second row is ignored).
+        update.config.searchTerms = terms
+            .filter { !$0.search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .prefix(2)
+            .map(\.proto)
         update.config.reschedule = reschedule
         // Authentic behaviour: refuse to create an empty filtered deck.
         update.allowEmpty = false

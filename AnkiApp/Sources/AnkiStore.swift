@@ -787,28 +787,74 @@ final class AnkiStore: ObservableObject {
 
     // MARK: - Filtered Decks
 
-    /// Creates a filtered deck from a search query / limit / order and builds it,
-    /// then refreshes the deck list so it appears. The engine selects the new
-    /// deck as current, so study pulls from it next. Throws so the caller can
-    /// surface a clear message (e.g. an empty match). Clone of AnkiDroid's
-    /// create-filtered-deck (custom study) flow.
+    /// Creates a filtered deck from a single search query / limit / order and
+    /// builds it. Convenience over the two-filter variant below.
     @discardableResult
     func createFilteredDeck(
         name: String, search: String, limit: Int,
         order: FilteredDeckOrder, reschedule: Bool
     ) async throws -> FilteredDeckResult {
+        try await createFilteredDeck(
+            name: name,
+            terms: [FilteredSearchTermInput(search: search, limit: limit, order: order)],
+            reschedule: reschedule
+        )
+    }
+
+    /// Creates a filtered deck from one or two search terms (each with its own
+    /// search / order / limit) and the reschedule flag, then refreshes the deck
+    /// list so it appears. The engine selects the new deck as current, so study
+    /// pulls from it next. Throws so the caller can surface a clear message
+    /// (e.g. an empty match). Clone of AnkiDroid's filtered-deck dialog, which
+    /// supports up to two filters.
+    @discardableResult
+    func createFilteredDeck(
+        name: String, terms: [FilteredSearchTermInput], reschedule: Bool
+    ) async throws -> FilteredDeckResult {
         guard let backend else { throw NoteEditorError.collectionNotReady }
         // Gathering cards into the filtered deck can be heavy on a large
         // collection, so run it off the main actor to keep the UI responsive.
         let result = try await runDetached {
-            try backend.createFilteredDeck(
-                name: name, search: search, limit: limit, order: order, reschedule: reschedule
-            )
+            try backend.createFilteredDeck(name: name, terms: terms, reschedule: reschedule)
         }
         currentDeckID = result.deckID
         refreshDecks()
         refreshUndo()
         return result
+    }
+
+    // MARK: - Custom Study
+
+    /// Loads the Custom Study dialog's prefill values for a deck (today's extend
+    /// defaults, available new/review counts, and the deck's tags), off the main
+    /// actor. Best-effort: returns nil if the collection isn't ready or the call
+    /// fails, so the dialog falls back to its own defaults. Clone of AnkiDroid's
+    /// `CustomStudyDialog.loadCustomStudyDefaults`.
+    func customStudyDefaults(forDeck deckID: Int64) async -> CustomStudyDefaults? {
+        guard let backend else { return nil }
+        return try? await runDetached { try backend.customStudyDefaults(deckID: deckID) }
+    }
+
+    /// Applies a Custom Study choice for a deck through the engine, off the main
+    /// actor (a session build gathers cards, which can be heavy). For the session
+    /// options the engine builds/updates the "Custom Study Session" filtered deck
+    /// and we select it as current (loading its first card) so the caller can
+    /// jump straight into the reviewer; for limit extensions the deck's limits
+    /// change in place and study continues in the original deck. Deck counts and
+    /// undo state are refreshed either way. Throws so the dialog can surface a
+    /// clear message (e.g. "No cards matched"). Clone of AnkiDroid's
+    /// `CustomStudyDialog.customStudy` + DeckPicker's result handling.
+    @discardableResult
+    func applyCustomStudy(forDeck deckID: Int64, choice: CustomStudyChoice) async throws -> CustomStudyOutcome {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let outcome = try await runDetached { try backend.customStudy(deckID: deckID, choice: choice) }
+        if case let .builtSession(sessionID) = outcome {
+            // Select the freshly built session deck so the reviewer studies it.
+            selectDeck(id: sessionID)
+        }
+        refreshDecks()
+        refreshUndo()
+        return outcome
     }
 
     /// Re-gathers a filtered deck's cards from its search, returning the count.

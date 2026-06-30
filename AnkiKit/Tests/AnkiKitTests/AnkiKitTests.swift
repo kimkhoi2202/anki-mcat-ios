@@ -1037,6 +1037,137 @@ final class AnkiKitTests: XCTestCase {
         }
     }
 
+    /// A filtered deck built from two search terms gathers the cards matched by
+    /// EACH term (Anki's filtered dialog supports up to two filters, each with
+    /// its own search / order / limit). Two notes tagged `alpha` / `beta` are
+    /// pulled in by `tag:alpha` and `tag:beta` respectively, so the deck holds
+    /// both. Exercises the multi-term `createFilteredDeck(name:terms:reschedule:)`.
+    func testCreateFilteredDeckWithTwoSearchTerms() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["AQ", "AA"], deckID: 1, tags: ["alpha"])
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["BQ", "BA"], deckID: 1, tags: ["beta"])
+        // A third, untagged card should be matched by neither filter.
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["CQ", "CA"], deckID: 1)
+
+        let result = try backend.createFilteredDeck(
+            name: "TwoFilters",
+            terms: [
+                FilteredSearchTermInput(search: "tag:alpha", limit: 10, order: .orderAdded),
+                FilteredSearchTermInput(search: "tag:beta", limit: 10, order: .orderAdded),
+            ],
+            reschedule: true
+        )
+        XCTAssertGreaterThan(result.deckID, 0, "a created two-filter deck has a real id")
+        XCTAssertEqual(result.cardCount, 2, "both the alpha and beta cards are gathered")
+        XCTAssertEqual(try backend.searchCards(query: "deck:TwoFilters tag:alpha").count, 1,
+                       "the first filter pulled in the alpha card")
+        XCTAssertEqual(try backend.searchCards(query: "deck:TwoFilters tag:beta").count, 1,
+                       "the second filter pulled in the beta card")
+        XCTAssertEqual(try backend.searchCards(query: "deck:TwoFilters").count, 2,
+                       "the untagged card matched neither filter")
+    }
+
+    /// A blank second filter row is ignored, so a two-term call with an empty
+    /// second search behaves like a single-filter deck rather than erroring.
+    func testCreateFilteredDeckIgnoresEmptySecondFilter() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1, tags: ["alpha"])
+
+        let result = try backend.createFilteredDeck(
+            name: "OneRealFilter",
+            terms: [
+                FilteredSearchTermInput(search: "tag:alpha", limit: 10, order: .orderAdded),
+                FilteredSearchTermInput(search: "  ", limit: 10, order: .orderDue),
+            ],
+            reschedule: true
+        )
+        XCTAssertEqual(result.cardCount, 1, "only the non-empty filter contributes cards")
+    }
+
+    // MARK: - Custom Study
+
+    /// `customStudyDefaults` (SchedulerService 13, 28) reports the deck's
+    /// available new/review counts for the dialog's prefill: a fresh Default deck
+    /// with one Basic note has one available new card. Proves the service/method
+    /// indices and the `CustomStudyDefaultsResponse` shape.
+    func testCustomStudyDefaultsReportsAvailableCounts() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1)
+
+        let defaults = try backend.customStudyDefaults(deckID: 1)
+        XCTAssertEqual(defaults.availableNew, 1, "the one added Basic card is available as new")
+        XCTAssertEqual(defaults.extendNew, 0, "nothing extended yet, so the new default is 0")
+    }
+
+    /// `customStudy` with `extendNew` bumps today's new-card limit in place
+    /// (returning `.extendedLimits`, NOT building a deck), and the new extend
+    /// value reads back through `customStudyDefaults` — mirroring desktop's
+    /// `custom_study_extends_new_limit` engine test.
+    func testCustomStudyExtendNewLimitChangesDefaults() throws {
+        let backend = try freshCollection()
+
+        let outcome = try backend.customStudy(deckID: 1, choice: .extendNew(delta: 5))
+        XCTAssertEqual(outcome, .extendedLimits, "extending limits must not build a filtered deck")
+
+        let defaults = try backend.customStudyDefaults(deckID: 1)
+        XCTAssertEqual(defaults.extendNew, 5, "the extended new limit should persist")
+        XCTAssertFalse(
+            try backend.deckNames().contains { $0.name == Backend.customStudySessionDeckName },
+            "no Custom Study Session deck should be created for a limit extension"
+        )
+    }
+
+    /// `customStudy` with a session option (here "study by card state" → new
+    /// cards) builds the "Custom Study Session" filtered deck, gathers the
+    /// matching cards into it, and returns the session deck id so the caller can
+    /// study it. Clone of AnkiDroid's CUSTOM_STUDY_SESSION flow.
+    func testCustomStudyBuildsCustomStudySessionDeck() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        for i in 0..<3 {
+            _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q\(i)", "A\(i)"], deckID: 1)
+        }
+
+        let outcome = try backend.customStudy(
+            deckID: 1,
+            choice: .cardStateOrTag(CustomStudyCram(kind: .newCardsOnly, cardLimit: 100))
+        )
+        guard case let .builtSession(sessionID) = outcome else {
+            return XCTFail("a card-state session should build the Custom Study Session deck")
+        }
+        XCTAssertGreaterThan(sessionID, 0, "the session deck should have a real id")
+
+        let entry = try XCTUnwrap(
+            try backend.deckTree().first { $0.id == sessionID },
+            "the session deck should appear in the deck tree"
+        )
+        XCTAssertTrue(entry.filtered, "the Custom Study Session deck is a filtered deck")
+        XCTAssertEqual(entry.name, Backend.customStudySessionDeckName)
+        XCTAssertEqual(try backend.searchCards(query: "deck:\"\(Backend.customStudySessionDeckName)\"").count, 3,
+                       "all three new cards are gathered into the session deck")
+    }
+
+    /// A session whose search matches no cards is rejected by the engine
+    /// (`allow_empty = false` → `CustomStudyError::NoMatchingCards`), surfacing
+    /// as a decodable backend error: "review forgotten" on a collection with no
+    /// reviewed cards matches nothing.
+    func testCustomStudyNoMatchingCardsThrows() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1)
+
+        XCTAssertThrowsError(
+            try backend.customStudy(deckID: 1, choice: .reviewForgotten(days: 1))
+        ) { error in
+            guard case AnkiError.backendError = error else {
+                return XCTFail("expected a backend error when no cards match the session")
+            }
+        }
+    }
+
     // MARK: - Subdeck collapse / unbury
 
     /// `setDeckCollapsed` (DecksService 7, 11) persists a deck's collapsed state,
