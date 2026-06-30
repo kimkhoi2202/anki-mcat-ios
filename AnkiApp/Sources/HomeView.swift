@@ -9,6 +9,11 @@ import AnkiKit
 /// it and its subdecks) and pushes the reviewer.
 struct HomeView: View {
     @StateObject private var store = AnkiStore()
+    /// Drives auto-sync on app open/close (Anki's "Automatically sync on profile
+    /// open/close"); `hasLaunched` keeps the launch `.active` from double-syncing
+    /// with the boot-time open sync.
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var hasLaunched = false
     @State private var goReview = false
     @State private var goSettings = false
     @State private var goBrowse = false
@@ -283,6 +288,11 @@ struct HomeView: View {
         }
         .task {
             await store.boot()
+            // Auto-sync on app open (Anki's "Automatically sync on open/close"),
+            // a no-op unless enabled and logged in. `hasLaunched` then lets the
+            // scene-phase handler treat later foregrounds as re-opens.
+            store.autoSyncIfEnabled()
+            hasLaunched = true
             #if DEBUG
             // Launch-argument automation hooks for UI tests / screenshots.
             // Compiled only into debug builds; release ships none of this.
@@ -400,6 +410,20 @@ struct HomeView: View {
             }
             store.autoLoginAndSyncIfRequested()
             #endif
+        }
+        .onChange(of: scenePhase) { phase in
+            // Auto-sync on app open/close. On close (`.background`) the sync is
+            // best-effort — iOS may suspend the app before it finishes — so the
+            // reliable counterpart is the re-open sync when foregrounding again.
+            // The launch open-sync runs in `.task`, so skip the first `.active`.
+            switch phase {
+            case .active:
+                if hasLaunched { store.autoSyncIfEnabled() }
+            case .background:
+                store.autoSyncIfEnabled()
+            default:
+                break
+            }
         }
         .onChange(of: goReview) { presented in
             // Returning from the reviewer: refresh per-deck counts.

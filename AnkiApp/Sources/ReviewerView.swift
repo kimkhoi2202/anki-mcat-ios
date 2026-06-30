@@ -258,6 +258,11 @@ struct ReviewerView: View {
     @ObservedObject var store: AnkiStore
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// "Full-screen reviewer" (Anki's Distractions ▸ hide bars during review):
+    /// hides the status bar and home indicator for a distraction-free session.
+    /// The in-app toolbar (Undo / back / card menu) stays, so the user can always
+    /// act on or leave the card.
+    @AppStorage(FullScreenReviewer.storageKey) private var fullScreenReviewer = false
 
     @State private var infoCardID: Int64?
     @State private var editNoteTarget: ReviewerNoteTarget?
@@ -292,6 +297,10 @@ struct ReviewerView: View {
         }
         .navigationTitle("Review")
         .navigationBarTitleDisplayMode(.inline)
+        // Full-screen reviewer: hide the status bar and home indicator for an
+        // immersive, distraction-free session (the in-app toolbar stays).
+        .statusBarHidden(fullScreenReviewer)
+        .persistentSystemOverlays(fullScreenReviewer ? .hidden : .automatic)
         .onDisappear {
             store.stopReviewAudio()
             // Stop auto-advance so a pending timer can't fire after leaving.

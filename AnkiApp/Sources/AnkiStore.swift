@@ -119,9 +119,46 @@ final class AnkiStore: ObservableObject {
     /// toggles on the Settings screen. Cloned from AnkiDroid's Appearance/Study
     /// settings, which read/write the same collection prefs.
     @Published var reviewingPrefs = ReviewingPrefs()
-    /// Whether `reviewingPrefs` was successfully loaded from the engine (drives
-    /// whether the Settings screen shows the reviewing toggles).
+    /// Editing preferences from the engine `Preferences.editing` sub-message —
+    /// Anki's Preferences ▸ Editing/Browsing tab (paste behaviour, search). These
+    /// are collection prefs, so they sync across devices.
+    @Published var editingPrefs = EditingPrefs()
+    /// Backup limits from the engine `Preferences.backups` sub-message — Anki's
+    /// Preferences ▸ Backups (how many daily/weekly/monthly backups to keep, and
+    /// the minimum interval between automatic backups).
+    @Published var backupLimits = BackupLimitsPrefs()
+    /// Whether the engine `Preferences` were successfully loaded (drives whether
+    /// the Settings screen shows the engine-backed Reviewing/Editing/Backups
+    /// rows). Loaded together from a single `getPreferences()`.
     @Published private(set) var preferencesAvailable = false
+
+    /// True while a manual "Create backup now" snapshot is being written, so the
+    /// Settings row can show progress and disable itself.
+    @Published private(set) var backupInProgress = false
+    /// Outcome of the most recent manual backup, shown transiently in Settings.
+    @Published var lastBackupMessage: String?
+
+    // MARK: - Sync settings (app-local)
+    //
+    // Anki's Preferences ▸ Syncing has "Automatically sync on profile
+    // open/close" and "Synchronize audio and images too". The engine
+    // `Preferences` message exposes *neither* (they're client behaviour, not
+    // collection data), so — like AnkiDroid, which keeps them in its own
+    // SharedPreferences — they live here in `UserDefaults` and are honoured by
+    // the app's sync flow rather than round-tripping through the collection.
+
+    /// "Automatically sync on profile open/close": when on (and logged in), the
+    /// app syncs on launch and when backgrounded. Default on, to match Anki.
+    @Published var autoSyncEnabled = true {
+        didSet { UserDefaults.standard.set(autoSyncEnabled, forKey: Self.autoSyncKey) }
+    }
+    /// "Synchronize audio and images too": when off, syncs skip the media phase
+    /// (collection only). Default on, matching Anki and the prior behaviour.
+    @Published var fetchMediaOnSync = true {
+        didSet { UserDefaults.standard.set(fetchMediaOnSync, forKey: Self.fetchMediaKey) }
+    }
+    private static let autoSyncKey = "autoSyncEnabled"
+    private static let fetchMediaKey = "fetchMediaOnSync"
 
     // MARK: - Auto-advance state (app-local)
     //
@@ -280,7 +317,18 @@ final class AnkiStore: ObservableObject {
         loadLoginState()
         loadPreferences()
         loadAutoAdvancePrefs()
+        loadSyncPrefs()
         status = "Engine OK"
+    }
+
+    /// Loads the persisted app-local sync settings (auto-sync on open/close,
+    /// fetch-media-on-sync) from `UserDefaults`. Both default on (Anki's
+    /// defaults) when unset; read once at boot, with the published setters
+    /// keeping `UserDefaults` in sync thereafter.
+    private func loadSyncPrefs() {
+        let defaults = UserDefaults.standard
+        autoSyncEnabled = (defaults.object(forKey: Self.autoSyncKey) as? Bool) ?? true
+        fetchMediaOnSync = (defaults.object(forKey: Self.fetchMediaKey) as? Bool) ?? true
     }
 
     /// Loads the persisted auto-advance settings (enabled + per-side seconds) from
@@ -1837,9 +1885,12 @@ final class AnkiStore: ObservableObject {
         // backend-touching UI for just that window. The media phase below polls
         // a background sync (up to several minutes) while the collection is open,
         // so it stays *outside* the gate to avoid locking the UI for that long.
+        // Only hand the core a server media USN (which makes it kick off a
+        // background media sync after the full sync) when media syncing is on.
+        let fullSyncMediaUsn: Int32? = fetchMediaOnSync ? mediaUsn : nil
         try await runExclusive {
             try await runDetached {
-                try backend.fullUploadOrDownload(auth: authForFull, upload: upload, serverUsn: mediaUsn)
+                try backend.fullUploadOrDownload(auth: authForFull, upload: upload, serverUsn: fullSyncMediaUsn)
             }
             if !upload {
                 // A full download replaced the whole collection, which may not
@@ -1862,6 +1913,11 @@ final class AnkiStore: ObservableObject {
     /// sync that already succeeded.
     private func mediaPhase(auth: Anki_Sync_SyncAuth, startNew: Bool) async {
         guard let backend else { return }
+        // "Synchronize audio and images too" off → collection-only sync; skip
+        // starting/polling the media phase. (For a full sync the core may still
+        // bundle media when given a server USN, so `runFullSync` also withholds
+        // that USN when this is off.)
+        guard fetchMediaOnSync else { return }
         lastMediaError = nil
         syncPhase = .mediaSyncing("")
         // Bound the poll loop: a server-side stuck media sync would otherwise
@@ -1954,13 +2010,18 @@ final class AnkiStore: ObservableObject {
 
     // MARK: - Preferences (engine-backed)
 
-    /// Loads the reviewing preferences from the engine `Preferences` message.
-    /// Read locally (fast SQLite-backed call), mirroring how AnkiDroid's settings
-    /// screens populate their toggles from `col.getPreferences()`.
+    /// Loads the collection `Preferences` message (Reviewing / Editing / Backups
+    /// sub-messages) into the view-facing snapshots. Read locally (fast
+    /// SQLite-backed call), mirroring how AnkiDroid's settings screens populate
+    /// their controls from `col.getPreferences()`. All three are loaded together
+    /// from one round-trip.
     func loadPreferences() {
         guard let backend else { return }
         do {
-            reviewingPrefs = ReviewingPrefs(try backend.getPreferences().reviewing)
+            let prefs = try backend.getPreferences()
+            reviewingPrefs = ReviewingPrefs(prefs.reviewing)
+            editingPrefs = EditingPrefs(prefs.editing)
+            backupLimits = BackupLimitsPrefs(prefs.backups)
             preferencesAvailable = true
         } catch {
             preferencesAvailable = false
@@ -1968,40 +2029,146 @@ final class AnkiStore: ObservableObject {
         }
     }
 
+    // MARK: Reviewing
+
     /// "Show next review time above answer buttons" (engine
     /// `reviewing.show_intervals_on_buttons`).
     func setShowIntervalsOnButtons(_ value: Bool) {
-        updateReviewing { $0.showIntervalsOnButtons = value }
+        updatePreferences { $0.reviewing.showIntervalsOnButtons = value }
     }
 
     /// "Show remaining card count" during review (engine
     /// `reviewing.show_remaining_due_counts`).
     func setShowRemainingDueCounts(_ value: Bool) {
-        updateReviewing { $0.showRemainingDueCounts = value }
+        updatePreferences { $0.reviewing.showRemainingDueCounts = value }
     }
 
     /// "Show play buttons on cards with audio". Stored inverted in the engine as
     /// `reviewing.hide_audio_play_buttons` (as in AnkiDroid).
     func setShowPlayButtonsOnAudio(_ value: Bool) {
-        updateReviewing { $0.hideAudioPlayButtons = !value }
+        updatePreferences { $0.reviewing.hideAudioPlayButtons = !value }
     }
 
-    /// Read-modify-write a single reviewing preference through the engine, then
-    /// re-read so the UI reflects the persisted truth (clone of AnkiDroid's
-    /// `prefs.copy { reviewing = ... }; setPreferences(newPrefs)`). On failure the
-    /// reload reverts the toggle to the engine's actual value.
-    private func updateReviewing(
-        _ mutate: (inout Anki_Config_Preferences.Reviewing) -> Void
+    /// "Interrupt current audio when answering" (engine
+    /// `reviewing.interrupt_audio_when_answering`). Engine-backed so it syncs to
+    /// the desktop/AnkiDroid reviewers; the iOS reviewer already cancels prior
+    /// audio on each side/card transition.
+    func setInterruptAudioWhenAnswering(_ value: Bool) {
+        updatePreferences { $0.reviewing.interruptAudioWhenAnswering = value }
+    }
+
+    // MARK: Editing
+
+    /// "Paste without shift key strips formatting" (engine
+    /// `editing.paste_strips_formatting`).
+    func setPasteStripsFormatting(_ value: Bool) {
+        updatePreferences { $0.editing.pasteStripsFormatting = value }
+    }
+
+    /// "Paste clipboard images as PNG" (engine `editing.paste_images_as_png`).
+    func setPasteImagesAsPng(_ value: Bool) {
+        updatePreferences { $0.editing.pasteImagesAsPng = value }
+    }
+
+    /// Default deck behaviour: on = "When adding, default to current deck"; off =
+    /// "Change deck depending on note type" (engine
+    /// `editing.adding_defaults_to_current_deck`).
+    func setAddingDefaultsToCurrentDeck(_ value: Bool) {
+        updatePreferences { $0.editing.addingDefaultsToCurrentDeck = value }
+    }
+
+    /// "Ignore accents in search (slower)" (engine
+    /// `editing.ignore_accents_in_search`).
+    func setIgnoreAccentsInSearch(_ value: Bool) {
+        updatePreferences { $0.editing.ignoreAccentsInSearch = value }
+    }
+
+    /// "Default search text" used as the browser's starting query, e.g.
+    /// "deck:current" (engine `editing.default_search_text`).
+    func setDefaultSearchText(_ value: String) {
+        updatePreferences { $0.editing.defaultSearchText = value }
+    }
+
+    // MARK: Backups
+
+    /// "Daily backups to keep" (engine `backups.daily`). Clamped to non-negative.
+    func setDailyBackupsToKeep(_ value: Int) {
+        updatePreferences { $0.backups.daily = UInt32(max(0, value)) }
+    }
+
+    /// "Weekly backups to keep" (engine `backups.weekly`).
+    func setWeeklyBackupsToKeep(_ value: Int) {
+        updatePreferences { $0.backups.weekly = UInt32(max(0, value)) }
+    }
+
+    /// "Monthly backups to keep" (engine `backups.monthly`).
+    func setMonthlyBackupsToKeep(_ value: Int) {
+        updatePreferences { $0.backups.monthly = UInt32(max(0, value)) }
+    }
+
+    /// "Minutes between automatic backups" (engine
+    /// `backups.minimum_interval_mins`).
+    func setMinutesBetweenBackups(_ value: Int) {
+        updatePreferences { $0.backups.minimumIntervalMins = UInt32(max(0, value)) }
+    }
+
+    /// Read-modify-write the whole engine `Preferences` message, then re-read so
+    /// the UI reflects the persisted truth (clone of AnkiDroid's
+    /// `prefs.copy { … }; setPreferences(newPrefs)`). Mutating the fetched
+    /// message — rather than building a fresh one — preserves every field the UI
+    /// doesn't surface. On failure the reload reverts the control to the engine's
+    /// actual value.
+    private func updatePreferences(
+        _ mutate: (inout Anki_Config_Preferences) -> Void
     ) {
         guard let backend else { return }
         do {
             var prefs = try backend.getPreferences()
-            mutate(&prefs.reviewing)
+            mutate(&prefs)
             _ = try backend.setPreferences(prefs)
         } catch {
             status = "Preferences error: \(error)"
         }
         loadPreferences()
+    }
+
+    /// Folder holding `.colpkg` backup snapshots, a `backups` subfolder of the
+    /// app's Documents (next to the collection) — matching Anki desktop's
+    /// `<profile>/backups`. Created on demand.
+    private var backupsFolderURL: URL {
+        documentsURL.appendingPathComponent("backups", isDirectory: true)
+    }
+
+    /// "Create backup now": writes a forced `.colpkg` snapshot into
+    /// `backupsFolderURL` and waits for it to finish, then prunes old backups per
+    /// the engine's backup limits. Two-phase like AnkiDroid's `BackendBackups`
+    /// (create returns after the initial copy; `awaitBackupCompletion` blocks for
+    /// the rest), both run off the main actor so the UI stays responsive.
+    func createBackupNow() async {
+        guard let backend, !backupInProgress else { return }
+        backupInProgress = true
+        defer { backupInProgress = false }
+        let folder = backupsFolderURL
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let path = folder.path
+            try await runDetached {
+                _ = try backend.createBackup(backupFolder: path, force: true, waitForCompletion: false)
+                try backend.awaitBackupCompletion()
+            }
+            lastBackupMessage = "Backup created."
+        } catch {
+            lastBackupMessage = "Backup failed: \(error)"
+        }
+    }
+
+    /// Syncs on app open/close when "Automatically sync on profile open/close" is
+    /// on and the user is logged in. A no-op otherwise — in particular it never
+    /// pops the login sheet (unlike a manual `sync()`), so an unauthenticated
+    /// launch stays quiet. Honours the sync reentrancy guard inside `sync()`.
+    func autoSyncIfEnabled() {
+        guard autoSyncEnabled, isLoggedIn else { return }
+        Task { await sync() }
     }
 
     // MARK: - Import / Export
@@ -2215,6 +2382,8 @@ struct ReviewingPrefs: Equatable {
     /// "Show play buttons on cards with audio" (inverse of the engine's
     /// `hide_audio_play_buttons`).
     var showPlayButtonsOnAudio = false
+    /// "Interrupt current audio when answering".
+    var interruptAudioWhenAnswering = false
 
     init() {}
 
@@ -2222,5 +2391,57 @@ struct ReviewingPrefs: Equatable {
         showIntervalsOnButtons = reviewing.showIntervalsOnButtons
         showRemainingDueCounts = reviewing.showRemainingDueCounts
         showPlayButtonsOnAudio = !reviewing.hideAudioPlayButtons
+        interruptAudioWhenAnswering = reviewing.interruptAudioWhenAnswering
+    }
+}
+
+/// Plain, view-facing snapshot of the engine's editing preferences (Anki's
+/// Preferences ▸ Editing/Browsing tab). Decouples the SwiftUI layer from the
+/// generated protobuf type. Defaults mirror the proto defaults; the engine's
+/// real values overwrite them as soon as `loadPreferences()` runs.
+struct EditingPrefs: Equatable {
+    /// "Paste without shift key strips formatting".
+    var pasteStripsFormatting = false
+    /// "Paste clipboard images as PNG".
+    var pasteImagesAsPng = false
+    /// "When adding, default to current deck" (off = "Change deck depending on
+    /// note type").
+    var addingDefaultsToCurrentDeck = false
+    /// "Ignore accents in search (slower)".
+    var ignoreAccentsInSearch = false
+    /// "Default search text" for the browser (e.g. "deck:current").
+    var defaultSearchText = ""
+
+    init() {}
+
+    init(_ editing: Anki_Config_Preferences.Editing) {
+        pasteStripsFormatting = editing.pasteStripsFormatting
+        pasteImagesAsPng = editing.pasteImagesAsPng
+        addingDefaultsToCurrentDeck = editing.addingDefaultsToCurrentDeck
+        ignoreAccentsInSearch = editing.ignoreAccentsInSearch
+        defaultSearchText = editing.defaultSearchText
+    }
+}
+
+/// Plain, view-facing snapshot of the engine's backup limits (Anki's
+/// Preferences ▸ Backups). Counts are surfaced as `Int` for SwiftUI steppers;
+/// the store clamps and stores them back as the proto's `UInt32`.
+struct BackupLimitsPrefs: Equatable {
+    /// "Daily backups to keep".
+    var daily = 0
+    /// "Weekly backups to keep".
+    var weekly = 0
+    /// "Monthly backups to keep".
+    var monthly = 0
+    /// "Minutes between automatic backups".
+    var minimumIntervalMins = 0
+
+    init() {}
+
+    init(_ backups: Anki_Config_Preferences.BackupLimits) {
+        daily = Int(backups.daily)
+        weekly = Int(backups.weekly)
+        monthly = Int(backups.monthly)
+        minimumIntervalMins = Int(backups.minimumIntervalMins)
     }
 }

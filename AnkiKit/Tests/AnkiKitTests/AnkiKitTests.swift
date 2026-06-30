@@ -1596,4 +1596,86 @@ final class AnkiKitTests: XCTestCase {
         let third = try backend.addMediaFile(desiredName: "audio.mp3", data: Data("one".utf8))
         XCTAssertEqual(third, first, "identical bytes under the same name reuse the stored file")
     }
+
+    // MARK: - Preferences (Editing & Backups)
+
+    /// The `editing` sub-message of `Preferences` round-trips through the engine,
+    /// proving the Settings "Editing" toggles persist. Flips the booleans and a
+    /// string field, writes the whole `Preferences`, and re-reads — also checking
+    /// that an unrelated sub-message (`reviewing`) is preserved by the
+    /// read-modify-write, since the Settings screen only mutates one field at a
+    /// time on top of the full message.
+    func testEditingPreferencesRoundTrip() throws {
+        let backend = try freshCollection()
+
+        let original = try backend.getPreferences()
+        let reviewingBefore = original.reviewing.showIntervalsOnButtons
+        let flippedPasteStrips = !original.editing.pasteStripsFormatting
+        let flippedPastePng = !original.editing.pasteImagesAsPng
+        let flippedAccents = !original.editing.ignoreAccentsInSearch
+        let flippedAddDefault = !original.editing.addingDefaultsToCurrentDeck
+
+        var updated = original
+        updated.editing.pasteStripsFormatting = flippedPasteStrips
+        updated.editing.pasteImagesAsPng = flippedPastePng
+        updated.editing.ignoreAccentsInSearch = flippedAccents
+        updated.editing.addingDefaultsToCurrentDeck = flippedAddDefault
+        updated.editing.defaultSearchText = "deck:current"
+        _ = try backend.setPreferences(updated)
+
+        let readBack = try backend.getPreferences()
+        XCTAssertEqual(readBack.editing.pasteStripsFormatting, flippedPasteStrips)
+        XCTAssertEqual(readBack.editing.pasteImagesAsPng, flippedPastePng)
+        XCTAssertEqual(readBack.editing.ignoreAccentsInSearch, flippedAccents)
+        XCTAssertEqual(readBack.editing.addingDefaultsToCurrentDeck, flippedAddDefault)
+        XCTAssertEqual(readBack.editing.defaultSearchText, "deck:current")
+        XCTAssertEqual(readBack.reviewing.showIntervalsOnButtons, reviewingBefore,
+                       "writing editing prefs must not disturb the reviewing sub-message")
+    }
+
+    /// The `backups` (BackupLimits) sub-message round-trips through the engine —
+    /// the Settings "Backups" section's daily/weekly/monthly counts and the
+    /// minimum interval between automatic backups.
+    func testBackupLimitsRoundTrip() throws {
+        let backend = try freshCollection()
+
+        var updated = try backend.getPreferences()
+        updated.backups.daily = 9
+        updated.backups.weekly = 8
+        updated.backups.monthly = 7
+        updated.backups.minimumIntervalMins = 45
+        _ = try backend.setPreferences(updated)
+
+        let readBack = try backend.getPreferences().backups
+        XCTAssertEqual(readBack.daily, 9)
+        XCTAssertEqual(readBack.weekly, 8)
+        XCTAssertEqual(readBack.monthly, 7)
+        XCTAssertEqual(readBack.minimumIntervalMins, 45)
+    }
+
+    /// `createBackup(force:)` writes a `.colpkg` snapshot into the given folder
+    /// and `awaitBackupCompletion()` blocks until it's done — the Settings
+    /// "Create backup now" action. `force` bypasses the minimum-interval check so
+    /// a backup is always produced. Proves the CollectionService 3/2 + 3/3
+    /// indices and that a file actually lands on disk.
+    func testCreateBackupWritesColpkg() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let backend = try openCollection(in: dir)
+        // Some content so there is a collection worth snapshotting.
+        _ = try backend.addNote(notetypeID: try basicNotetypeID(backend), fields: ["Q", "A"], deckID: 1)
+
+        let backupFolder = dir.appendingPathComponent("backups")
+        try FileManager.default.createDirectory(at: backupFolder, withIntermediateDirectories: true)
+
+        let created = try backend.createBackup(
+            backupFolder: backupFolder.path, force: true, waitForCompletion: true
+        )
+        XCTAssertTrue(created, "a forced backup should always be created")
+        // awaitBackupCompletion is a no-op here (we waited) but must not throw.
+        try backend.awaitBackupCompletion()
+
+        let files = try FileManager.default.contentsOfDirectory(atPath: backupFolder.path)
+        XCTAssertTrue(files.contains { $0.hasSuffix(".colpkg") },
+                      "a .colpkg backup file should be written into the backup folder")
+    }
 }

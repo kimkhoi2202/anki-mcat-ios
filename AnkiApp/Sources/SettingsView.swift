@@ -1,31 +1,45 @@
 import SwiftUI
 import AnkiKit
 
-/// Settings screen, cloning a focused subset of AnkiDroid's Preferences as a
-/// native grouped `Form`:
+/// Settings screen, cloning Anki's Preferences dialog (and AnkiDroid's settings)
+/// as a native grouped `Form`. Engine-backed sections read/write the collection
+/// `Preferences` message so they sync across devices; client-only sections use
+/// `@AppStorage`/`UserDefaults`:
 ///
-/// - **Account / Sync** — the synced account and a login/logout action, plus the
-///   custom sync server when one is configured (AnkiDroid's Sync settings).
-/// - **Appearance** — the app Theme picker (AnkiDroid's `app_theme`), persisted
-///   with `@AppStorage` and applied app-wide via `preferredColorScheme`.
-/// - **Reviewing** — engine-backed toggles read/written through the collection
-///   `Preferences` message (AnkiDroid's Appearance/Study review settings).
+/// - **Account & Sync / Sync server / Syncing** — the synced account and
+///   login/logout, the custom sync server, and the app-local auto-sync and
+///   sync-media toggles (Anki's Preferences ▸ Syncing).
+/// - **Appearance** — Theme + UI size (app-wide) and a full-screen reviewer
+///   toggle (Anki's Appearance ▸ Distractions).
+/// - **Reviewing** — engine-backed toggles from `Preferences.reviewing`.
+/// - **Editing** — engine-backed paste/search prefs from `Preferences.editing`.
+/// - **Backups** — engine-backed `Preferences.backups` limits + "Create backup
+///   now".
 /// - **About** — app version and the linked Anki engine build hash.
 struct SettingsView: View {
     @ObservedObject var store: AnkiStore
     @AppStorage(AppTheme.storageKey) private var appThemeRaw = AppTheme.system.rawValue
+    @AppStorage(UISize.storageKey) private var uiSizeRaw = UISize.system.rawValue
+    @AppStorage(FullScreenReviewer.storageKey) private var fullScreenReviewer = false
     @State private var serverChoice: ServerChoice = .ankiweb
     @State private var customServerURL = ""
     /// Inline validation error for the custom ("Other") server URL, if any.
     @State private var serverError: String?
+    /// Local draft for the "Default search text" field, committed to the engine
+    /// on submit/disappear rather than on every keystroke (which would round-trip
+    /// through the collection each character and fight the text cursor).
+    @State private var defaultSearchTextDraft = ""
 
     var body: some View {
         Form {
             accountSection
             serverSection
+            syncSection
             appearanceSection
             reviewingSection
             autoAdvanceSection
+            editingSection
+            backupsSection
             notetypesSection
             dataSection
             aboutSection
@@ -38,12 +52,20 @@ struct SettingsView: View {
         .task {
             store.loadPreferences()
             reconcileServer()
+            defaultSearchTextDraft = store.editingPrefs.defaultSearchText
         }
         // Re-seed the picker when the login state or the in-use server changes
         // (e.g. logging out while on this screen, or a shard reassignment), so it
         // never diverges from the server `sync()` actually uses.
         .onChange(of: store.isLoggedIn) { _ in reconcileServer() }
         .onChange(of: store.activeSyncServer) { _ in reconcileServer() }
+        // Keep the draft in step when the engine value changes from elsewhere
+        // (e.g. a sync), unless the user is mid-edit with an unsaved change.
+        .onChange(of: store.editingPrefs.defaultSearchText) { newValue in
+            if newValue != defaultSearchTextDraft { defaultSearchTextDraft = newValue }
+        }
+        // Commit any pending search-text edit when leaving the screen.
+        .onDisappear { commitDefaultSearchText() }
     }
 
     // MARK: - Account / Sync
@@ -131,6 +153,29 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Syncing (app-local)
+
+    /// Sync behaviour toggles (Anki's Preferences ▸ Syncing). The engine
+    /// `Preferences` message exposes neither, so they're stored on this device:
+    /// auto-sync drives `sync()` on app open/close, and "Sync media" gates the
+    /// media phase of every sync.
+    private var syncSection: some View {
+        Section {
+            Toggle("Automatically sync on open/close", isOn: $store.autoSyncEnabled)
+            Toggle("Synchronize audio and images too", isOn: $store.fetchMediaOnSync)
+        } header: {
+            sectionHeader("Syncing")
+        } footer: {
+            sectionFooter(
+                store.isLoggedIn
+                    ? "Auto-sync runs when you open or leave the app. Turn off media syncing to sync the collection only."
+                    : "These apply once you log in. Turn off media syncing to sync the collection only."
+            )
+        }
+        .font(DS.Typography.body)
+        .foregroundStyle(DS.textPrimary)
+    }
+
     // MARK: - Appearance
 
     private var appearanceSection: some View {
@@ -145,10 +190,26 @@ struct SettingsView: View {
                     .foregroundStyle(DS.textPrimary)
             }
             .pickerStyle(.segmented)
+
+            Picker(selection: uiSizeBinding) {
+                ForEach(UISize.allCases) { size in
+                    Text(size.label).tag(size)
+                }
+            } label: {
+                Text("Interface size")
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+            }
+            .pickerStyle(.menu)
+            .tint(DS.textSecondary)
+
+            Toggle("Full-screen reviewer", isOn: $fullScreenReviewer)
+                .font(DS.Typography.body)
+                .foregroundStyle(DS.textPrimary)
         } header: {
             sectionHeader("Appearance")
         } footer: {
-            sectionFooter("“System” follows your device's light/dark appearance.")
+            sectionFooter("“System” follows your device's light/dark appearance. Interface size scales the app's text. Full-screen review hides the status bar for a distraction-free session.")
         }
     }
 
@@ -168,6 +229,10 @@ struct SettingsView: View {
                 Toggle("Show play buttons on cards with audio", isOn: boolBinding(
                     get: { store.reviewingPrefs.showPlayButtonsOnAudio },
                     set: store.setShowPlayButtonsOnAudio
+                ))
+                Toggle("Interrupt current audio when answering", isOn: boolBinding(
+                    get: { store.reviewingPrefs.interruptAudioWhenAnswering },
+                    set: store.setInterruptAudioWhenAnswering
                 ))
             } else {
                 Text("Reviewing preferences are unavailable.")
@@ -216,6 +281,116 @@ struct SettingsView: View {
             Text(title)
             Spacer()
             Text("\(seconds)s")
+                .foregroundStyle(DS.textSecondary)
+                .monospacedDigit()
+        }
+    }
+
+    // MARK: - Editing (engine-backed)
+
+    /// Anki's Preferences ▸ Editing/Browsing tab. Engine-backed via
+    /// `Preferences.editing`, so these sync across devices (even where this
+    /// client doesn't yet act on every one, e.g. the desktop honours them when
+    /// pasting/searching).
+    private var editingSection: some View {
+        Section {
+            if store.preferencesAvailable {
+                Toggle("Paste without shift key strips formatting", isOn: boolBinding(
+                    get: { store.editingPrefs.pasteStripsFormatting },
+                    set: store.setPasteStripsFormatting
+                ))
+                Toggle("Paste clipboard images as PNG", isOn: boolBinding(
+                    get: { store.editingPrefs.pasteImagesAsPng },
+                    set: store.setPasteImagesAsPng
+                ))
+                Toggle("When adding, default to current deck", isOn: boolBinding(
+                    get: { store.editingPrefs.addingDefaultsToCurrentDeck },
+                    set: store.setAddingDefaultsToCurrentDeck
+                ))
+                Toggle("Ignore accents in search (slower)", isOn: boolBinding(
+                    get: { store.editingPrefs.ignoreAccentsInSearch },
+                    set: store.setIgnoreAccentsInSearch
+                ))
+                HStack {
+                    Text("Default search text")
+                    Spacer()
+                    TextField("e.g. deck:current", text: $defaultSearchTextDraft)
+                        .multilineTextAlignment(.trailing)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .foregroundStyle(DS.textSecondary)
+                        .frame(maxWidth: 180)
+                        .onSubmit { commitDefaultSearchText() }
+                }
+            } else {
+                Text("Editing preferences are unavailable.")
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textSecondary)
+            }
+        } header: {
+            sectionHeader("Editing")
+        } footer: {
+            sectionFooter("Stored in your collection and kept in sync across devices. “When adding, default to current deck” off means the deck changes with the note type.")
+        }
+        .font(DS.Typography.body)
+        .foregroundStyle(DS.textPrimary)
+    }
+
+    // MARK: - Backups (engine-backed)
+
+    /// Anki's Preferences ▸ Backups. Engine-backed via `Preferences.backups`
+    /// (how many daily/weekly/monthly snapshots to keep and the minimum interval
+    /// between automatic ones), plus an immediate "Create backup now" action.
+    private var backupsSection: some View {
+        Section {
+            if store.preferencesAvailable {
+                Stepper(value: backupCountBinding(\.daily, store.setDailyBackupsToKeep), in: 0...999) {
+                    countLabel("Daily backups to keep", store.backupLimits.daily)
+                }
+                Stepper(value: backupCountBinding(\.weekly, store.setWeeklyBackupsToKeep), in: 0...999) {
+                    countLabel("Weekly backups to keep", store.backupLimits.weekly)
+                }
+                Stepper(value: backupCountBinding(\.monthly, store.setMonthlyBackupsToKeep), in: 0...999) {
+                    countLabel("Monthly backups to keep", store.backupLimits.monthly)
+                }
+                Stepper(value: backupCountBinding(\.minimumIntervalMins, store.setMinutesBetweenBackups), in: 0...1440, step: 5) {
+                    countLabel("Minutes between backups", store.backupLimits.minimumIntervalMins)
+                }
+            }
+            Button {
+                Task { await store.createBackupNow() }
+            } label: {
+                HStack {
+                    Label("Create backup now", systemImage: "externaldrive.badge.timemachine")
+                        .foregroundStyle(DS.accent)
+                    if store.backupInProgress {
+                        Spacer()
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(store.backupInProgress)
+            .accessibilityIdentifier("createBackupNow")
+            if let message = store.lastBackupMessage {
+                Text(message)
+                    .font(DS.Typography.caption)
+                    .foregroundStyle(DS.textSecondary)
+            }
+        } header: {
+            sectionHeader("Backups")
+        } footer: {
+            sectionFooter("Anki periodically backs up your collection. Backups are kept on this device; restore one via Import & Export.")
+        }
+        .font(DS.Typography.body)
+        .foregroundStyle(DS.textPrimary)
+    }
+
+    /// A "Title …… N" row used by the backup-limit steppers.
+    private func countLabel(_ title: String, _ count: Int) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text("\(count)")
                 .foregroundStyle(DS.textSecondary)
                 .monospacedDigit()
         }
@@ -280,6 +455,34 @@ struct SettingsView: View {
         Binding(
             get: { AppTheme.from(rawValue: appThemeRaw) },
             set: { appThemeRaw = $0.rawValue }
+        )
+    }
+
+    private var uiSizeBinding: Binding<UISize> {
+        Binding(
+            get: { UISize.from(rawValue: uiSizeRaw) },
+            set: { uiSizeRaw = $0.rawValue }
+        )
+    }
+
+    /// Commits the "Default search text" draft to the engine if it changed,
+    /// avoiding a redundant write (and its preferences reload) when unchanged.
+    private func commitDefaultSearchText() {
+        let trimmed = defaultSearchTextDraft
+        if trimmed != store.editingPrefs.defaultSearchText {
+            store.setDefaultSearchText(trimmed)
+        }
+    }
+
+    /// An `Int` binding for a backup-limit stepper: reads the named field from the
+    /// store's snapshot and routes writes through the given engine-backed setter.
+    private func backupCountBinding(
+        _ keyPath: KeyPath<BackupLimitsPrefs, Int>,
+        _ set: @escaping (Int) -> Void
+    ) -> Binding<Int> {
+        Binding(
+            get: { store.backupLimits[keyPath: keyPath] },
+            set: { set($0) }
         )
     }
 
