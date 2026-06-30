@@ -45,6 +45,14 @@ final class AnkiStore: ObservableObject {
     /// Card id → topic, so the reviewer can label the current card's topic.
     private var topicByCardID: [Int64: String] = [:]
 
+    // MARK: - MCAT coverage map (PRD 7c)
+
+    /// The MCAT outline coverage map (per-section + overall), computed on demand
+    /// by `loadCoverage()` from engine tag searches. Nil until first loaded.
+    @Published var coverage: CoverageReport?
+    /// Message from the most recent failed coverage load, for the CoverageView.
+    @Published var coverageError: String?
+
     /// Whether the backend has an action to undo (drives the Undo control).
     @Published var canUndo = false
     /// Localized name of the next undoable action (e.g. "Answer Card").
@@ -138,6 +146,7 @@ final class AnkiStore: ObservableObject {
             try openDefaultCollection(backend)
             try seedIfNeeded(backend)
             try seedWeakTopicsIfNeeded(backend)
+            try seedMCATCoverageIfNeeded(backend)
             refreshDecks()
             refreshUndo()
             loadLoginState()
@@ -507,6 +516,29 @@ final class AnkiStore: ObservableObject {
         UserDefaults.standard.set(true, forKey: key)
     }
 
+    /// Seeds the representative, real-content MCAT deck (PRD 7c) — ~46 Basic
+    /// cards spread across many (but deliberately not all) `MCATOutline` topics,
+    /// each tagged `MCAT::<Section>::<Topic>` so the coverage map reads as
+    /// partially covered (~48%, under the give-up line). Idempotent behind a
+    /// `UserDefaults` flag, mirroring the other seeders.
+    private func seedMCATCoverageIfNeeded(_ backend: Backend) throws {
+        let key = "seeded_mcat_coverage_v1"
+        if UserDefaults.standard.bool(forKey: key) { return }
+        guard let basic = try backend.notetypeNames().first(where: { $0.name.hasPrefix("Basic") }) else { return }
+
+        let deckID = try backend.createDeck(name: MCATSeedDeck.deckName)
+        for card in MCATSeedDeck.cards {
+            // Resolve the card's outline topic to its tag so cards and taxonomy
+            // never drift; skip a card whose topic id no longer exists.
+            guard let topic = MCATOutline.topic(byID: card.topicID) else { continue }
+            _ = try backend.addNote(
+                notetypeID: basic.id, fields: [card.front, card.back],
+                deckID: deckID, tags: [topic.tag]
+            )
+        }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
     func startReview() {
         // In weak-topics mode the session is primed by startWeakTopicsReview();
         // don't fall back to the normal scheduler order here.
@@ -677,6 +709,25 @@ final class AnkiStore: ObservableObject {
             finishReview()
         } catch {
             status = "Review error: \(error)"
+        }
+    }
+
+    // MARK: - MCAT coverage map
+
+    /// Computes the MCAT coverage map from the engine: one tag search per
+    /// `MCATOutline` topic (`tag:MCAT::Section::Topic` + descendants), rolled up
+    /// per section and overall. Runs off the main actor — ~50 quick SQLite-backed
+    /// searches — so the dashboard never blocks the UI, then publishes the result
+    /// (or an error message) for the CoverageView.
+    func loadCoverage() async {
+        guard let backend else { return }
+        let topics = MCATOutline.coverageTopics
+        do {
+            let report = try await runDetached { try backend.coverage(forTopics: topics) }
+            coverage = report
+            coverageError = nil
+        } catch {
+            coverageError = "Couldn’t compute coverage: \(error)"
         }
     }
 
