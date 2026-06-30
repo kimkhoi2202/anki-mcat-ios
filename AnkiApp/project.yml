@@ -13,6 +13,10 @@ targets:
     platform: iOS
     sources:
       - Sources
+      # Anki's prebuilt SvelteKit web pages (graphs / card-info / deck-options),
+      # bundled as a folder reference so the directory structure is preserved.
+      - path: Resources/sveltekit
+        type: folder
     dependencies:
       - package: AnkiKit
         product: AnkiKit

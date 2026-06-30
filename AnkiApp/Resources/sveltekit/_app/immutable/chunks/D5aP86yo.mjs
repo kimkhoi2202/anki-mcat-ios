@@ -1,0 +1,1 @@
+import{r as i}from"./Bz61hAW0.mjs";function d(a,r){return`<a href="javascript:bridgeCommand('${a}')">${r}</a>`}function n(a,r){window.bridgeCommand(a,r)}i("anki/bridgecommand",{bridgeCommand:n});export{n as a,d as b};

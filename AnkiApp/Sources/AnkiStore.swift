@@ -94,6 +94,11 @@ final class AnkiStore: ObservableObject {
     private var currentCard: Anki_Scheduler_QueuedCards.QueuedCard?
     private var cardShownAt = Date()
 
+    /// The backend handle for the embedded Anki web pages (Statistics, Card Info,
+    /// Deck Options), which call it off the main actor through the `/_anki` bridge.
+    /// `Backend` is `Sendable` and internally thread-safe (mutex-guarded).
+    var sharedBackend: Backend? { backend }
+
     /// The card currently shown in the reviewer, if any — used to open Card Info
     /// from the reviewer's toolbar.
     var currentCardID: Int64? { currentCard?.card.id }
