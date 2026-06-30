@@ -58,6 +58,25 @@ public extension Backend {
         return Int(resp.count)
     }
 
+    /// SchedulerService.setDueDate (13, 19). Reschedules the given cards to a due
+    /// date parsed from an Anki date spec — a number of days from today (`"3"`),
+    /// a random day within a range (`"7-14"`), or `"0"` (due today) — optionally
+    /// with a trailing `!` to also reset the card's interval to that value. Clone
+    /// of AnkiDroid's reviewer "Set due date" (`ReviewerViewModel.setDueDate` →
+    /// `col.sched.setDueDate`). Undoable.
+    ///
+    /// Returns `OpChanges` (the RPC's return type — unlike bury/suspend, it
+    /// carries no affected-card count). The optional `config_key` (used by
+    /// desktop/AnkiDroid only to remember the last-entered value across
+    /// invocations) is left unset; the rescheduling is identical without it.
+    @discardableResult
+    func setDueDate(cardIDs: [Int64], days: String) throws -> Anki_Collection_OpChanges {
+        var req = Anki_Scheduler_SetDueDateRequest()
+        req.cardIds = cardIDs
+        req.days = days
+        return try run(service: 13, method: 19, req, returning: Anki_Collection_OpChanges.self)
+    }
+
     /// TagsService.addNoteTags (45, 7). Adds the given space-separated tag(s) to
     /// the notes. Returns the number of notes changed.
     @discardableResult

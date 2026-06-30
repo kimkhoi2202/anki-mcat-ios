@@ -263,6 +263,16 @@ struct ReviewerView: View {
     @State private var editNoteTarget: ReviewerNoteTarget?
     @State private var showCardMenu = false
     @State private var confirmDelete = false
+    /// Drives the "Set due date" prompt and holds its in-progress text.
+    @State private var showSetDueDate = false
+    @State private var dueDateText = ""
+
+    /// Whether any menu, sheet, or prompt is presented over the reviewer. Drives
+    /// pausing auto-advance so a timer never reveals or grades behind a dialog.
+    private var anyOverlayPresented: Bool {
+        showCardMenu || confirmDelete || showSetDueDate
+            || infoCardID != nil || editNoteTarget != nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -270,13 +280,28 @@ struct ReviewerView: View {
                 allCaughtUp
             } else {
                 cardArea
+                // Per-segment audio replay buttons, shown for cards with audio
+                // when "Show play buttons on cards with audio" is on (Anki's
+                // hide_audio_play_buttons inverted), in addition to autoplay.
+                if store.reviewingPrefs.showPlayButtonsOnAudio, !store.currentSideAudio.isEmpty {
+                    audioPlayButtons
+                }
                 Divider()
                 answerArea
             }
         }
         .navigationTitle("Review")
         .navigationBarTitleDisplayMode(.inline)
-        .onDisappear { store.stopReviewAudio() }
+        .onDisappear {
+            store.stopReviewAudio()
+            // Stop auto-advance so a pending timer can't fire after leaving.
+            store.endAutoAdvanceSession()
+        }
+        // Pause auto-advance whenever a menu/sheet/prompt is up, and resume when
+        // they're all dismissed (so it never grades behind a dialog).
+        .onChange(of: anyOverlayPresented) { presented in
+            store.setAutoAdvancePaused(presented)
+        }
         .toolbar { reviewerToolbar }
         // The card-action menu is a self-presented overlay (rather than a
         // SwiftUI `Menu`) so it can show flag swatches + card/note variants like
@@ -290,7 +315,8 @@ struct ReviewerView: View {
                     onDismiss: { showCardMenu = false },
                     onEdit: { openEditor() },
                     onDelete: { confirmDelete = true },
-                    onCardInfo: { infoCardID = store.currentCardID }
+                    onCardInfo: { infoCardID = store.currentCardID },
+                    onSetDueDate: { dueDateText = ""; showSetDueDate = true }
                 )
             }
         }
@@ -313,6 +339,21 @@ struct ReviewerView: View {
         } message: {
             Text("This permanently deletes the note and all of its cards. You can undo it from the toolbar.")
         }
+        // "Set due date" prompt: an Anki date spec applied to the current card,
+        // mirroring AnkiDroid's set-due-date dialog (accepts a number of days or
+        // a range). Applying advances/refreshes like the other card actions.
+        .alert("Set due date", isPresented: $showSetDueDate) {
+            TextField("e.g. 0, 3, or 7-14", text: $dueDateText)
+                .keyboardType(.numbersAndPunctuation)
+                .autocorrectionDisabled()
+            Button("Set") {
+                store.setReviewerDueDate(dueDateText)
+                dueDateText = ""
+            }
+            Button("Cancel", role: .cancel) { dueDateText = "" }
+        } message: {
+            Text("Show this card again after a number of days (e.g. 3), a random day in a range (7-14), or 0 for today.")
+        }
         .onAppear {
             store.startReview()
             #if DEBUG
@@ -330,6 +371,12 @@ struct ReviewerView: View {
             if ProcessInfo.processInfo.arguments.contains("-typeDemo"), store.typeAnswer != nil {
                 store.typedAnswer = "Tokio"
                 store.reveal()
+            }
+            // Set-due-date demo: open the prompt (pre-filled with a range) for the
+            // set-due screenshot.
+            if ProcessInfo.processInfo.arguments.contains("-demoSetDueDate"), store.currentCardID != nil {
+                dueDateText = "7-14"
+                showSetDueDate = true
             }
             #endif
         }
@@ -349,30 +396,111 @@ struct ReviewerView: View {
             reloadToken: store.replayToken
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Flag + marked indicators, overlaid on the card like AnkiDroid's
-        // on-card flag ribbon and marked star.
-        .overlay(alignment: .top) { indicatorBar }
+        // Flag/auto-advance/marked indicators + remaining counts, overlaid on the
+        // card like AnkiDroid's on-card flag ribbon, marked star, and count.
+        .overlay(alignment: .top) { topBar }
     }
 
+    /// Top-of-card status bar: the flag and an auto-advance indicator (leading),
+    /// the remaining new/learning/review counts (center, when enabled), and the
+    /// marked star (trailing) — overlaid on the card like AnkiDroid's reviewer.
     @ViewBuilder
-    private var indicatorBar: some View {
-        if store.currentFlag != 0 || store.isMarked {
-            HStack {
-                if store.currentFlag != 0 {
-                    Image(systemName: "flag.fill")
-                        .foregroundStyle(ReviewerFlag.color(store.currentFlag))
-                        .accessibilityLabel("Flagged \(ReviewerFlag.name(store.currentFlag))")
-                }
-                Spacer(minLength: 0)
-                if store.isMarked {
-                    Image(systemName: "star.fill")
-                        .foregroundStyle(.yellow)
-                        .accessibilityLabel("Marked")
+    private var topBar: some View {
+        let showCounts = store.reviewingPrefs.showRemainingDueCounts
+        if store.currentFlag != 0 || store.isMarked || showCounts || store.autoAdvanceEnabled {
+            ZStack {
+                if showCounts { remainingCounts }
+                HStack(spacing: DS.Spacing.s) {
+                    if store.currentFlag != 0 {
+                        Image(systemName: "flag.fill")
+                            .foregroundStyle(ReviewerFlag.color(store.currentFlag))
+                            .accessibilityLabel("Flagged \(ReviewerFlag.name(store.currentFlag))")
+                    }
+                    if store.autoAdvanceEnabled {
+                        Image(systemName: "forward.circle")
+                            .foregroundStyle(DS.textSecondary)
+                            .accessibilityLabel("Auto advance on")
+                    }
+                    Spacer(minLength: 0)
+                    if store.isMarked {
+                        Image(systemName: "star.fill")
+                            .foregroundStyle(.yellow)
+                            .accessibilityLabel("Marked")
+                    }
                 }
             }
             .font(.headline)
             .padding(.horizontal, DS.Spacing.l)
             .padding(.top, DS.Spacing.s)
+        }
+    }
+
+    /// AnkiDroid's colored remaining-count readout — new + learning + review — in
+    /// the deck-list colors (new = accent/blue, learning = red, review = green);
+    /// a zero count is muted, like the deck list's count labels.
+    private var remainingCounts: some View {
+        HStack(spacing: DS.Spacing.xs) {
+            Text("\(store.newCount)").foregroundStyle(countColor(store.newCount, DS.accent))
+            Text("+").foregroundStyle(DS.textSecondary)
+            Text("\(store.learningCount)").foregroundStyle(countColor(store.learningCount, DS.again))
+            Text("+").foregroundStyle(DS.textSecondary)
+            Text("\(store.reviewCount)").foregroundStyle(countColor(store.reviewCount, DS.easy))
+        }
+        .font(DS.Typography.caption.weight(.semibold))
+        .monospacedDigit()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "\(store.newCount) new, \(store.learningCount) learning, \(store.reviewCount) to review"
+        )
+    }
+
+    private func countColor(_ count: Int, _ color: Color) -> Color {
+        count == 0 ? DS.textSecondary : color
+    }
+
+    /// A compact row of replay buttons — one per audio segment on the side shown
+    /// — so the user can replay a specific `[sound:]`/`{{tts}}` clip, in addition
+    /// to autoplay. Clone of AnkiDroid's per-audio play buttons on cards with
+    /// audio (shown only when "Show play buttons on cards with audio" is on).
+    private var audioPlayButtons: some View {
+        HStack(spacing: DS.Spacing.s) {
+            ForEach(Array(store.currentSideAudio.enumerated()), id: \.offset) { index, segment in
+                Button {
+                    store.playAudioSegment(at: index)
+                } label: {
+                    HStack(spacing: DS.Spacing.xs) {
+                        Image(systemName: audioIcon(segment))
+                        if store.currentSideAudio.count > 1 {
+                            Text("\(index + 1)").monospacedDigit()
+                        }
+                    }
+                    .font(DS.Typography.caption.weight(.semibold))
+                    .foregroundStyle(DS.accent)
+                    .padding(.horizontal, DS.Spacing.m)
+                    .frame(minHeight: 34)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
+                            .strokeBorder(DS.accent, lineWidth: 1)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(
+                    store.currentSideAudio.count > 1 ? "Play audio \(index + 1)" : "Play audio"
+                )
+            }
+        }
+        .padding(.horizontal, DS.Spacing.l)
+        .padding(.vertical, DS.Spacing.s)
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Icon for an audio segment's replay button: a play glyph for recorded
+    /// `[sound:]` clips, a speaker glyph for synthesized `{{tts}}` text.
+    private func audioIcon(_ segment: CardAudio) -> String {
+        switch segment {
+        case .sound: return "play.circle.fill"
+        case .tts: return "speaker.wave.2.circle.fill"
         }
     }
 
@@ -549,6 +677,7 @@ private struct CardActionMenu: View {
     let onEdit: () -> Void
     let onDelete: () -> Void
     let onCardInfo: () -> Void
+    let onSetDueDate: () -> Void
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -587,7 +716,13 @@ private struct CardActionMenu: View {
             row("Bury note", systemImage: "rectangle.stack.fill") { onDismiss(); store.buryNote() }
             row("Suspend card", systemImage: "pause.circle") { onDismiss(); store.suspendCard() }
             row("Suspend note", systemImage: "pause.circle.fill") { onDismiss(); store.suspendNote() }
+            row("Set due date", systemImage: "calendar") { onDismiss(); onSetDueDate() }
             divider
+            // Auto Advance is a checkable toggle (kept open like Mark), mirroring
+            // AnkiDroid's reviewer "Auto Advance" menu item.
+            toggleRow("Auto advance", systemImage: "forward.circle", isOn: store.autoAdvanceEnabled) {
+                store.autoAdvanceEnabled.toggle()
+            }
             row("Replay audio", systemImage: "speaker.wave.2") { onDismiss(); store.replayAudio() }
             row("Card info", systemImage: "info.circle") { onDismiss(); onCardInfo() }
             divider
@@ -647,6 +782,38 @@ private struct CardActionMenu: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// A checkable menu row (the Auto Advance toggle), with a trailing checkmark
+    /// when `isOn`. Tapping flips the state without dismissing the menu, like the
+    /// Mark/Unmark row.
+    private func toggleRow(
+        _ title: String,
+        systemImage: String,
+        isOn: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: DS.Spacing.m) {
+                Image(systemName: systemImage)
+                    .frame(width: 24)
+                    .foregroundStyle(DS.accent)
+                Text(title)
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+                Spacer(minLength: 0)
+                if isOn {
+                    Image(systemName: "checkmark")
+                        .font(DS.Typography.body.weight(.semibold))
+                        .foregroundStyle(DS.accent)
+                }
+            }
+            .padding(.horizontal, DS.Spacing.l)
+            .frame(minHeight: DS.minTapTarget)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isOn ? [.isButton, .isSelected] : .isButton)
     }
 }
 

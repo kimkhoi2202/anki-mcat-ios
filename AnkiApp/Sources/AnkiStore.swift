@@ -35,6 +35,14 @@ final class AnkiStore: ObservableObject {
     @Published var showingAnswer = false
     @Published var reviewDone = false
 
+    /// Remaining new / learning / review counts for the deck being studied, taken
+    /// from the scheduler queue (`QueuedCards.newCount`/`learningCount`/
+    /// `reviewCount`). Shown during review when `showRemainingDueCounts` is on,
+    /// mirroring AnkiDroid's colored `new+learn+review` count in the reviewer.
+    @Published var newCount = 0
+    @Published var learningCount = 0
+    @Published var reviewCount = 0
+
     /// Current card's flag color (0 = none, 1...7 = red/orange/green/blue/pink/
     /// turquoise/purple). Drives the on-card flag indicator and the menu's
     /// current-flag checkmark, updated in place by the flag action.
@@ -114,6 +122,56 @@ final class AnkiStore: ObservableObject {
     /// Whether `reviewingPrefs` was successfully loaded from the engine (drives
     /// whether the Settings screen shows the reviewing toggles).
     @Published private(set) var preferencesAvailable = false
+
+    // MARK: - Auto-advance state (app-local)
+    //
+    // Anki's "Auto Advance": after the question shows for N seconds auto-reveal,
+    // and after the answer shows for M seconds auto-answer "Good". In Anki these
+    // settings (`seconds_to_show_question`/`seconds_to_show_answer`) live in the
+    // *deck config*, not the global `Reviewing` preferences message — which has no
+    // auto-advance fields — so they're persisted app-locally in `UserDefaults`
+    // (via the keys below) rather than through the engine prefs path. Default off,
+    // so review never auto-grades unless the user explicitly enables it.
+
+    /// Whether auto-advance is enabled (the reviewer/Settings toggle). Persisted;
+    /// toggling it cancels or (re)schedules the timer for the current side.
+    @Published var autoAdvanceEnabled = false {
+        didSet {
+            UserDefaults.standard.set(autoAdvanceEnabled, forKey: Self.autoAdvanceEnabledKey)
+            if autoAdvanceEnabled { scheduleAutoAdvanceForCurrentSide() } else { cancelAutoAdvance() }
+        }
+    }
+    /// Seconds to show the question before auto-revealing (0 disables the
+    /// question-side timer, as in AnkiDroid). Persisted; the Settings stepper
+    /// drives it. (Uses the explicit type name in the initializer — `Self` isn't
+    /// allowed in a stored-property default.)
+    @Published var autoAdvanceSecondsQuestion = AnkiStore.defaultAutoAdvanceSeconds {
+        didSet { UserDefaults.standard.set(autoAdvanceSecondsQuestion, forKey: Self.autoAdvanceQuestionKey) }
+    }
+    /// Seconds to show the answer before auto-answering "Good" (0 disables the
+    /// answer-side timer). Persisted; the Settings stepper drives it.
+    @Published var autoAdvanceSecondsAnswer = AnkiStore.defaultAutoAdvanceSeconds {
+        didSet { UserDefaults.standard.set(autoAdvanceSecondsAnswer, forKey: Self.autoAdvanceAnswerKey) }
+    }
+
+    private static let autoAdvanceEnabledKey = "autoAdvanceEnabled"
+    private static let autoAdvanceQuestionKey = "autoAdvanceSecondsQuestion"
+    private static let autoAdvanceAnswerKey = "autoAdvanceSecondsAnswer"
+    /// Default seconds for each side when the user first enables auto-advance.
+    /// Anki's *per-deck* default is 0 (disabled); since this is a single global
+    /// app toggle, a non-zero default makes turning it on immediately useful
+    /// (still adjustable, and 0 disables a side).
+    static let defaultAutoAdvanceSeconds = 10
+
+    /// Pending auto-advance timer (reveal or auto-"Good"); cancelled on any manual
+    /// interaction, side/card change, overlay, or leaving the reviewer.
+    private var autoAdvanceTask: Task<Void, Never>?
+    /// True only while the reviewer screen is on top, so a timer never fires after
+    /// the user has navigated away (set by the reviewer's appear/disappear).
+    private var reviewerActive = false
+    /// True while a menu/sheet/prompt is over the reviewer, so auto-advance pauses
+    /// instead of grading behind a dialog (driven by the reviewer view).
+    private var autoAdvancePaused = false
 
     /// Auth + media USN captured when a full-sync conflict is raised, reused once
     /// the user picks a resolution.
@@ -221,7 +279,19 @@ final class AnkiStore: ObservableObject {
         loadPreferredSyncServer()
         loadLoginState()
         loadPreferences()
+        loadAutoAdvancePrefs()
         status = "Engine OK"
+    }
+
+    /// Loads the persisted auto-advance settings (enabled + per-side seconds) from
+    /// `UserDefaults`. Read once at boot; the published setters keep them in sync.
+    private func loadAutoAdvancePrefs() {
+        let defaults = UserDefaults.standard
+        autoAdvanceEnabled = defaults.bool(forKey: Self.autoAdvanceEnabledKey)
+        autoAdvanceSecondsQuestion = defaults.object(forKey: Self.autoAdvanceQuestionKey) as? Int
+            ?? Self.defaultAutoAdvanceSeconds
+        autoAdvanceSecondsAnswer = defaults.object(forKey: Self.autoAdvanceAnswerKey) as? Int
+            ?? Self.defaultAutoAdvanceSeconds
     }
 
     /// Opens (or reopens) the collection at the app's standard Documents paths.
@@ -281,6 +351,9 @@ final class AnkiStore: ObservableObject {
             currentIntervals = []
             currentFlag = 0
             isMarked = false
+            newCount = 0
+            learningCount = 0
+            reviewCount = 0
             currentCard = nil
             loadNext()
         } catch {
@@ -746,7 +819,24 @@ final class AnkiStore: ObservableObject {
     }
 
     func startReview() {
-        if currentQuestion.isEmpty && !reviewDone { loadNext() }
+        // The reviewer is now on top; allow auto-advance timers to run (they're
+        // suppressed whenever the reviewer isn't the active screen).
+        reviewerActive = true
+        if currentQuestion.isEmpty && !reviewDone {
+            loadNext()
+        } else {
+            // Returning to an already-loaded card (e.g. back from a push): resume
+            // auto-advance for whichever side is currently shown.
+            scheduleAutoAdvanceForCurrentSide()
+        }
+    }
+
+    /// The reviewer left the screen: stop auto-advance so a pending timer can't
+    /// reveal or grade a card after the user has navigated away. Audio is stopped
+    /// separately by `stopReviewAudio()`.
+    func endAutoAdvanceSession() {
+        reviewerActive = false
+        cancelAutoAdvance()
     }
 
     func loadNext() {
@@ -754,6 +844,11 @@ final class AnkiStore: ObservableObject {
         showingAnswer = false
         do {
             let q = try backend.queuedCards()
+            // Surface the queue's remaining counts (honored by the reviewer's
+            // remaining-count display, gated on `showRemainingDueCounts`).
+            newCount = Int(q.newCount)
+            learningCount = Int(q.learningCount)
+            reviewCount = Int(q.reviewCount)
             guard let first = q.cards.first else {
                 finishReview()
                 return
@@ -800,6 +895,8 @@ final class AnkiStore: ObservableObject {
         refreshUndo()
         // Autoplay the question side's audio, as Anki does on showing a card.
         cardAudioPlayer.play(currentQuestionAudio, mediaFolder: mediaFolderURL)
+        // Start the auto-advance question timer for the freshly shown card.
+        scheduleAutoAdvanceForCurrentSide()
     }
 
     /// Clears reviewer state to the "all caught up" end-of-session screen.
@@ -812,9 +909,14 @@ final class AnkiStore: ObservableObject {
         currentIntervals = []
         currentFlag = 0
         isMarked = false
+        newCount = 0
+        learningCount = 0
+        reviewCount = 0
         currentQuestionAudio = []
         currentAnswerAudio = []
         cardAudioPlayer.stop()
+        // No card to advance from, so stop any pending auto-advance timer.
+        cancelAutoAdvance()
         typeAnswer = nil
         typedAnswer = ""
         refreshUndo()
@@ -828,6 +930,9 @@ final class AnkiStore: ObservableObject {
         currentAnswer = renderedAnswer()
         // Autoplay the answer side's audio, as Anki does on flipping to the back.
         cardAudioPlayer.play(currentAnswerAudio, mediaFolder: mediaFolderURL)
+        // Switch the auto-advance timer to the answer side (cancels the question
+        // timer; whether triggered by the user or by auto-reveal).
+        scheduleAutoAdvanceForCurrentSide()
     }
 
     /// Builds the answer HTML to display from `pristineAnswer`: substitutes the
@@ -892,11 +997,19 @@ final class AnkiStore: ObservableObject {
     }
 
     /// Returns from the answer back to the question (the "tap center = flip"
-    /// gesture toggling A → Q). Cheap local state flip; no engine call.
-    func flipBack() { showingAnswer = false }
+    /// gesture toggling A → Q). Cheap local state flip; no engine call. Resumes
+    /// the auto-advance question timer for the now-shown question.
+    func flipBack() {
+        showingAnswer = false
+        scheduleAutoAdvanceForCurrentSide()
+    }
 
     func rate(_ rating: Anki_Scheduler_CardAnswer.Rating) {
         guard let backend, let card = currentCard else { return }
+        // Acting on the card: drop any pending auto-advance timer so a failed
+        // answer can't leave one behind to re-grade (a successful answer reloads
+        // the next card, which reschedules from scratch).
+        cancelAutoAdvance()
         // Clamp to non-negative: if the wall clock moves backward (NTP/manual
         // change) the elapsed product is negative, and `UInt32(negativeDouble)`
         // is a fatal trap. Cap at 60s as Anki does.
@@ -1050,19 +1163,98 @@ final class AnkiStore: ObservableObject {
         }
     }
 
-    /// Replays the current side's audio by forcing the card WebView to reload
-    /// (restarting any embedded media). Clone of AnkiDroid's `replayMedia` in
-    /// spirit; a native `[sound:]`/AV-tag player is deferred.
+    /// Replays the current side's audio in sequence (clone of AnkiDroid's
+    /// `replayMedia` / Anki's "Replay audio"), restarting from the first clip.
     func replayAudio() {
-        cardAudioPlayer.play(
-            showingAnswer ? currentAnswerAudio : currentQuestionAudio,
-            mediaFolder: mediaFolderURL
-        )
+        cardAudioPlayer.play(currentSideAudio, mediaFolder: mediaFolderURL)
+    }
+
+    /// The audio segments of the side currently shown (question or answer), in
+    /// play order. Backs the per-segment replay buttons (gated on
+    /// `showPlayButtonsOnAudio`) so the user can replay one specific
+    /// `[sound:]`/`{{tts}}` clip. Empty when the current side has no audio.
+    var currentSideAudio: [CardAudio] {
+        showingAnswer ? currentAnswerAudio : currentQuestionAudio
+    }
+
+    /// Plays a single audio segment of the current side by index (one of the
+    /// per-segment replay buttons), in addition to the autoplay on show/reveal.
+    /// Out-of-range indexes are ignored. Clone of AnkiDroid's per-`[sound:]` play
+    /// buttons on cards with audio.
+    func playAudioSegment(at index: Int) {
+        cardAudioPlayer.play(oneOf: currentSideAudio, index: index, mediaFolder: mediaFolderURL)
     }
 
     /// Stops any card audio (e.g. when leaving the reviewer).
     func stopReviewAudio() {
         cardAudioPlayer.stop()
+    }
+
+    /// Reschedules the current card from an Anki due-date spec (a number of days
+    /// like `"3"`, a range like `"7-14"`, or `"0"` for today), then advances and
+    /// refreshes like the other card actions. Clone of AnkiDroid's reviewer "Set
+    /// due date" (`ReviewerViewModel.setDueDate`). Undoable via the toolbar.
+    /// A blank spec is a no-op (the prompt was dismissed without input).
+    func setReviewerDueDate(_ days: String) {
+        guard let backend, let cardID = currentCardID else { return }
+        let spec = days.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !spec.isEmpty else { return }
+        do {
+            _ = try backend.setDueDate(cardIDs: [cardID], days: spec)
+            // Rescheduling typically moves the card out of today's queue, so
+            // advance to the next card and refresh counts, as bury/suspend do.
+            afterCardRemovedFromQueue()
+        } catch {
+            status = "Set due date error: \(error)"
+        }
+    }
+
+    // MARK: - Auto-advance scheduling
+
+    /// Pauses (or resumes) auto-advance while a menu, sheet, or prompt is over the
+    /// reviewer, so a timer never reveals or grades behind a dialog. The reviewer
+    /// view sets this from whether any overlay is presented; resuming reschedules
+    /// the timer for the side currently shown.
+    func setAutoAdvancePaused(_ paused: Bool) {
+        autoAdvancePaused = paused
+        if paused { cancelAutoAdvance() } else { scheduleAutoAdvanceForCurrentSide() }
+    }
+
+    /// Cancels any pending auto-advance timer.
+    func cancelAutoAdvance() {
+        autoAdvanceTask?.cancel()
+        autoAdvanceTask = nil
+    }
+
+    /// (Re)schedules the auto-advance action for the side currently shown, if
+    /// auto-advance is on, the reviewer is active and not paused, a card is shown,
+    /// and that side's timer is non-zero. After the question shows for
+    /// `autoAdvanceSecondsQuestion` it auto-reveals; after the answer shows for
+    /// `autoAdvanceSecondsAnswer` it auto-answers "Good" — an undoable review, and
+    /// only ever when the user has explicitly enabled auto-advance, so a card is
+    /// never silently graded otherwise. Mirrors Anki's `AutoAdvance.onShowQuestion`
+    /// / `onShowAnswer` (question action = show answer; answer action = answer Good).
+    func scheduleAutoAdvanceForCurrentSide() {
+        cancelAutoAdvance()
+        guard autoAdvanceEnabled, reviewerActive, !autoAdvancePaused,
+              !reviewDone, currentCard != nil else { return }
+        let onAnswer = showingAnswer
+        let seconds = onAnswer ? autoAdvanceSecondsAnswer : autoAdvanceSecondsQuestion
+        guard seconds > 0 else { return }
+        autoAdvanceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            // The side/card must be unchanged since scheduling, and auto-advance
+            // still active — otherwise a state change raced the timer.
+            guard self.autoAdvanceEnabled, self.reviewerActive, !self.autoAdvancePaused,
+                  !self.reviewDone, self.showingAnswer == onAnswer, self.currentCard != nil
+            else { return }
+            if onAnswer {
+                self.rate(.good)
+            } else {
+                self.reveal()
+            }
+        }
     }
 
     /// Shared tail for bury/suspend/delete: the current card has left the queue,
@@ -1225,6 +1417,38 @@ final class AnkiStore: ObservableObject {
         }
         refreshDecks()
         refreshUndo()
+    }
+
+    /// Debug-only screenshot hooks for the reviewer features. `-demoRemainingCounts`
+    /// turns on the remaining-count display; `-demoAudioButtons` turns on the
+    /// per-segment play buttons and seeds a `[sound:]` card in its own deck so it
+    /// is the first card shown (the file itself can be absent — only the AV tag is
+    /// needed for the button to render). Excluded from release builds.
+    func prepareReviewerFeatureDemosIfRequested() {
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("-demoRemainingCounts") {
+            setShowRemainingDueCounts(true)
+        }
+        if args.contains("-demoAudioButtons") {
+            setShowPlayButtonsOnAudio(true)
+            guard let backend else { return }
+            do {
+                let deckID = try backend.createDeck(name: "Audio Demo")
+                let notetypes = try backend.notetypeNames()
+                if let basic = notetypes.first(where: {
+                    $0.name.hasPrefix("Basic") && !$0.name.lowercased().contains("type")
+                }) {
+                    _ = try backend.addNote(
+                        notetypeID: basic.id,
+                        fields: ["Listen and repeat [sound:demo.mp3]", "Bonjour"],
+                        deckID: deckID
+                    )
+                }
+                selectDeck(id: deckID)
+            } catch {
+                status = "Audio demo seed error: \(error)"
+            }
+        }
     }
     #endif
 

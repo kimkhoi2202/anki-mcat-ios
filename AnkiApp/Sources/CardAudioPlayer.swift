@@ -38,6 +38,15 @@ final class CardAudioPlayer: NSObject, AVAudioPlayerDelegate, AVSpeechSynthesize
         advance()
     }
 
+    /// Plays a single item from `items` by index — the per-segment replay buttons
+    /// (so the user can replay one specific `[sound:]`/`{{tts}}` clip) — by
+    /// queueing just that one item. Out-of-range indexes are ignored. Cancels any
+    /// current playback first, like `play(_:mediaFolder:)`.
+    func play(oneOf items: [CardAudio], index: Int, mediaFolder: URL) {
+        guard items.indices.contains(index) else { return }
+        play([items[index]], mediaFolder: mediaFolder)
+    }
+
     /// Stops all playback and releases the audio session, so other apps' audio
     /// is no longer ducked once the user leaves the reviewer (or the session
     /// finishes). The next `play()` reconfigures and reactivates the session.

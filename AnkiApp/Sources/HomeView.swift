@@ -204,6 +204,15 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInReviewMenu") {
                 goReview = true
             }
+            // Reviewer feature demos: enable the relevant preference (and, for
+            // audio, seed a [sound:] card in its own deck) then open the reviewer.
+            // ReviewerView reads -demoSetDueDate to open the set-due prompt.
+            if ProcessInfo.processInfo.arguments.contains("-demoRemainingCounts")
+                || ProcessInfo.processInfo.arguments.contains("-demoAudioButtons")
+                || ProcessInfo.processInfo.arguments.contains("-demoSetDueDate") {
+                store.prepareReviewerFeatureDemosIfRequested()
+                goReview = true
+            }
             if ProcessInfo.processInfo.arguments.contains("-startInSettings") {
                 goSettings = true
             }

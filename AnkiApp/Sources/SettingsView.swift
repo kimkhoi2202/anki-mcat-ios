@@ -25,6 +25,7 @@ struct SettingsView: View {
             serverSection
             appearanceSection
             reviewingSection
+            autoAdvanceSection
             dataSection
             aboutSection
         }
@@ -179,6 +180,44 @@ struct SettingsView: View {
         }
         .font(DS.Typography.body)
         .foregroundStyle(DS.textPrimary)
+    }
+
+    // MARK: - Auto Advance (app-local)
+
+    /// Anki's "Auto Advance". These settings live in the deck config in Anki (not
+    /// the global Reviewing preferences message), so they're stored on this device
+    /// via the store's `UserDefaults`-backed properties rather than the engine.
+    private var autoAdvanceSection: some View {
+        Section {
+            Toggle("Auto advance", isOn: $store.autoAdvanceEnabled)
+            if store.autoAdvanceEnabled {
+                Stepper(value: $store.autoAdvanceSecondsQuestion, in: 0...120) {
+                    secondsLabel("Seconds to show question", store.autoAdvanceSecondsQuestion)
+                }
+                Stepper(value: $store.autoAdvanceSecondsAnswer, in: 0...120) {
+                    secondsLabel("Seconds to show answer", store.autoAdvanceSecondsAnswer)
+                }
+            }
+        } header: {
+            sectionHeader("Auto Advance")
+        } footer: {
+            sectionFooter(
+                "Reveals the answer after the question shows for its seconds, then answers “Good” after the answer shows for its seconds. Set a side to 0 to disable it. Stored on this device."
+            )
+        }
+        .font(DS.Typography.body)
+        .foregroundStyle(DS.textPrimary)
+    }
+
+    /// A "Title …… Ns" row used by the auto-advance steppers.
+    private func secondsLabel(_ title: String, _ seconds: Int) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text("\(seconds)s")
+                .foregroundStyle(DS.textSecondary)
+                .monospacedDigit()
+        }
     }
 
     // MARK: - Data (import / export)

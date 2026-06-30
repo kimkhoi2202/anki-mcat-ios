@@ -1104,6 +1104,28 @@ final class AnkiKitTests: XCTestCase {
                        "unmarking should remove the 'marked' tag")
     }
 
+    /// `setDueDate` (SchedulerService 13, 19) reschedules a card from an Anki
+    /// date spec — the reviewer's "Set due date". Setting a new card to "3" days
+    /// converts it to a review due in the future, so it leaves today's queue; the
+    /// op is undoable, and undo restores it to the queue. (The RPC returns
+    /// `OpChanges`, not a count.) Mirrors AnkiDroid's set-due-date action.
+    func testSetDueDateReschedulesAndIsUndoable() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["Due", "Date"], deckID: 1)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "").first, "the added card should exist")
+        XCTAssertFalse(try backend.queuedCards().cards.isEmpty, "the new card starts queued for today")
+
+        _ = try backend.setDueDate(cardIDs: [cardID], days: "3")
+        XCTAssertFalse(try backend.undoStatus().undo.isEmpty, "set due date should be undoable")
+        XCTAssertTrue(try backend.queuedCards().cards.isEmpty,
+                      "a card rescheduled 3 days out should leave today's queue")
+
+        _ = try backend.undo()
+        XCTAssertFalse(try backend.queuedCards().cards.isEmpty,
+                       "undo should restore the card to today's queue")
+    }
+
     /// `removeNotes(noteIDs:)` deletes the note (and its cards) so a follow-up
     /// search no longer finds it — the reviewer's Delete-note action, which knows
     /// the current card's note id.
