@@ -210,6 +210,12 @@ struct CardWebView: UIViewRepresentable {
           .card { padding: 28px; }
           /* Keep media within the viewport (cf. AnkiDroid flashcard.css). */
           img, video { max-width: 100%; height: auto; }
+          /* Type-in-the-answer diff styling (Anki reviewer.scss). */
+          #typeans { width: 100%; box-sizing: border-box; line-height: 1.75; }
+          code#typeans { white-space: pre-wrap; font-variant-ligatures: none; }
+          .typeGood { background: #afa; color: black; }
+          .typeBad { background: #faa; color: black; }
+          .typeMissed { background: #ccc; color: black; }
           /* Night-mode fallback so default notetypes stay legible in the dark.
              Mirrors desktop reviewer.scss overriding the default `.card`; placed
              before the notetype CSS so a notetype's own night styling wins. */
@@ -298,6 +304,12 @@ struct ReviewerView: View {
                     showCardMenu = true
                 }
             }
+            // Type-in-the-answer demo: type a near-miss answer and reveal so the
+            // colored diff can be captured for verification.
+            if ProcessInfo.processInfo.arguments.contains("-typeDemo"), store.typeAnswer != nil {
+                store.typedAnswer = "Tokio"
+                store.reveal()
+            }
             #endif
         }
     }
@@ -354,10 +366,21 @@ struct ReviewerView: View {
             }
             .padding()
         } else {
-            Button(action: store.reveal) {
-                Text("Show Answer").frame(maxWidth: .infinity)
+            VStack(spacing: DS.Spacing.s) {
+                if store.typeAnswer != nil {
+                    TextField("Type the answer", text: $store.typedAnswer)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .submitLabel(.done)
+                        .onSubmit { store.reveal() }
+                        .accessibilityLabel("Type the answer")
+                }
+                Button(action: store.reveal) {
+                    Text("Show Answer").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.dsPrimary)
             }
-            .buttonStyle(.dsPrimary)
             .padding()
         }
     }

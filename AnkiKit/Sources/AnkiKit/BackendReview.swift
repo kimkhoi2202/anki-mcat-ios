@@ -68,6 +68,17 @@ public extension Backend {
         return (cleaned, audio)
     }
 
+    /// CardRenderingService.compareAnswer (27, 15). Returns the type-in-the-answer
+    /// diff HTML comparing the user's `typed` answer to the `expected` field value
+    /// (Anki's `<code id=typeans>` with typeGood/typeBad/typeMissed spans).
+    func compareAnswer(expected: String, typed: String, combining: Bool) throws -> String {
+        var req = Anki_CardRendering_CompareAnswerRequest()
+        req.expected = expected
+        req.provided = typed
+        req.combining = combining
+        return try run(service: 27, method: 15, req, returning: Anki_Generic_String.self).val
+    }
+
     /// SchedulerService.describeNextStates (13, 24).
     ///
     /// Given a queued card's precomputed `states`, returns one human-readable

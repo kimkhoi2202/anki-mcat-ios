@@ -32,11 +32,24 @@ final class AnkiStore: ObservableObject {
     /// Whether the current card's note is marked (carries the `marked` tag).
     /// Drives the on-card star indicator and the Mark/Unmark menu item.
     @Published var isMarked = false
-    /// Bumped by "Replay audio" to force the card WebView to reload the current
-    /// side, restarting any embedded media. (A native `[sound:]`/AV-tag audio
-    /// player is not yet implemented, so this is a best-effort replay of media
-    /// embedded in the card template.)
+    /// Legacy reload token (no longer bumped now that audio plays natively via
+    /// `CardAudioPlayer`); kept so the card WebView's `reloadToken` input stays
+    /// wired without behavior change.
     @Published var replayToken = 0
+
+    /// A card's type-in-the-answer target: the field to compare against and
+    /// whether the diff treats combining characters as separate (Anki's `nc`
+    /// variant sets `combining = false`).
+    struct TypeAnswerField: Equatable, Sendable {
+        let fieldName: String
+        let combining: Bool
+    }
+
+    /// The current card's type-in-the-answer field, if its template uses
+    /// `{{type:Field}}`; drives the native answer input and the back-side diff.
+    @Published var typeAnswer: TypeAnswerField?
+    /// The user's typed answer for a `{{type:}}` card.
+    @Published var typedAnswer: String = ""
 
     /// Whether the backend has an action to undo (drives the Undo control).
     @Published var canUndo = false
@@ -447,7 +460,22 @@ final class AnkiStore: ObservableObject {
     private func seedIfNeeded(_ backend: Backend) throws {
         let key = "seeded_v1"
         if UserDefaults.standard.bool(forKey: key) { return }
-        guard let basic = try backend.notetypeNames().first(where: { $0.name.hasPrefix("Basic") }) else { return }
+        let notetypes = try backend.notetypeNames()
+        // A "Basic (type in the answer)" card first, so the type-in flow is easy
+        // to find when reviewing the demo deck.
+        if let typeNotetype = notetypes.first(where: { $0.name.lowercased().contains("type in the answer") }) {
+            _ = try backend.addNote(
+                notetypeID: typeNotetype.id,
+                fields: ["What is the capital of Japan?", "Tokyo"],
+                deckID: 1
+            )
+        }
+        guard let basic = notetypes.first(where: {
+            $0.name.hasPrefix("Basic") && !$0.name.lowercased().contains("type")
+        }) else {
+            UserDefaults.standard.set(true, forKey: key)
+            return
+        }
         let cards: [(String, String)] = [
             ("What is the capital of France?", "Paris"),
             ("What is 2 + 2?", "4"),
@@ -492,11 +520,15 @@ final class AnkiStore: ObservableObject {
             ?? (text: rendered.question, audio: [])
         let a = (try? backend.extractAudio(text: rendered.answer, questionSide: false))
             ?? (text: rendered.answer, audio: [])
-        currentQuestion = q.text
-        currentAnswer = a.text
         currentCSS = rendered.css
         currentQuestionAudio = q.audio
         currentAnswerAudio = a.audio
+        // Type-in-the-answer: a [[type:Field]] placeholder means a native input
+        // on the front and the diff on the back (clone of Anki's typeans flow).
+        typeAnswer = Self.parseTypeField(in: q.text)
+        typedAnswer = ""
+        currentQuestion = Self.stripTypePlaceholders(q.text)
+        currentAnswer = a.text
         // One interval label per button: [again, hard, good, easy].
         // Ignore an unexpected shape rather than mislabeling buttons.
         let intervals = (try? backend.describeNextStates(queued.states)) ?? []
@@ -524,13 +556,70 @@ final class AnkiStore: ObservableObject {
         currentQuestionAudio = []
         currentAnswerAudio = []
         cardAudioPlayer.stop()
+        typeAnswer = nil
+        typedAnswer = ""
         refreshUndo()
     }
 
     func reveal() {
         showingAnswer = true
+        if let typeAnswer { applyTypeAnswerDiff(typeAnswer) }
         // Autoplay the answer side's audio, as Anki does on flipping to the back.
         cardAudioPlayer.play(currentAnswerAudio, mediaFolder: mediaFolderURL)
+    }
+
+    /// Computes the type-in-the-answer diff (typed vs the expected field value)
+    /// and substitutes it into the answer HTML where the `[[type:…]]` placeholder
+    /// is, mirroring Anki's reviewer.
+    private func applyTypeAnswerDiff(_ field: TypeAnswerField) {
+        guard let backend, let card = currentCard else { return }
+        let expected = expectedFieldValue(field.fieldName, noteID: card.card.noteID) ?? ""
+        let diff = (try? backend.compareAnswer(
+            expected: expected, typed: typedAnswer, combining: field.combining
+        )) ?? ""
+        guard !diff.isEmpty else {
+            currentAnswer = Self.stripTypePlaceholders(currentAnswer)
+            return
+        }
+        // Escape regex-replacement metacharacters so the diff HTML inserts literally.
+        let safe = diff
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "$", with: "\\$")
+        currentAnswer = currentAnswer.replacingOccurrences(
+            of: "\\[\\[type:[^\\]]*\\]\\]", with: safe, options: .regularExpression
+        )
+    }
+
+    /// The value of a note's field by name (notetype field order aligns with the
+    /// note's field values), used as the expected type-in answer.
+    private func expectedFieldValue(_ fieldName: String, noteID: Int64) -> String? {
+        guard let backend,
+              let note = try? backend.getNote(noteID: noteID),
+              let names = try? backend.notetypeFields(notetypeID: note.notetypeID),
+              let index = names.firstIndex(of: fieldName),
+              index < note.fields.count
+        else { return nil }
+        return note.fields[index]
+    }
+
+    /// Parses the first `[[type:Field]]` / `[[type:nc:Field]]` placeholder; cloze
+    /// type-in answers are not yet supported (returns nil).
+    static func parseTypeField(in html: String) -> TypeAnswerField? {
+        guard let range = html.range(of: "\\[\\[type:[^\\]]*\\]\\]", options: .regularExpression)
+        else { return nil }
+        var inner = html[range].dropFirst(7).dropLast(2)  // strip "[[type:" … "]]"
+        if inner.hasPrefix("cloze:") { return nil }
+        var combining = true
+        if inner.hasPrefix("nc:") { combining = false; inner = inner.dropFirst(3) }
+        let name = String(inner)
+        return name.isEmpty ? nil : TypeAnswerField(fieldName: name, combining: combining)
+    }
+
+    /// Removes any `[[type:…]]` placeholders from rendered HTML for display.
+    static func stripTypePlaceholders(_ html: String) -> String {
+        html.replacingOccurrences(
+            of: "\\[\\[type:[^\\]]*\\]\\]", with: "", options: .regularExpression
+        )
     }
 
     /// Returns from the answer back to the question (the "tap center = flip"
@@ -655,11 +744,13 @@ final class AnkiStore: ObservableObject {
                 ?? (text: rendered.question, audio: [])
             let a = (try? backend.extractAudio(text: rendered.answer, questionSide: false))
                 ?? (text: rendered.answer, audio: [])
-            currentQuestion = q.text
-            currentAnswer = a.text
             currentCSS = rendered.css
             currentQuestionAudio = q.audio
             currentAnswerAudio = a.audio
+            typeAnswer = Self.parseTypeField(in: q.text)
+            typedAnswer = ""
+            currentQuestion = Self.stripTypePlaceholders(q.text)
+            currentAnswer = a.text
             if let fresh = try? backend.getCard(cardID: card.card.id) {
                 currentFlag = Int(fresh.flags)
             }
