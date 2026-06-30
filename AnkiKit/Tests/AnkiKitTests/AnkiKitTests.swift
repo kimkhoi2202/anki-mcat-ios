@@ -864,4 +864,82 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertGreaterThan(weakTopic.weakness, strongTopic.weakness,
                              "the weak topic summary must report higher weakness")
     }
+
+    // MARK: - Coverage map (PRD 7c)
+
+    /// `coverage(forTopics:)` reports, per topic and overall, which outline
+    /// topics have >= 1 card. Seeding two of four topics (one with two cards, one
+    /// via a *descendant* subtag) leaves the other two uncovered, so coverage is
+    /// exactly 50%: it proves the engine tag search, the descendant match, the
+    /// per-section rollups, and the give-up threshold. Drives the same RPC the
+    /// app's CoverageView uses (`SearchService.searchCards`, 29/1).
+    func testCoverageReflectsSeededAndMissingTopics() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+
+        // A small two-section taxonomy standing in for the AAMC outline.
+        let topics = [
+            CoverageTopic(id: "S1.Alpha", section: "S1", name: "Alpha", tag: "MCAT::S1::Alpha"),
+            CoverageTopic(id: "S1.Beta", section: "S1", name: "Beta", tag: "MCAT::S1::Beta"),
+            CoverageTopic(id: "S2.Gamma", section: "S2", name: "Gamma", tag: "MCAT::S2::Gamma"),
+            CoverageTopic(id: "S2.Delta", section: "S2", name: "Delta", tag: "MCAT::S2::Delta"),
+        ]
+
+        // Alpha: two cards. Gamma: one exact + one *descendant* subtag card.
+        // Beta and Delta: deliberately left with no cards.
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["a1", "x"], deckID: 1, tags: ["MCAT::S1::Alpha"])
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["a2", "x"], deckID: 1, tags: ["MCAT::S1::Alpha"])
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["g1", "x"], deckID: 1, tags: ["MCAT::S2::Gamma"])
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["g2", "x"], deckID: 1, tags: ["MCAT::S2::Gamma::Subtopic"])
+
+        let report = try backend.coverage(forTopics: topics)
+
+        // Overall: 2 of 4 topics covered → exactly the 50% give-up line.
+        XCTAssertEqual(report.totalTopics, 4)
+        XCTAssertEqual(report.coveredTopics, 2, "Alpha and Gamma are covered; Beta and Delta are not")
+        XCTAssertEqual(report.fractionCovered, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(report.percentCovered, 50)
+        XCTAssertTrue(report.meetsCoverageThreshold, "50% meets the >= 50% threshold")
+
+        // Sections come back in first-seen (outline) order.
+        XCTAssertEqual(report.sections.map(\.section), ["S1", "S2"])
+
+        let s1 = try XCTUnwrap(report.sections.first { $0.section == "S1" })
+        XCTAssertEqual(s1.coveredCount, 1)
+        XCTAssertEqual(s1.totalCount, 2)
+        let alpha = try XCTUnwrap(s1.topics.first { $0.id == "S1.Alpha" })
+        XCTAssertTrue(alpha.isCovered)
+        XCTAssertEqual(alpha.cardCount, 2, "both Alpha cards count")
+        let beta = try XCTUnwrap(s1.topics.first { $0.id == "S1.Beta" })
+        XCTAssertFalse(beta.isCovered, "Beta has no cards")
+        XCTAssertEqual(beta.cardCount, 0)
+
+        let s2 = try XCTUnwrap(report.sections.first { $0.section == "S2" })
+        let gamma = try XCTUnwrap(s2.topics.first { $0.id == "S2.Gamma" })
+        XCTAssertTrue(gamma.isCovered)
+        XCTAssertEqual(gamma.cardCount, 2, "the exact tag and the descendant subtag both count toward Gamma")
+        let delta = try XCTUnwrap(s2.topics.first { $0.id == "S2.Delta" })
+        XCTAssertFalse(delta.isCovered, "Delta has no cards")
+    }
+
+    /// Coverage below the give-up line abstains. With three of four topics
+    /// uncovered (25%), `meetsCoverageThreshold` is false — the signal the
+    /// CoverageView uses to show the "Not enough coverage to score yet" banner
+    /// instead of a score.
+    func testCoverageBelowThresholdAbstains() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let topics = [
+            CoverageTopic(id: "S1.Alpha", section: "S1", name: "Alpha", tag: "MCAT::S1::Alpha"),
+            CoverageTopic(id: "S1.Beta", section: "S1", name: "Beta", tag: "MCAT::S1::Beta"),
+            CoverageTopic(id: "S1.Gamma", section: "S1", name: "Gamma", tag: "MCAT::S1::Gamma"),
+            CoverageTopic(id: "S1.Delta", section: "S1", name: "Delta", tag: "MCAT::S1::Delta"),
+        ]
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["a", "x"], deckID: 1, tags: ["MCAT::S1::Alpha"])
+
+        let report = try backend.coverage(forTopics: topics)
+        XCTAssertEqual(report.coveredTopics, 1)
+        XCTAssertEqual(report.percentCovered, 25)
+        XCTAssertFalse(report.meetsCoverageThreshold, "25% is below the 50% line, so the app abstains")
+    }
 }

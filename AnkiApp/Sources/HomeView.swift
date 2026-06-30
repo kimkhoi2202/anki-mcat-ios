@@ -37,6 +37,9 @@ struct HomeView: View {
     @State private var weakTopicsDeck: DeckTreeEntry?
     @State private var goWeakTopics = false
 
+    // MCAT coverage map (PRD 7c) navigation trigger.
+    @State private var goCoverage = false
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -56,6 +59,9 @@ struct HomeView: View {
                 if let deck = weakTopicsDeck {
                     WeakTopicsView(store: store, deck: deck)
                 }
+            }
+            .navigationDestination(isPresented: $goCoverage) {
+                CoverageView(store: store)
             }
             .navigationDestination(isPresented: $goSettings) {
                 SettingsView(store: store)
@@ -220,6 +226,10 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInWeakTopics") {
                 openWeakTopics(for: weakTopicsCandidate)
             }
+            // Open the MCAT coverage map (the PRD 7c coverage screenshot).
+            if ProcessInfo.processInfo.arguments.contains("-startInCoverage") {
+                goCoverage = true
+            }
             // Drive straight into the weak-topics reviewer (weakest card first),
             // verifying the points-at-stake review loop runs end-to-end.
             if ProcessInfo.processInfo.arguments.contains("-startInWeakTopicsReview"),
@@ -280,6 +290,7 @@ struct HomeView: View {
                 VStack(spacing: DS.Spacing.l) {
                     deckList
                     weakTopicsButton
+                    coverageButton
                     newDeckButton
                     newFilteredDeckButton
                 }
@@ -404,6 +415,33 @@ struct HomeView: View {
         guard let deck else { return }
         weakTopicsDeck = deck
         goWeakTopics = true
+    }
+
+    /// Full-width "MCAT Coverage" action: opens the coverage map (PRD 7c), the
+    /// dashboard of how many outline topics the collection touches, with the
+    /// abstain banner when coverage is under the give-up line. Styled as a
+    /// surface card to sit a step below the headline weak-topics action.
+    private var coverageButton: some View {
+        Button {
+            goCoverage = true
+        } label: {
+            Label("MCAT Coverage", systemImage: "checklist")
+                .font(DS.Typography.body.weight(.semibold))
+                .foregroundStyle(DS.accent)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: DS.minTapTarget)
+                .background(
+                    DS.surface,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                        .strokeBorder(DS.separator, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("MCAT coverage map")
+        .accessibilityHint("See how many MCAT topics your deck covers")
     }
 
     /// Full-width "New Deck" action below the list, keeping deck creation out of
