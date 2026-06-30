@@ -17,11 +17,13 @@ DerivedData/
 *.xcuserstate
 *.xcuserdatad
 
-# Secrets (e.g. OpenAI API key) — injected into the app at build time
+# Local environment / secrets
 .env
 
 # Scratch / screenshots (but keep bundled image assets in the asset catalog)
 *.png
 !**/Assets.xcassets/**/*.png
+# Never drop raster assets bundled into the SvelteKit web app
+!**/Resources/sveltekit/**
 
 .DS_Store

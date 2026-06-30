@@ -27,8 +27,10 @@ struct LoginView: View {
 
     private enum Field { case username, password }
 
-    // AnkiDroid validation strings (res/values: invalid_email, password_empty).
-    private static let invalidEmail = "Enter a valid email"
+    // AnkiDroid requires non-empty credentials (res/values: password_empty). The
+    // username field is an emptiness-only check, so the message says it's required
+    // rather than implying email-format validation it doesn't actually perform.
+    private static let emailRequired = "Email is required."
     private static let passwordRequired = "Password is required"
 
     // AnkiWeb account links (AnkiDroid res/values/constants.xml).
@@ -83,7 +85,7 @@ struct LoginView: View {
                 if newValue == .username {
                     usernameError = nil
                 } else if usernameTouched, username.trimmingCharacters(in: .whitespaces).isEmpty {
-                    usernameError = Self.invalidEmail
+                    usernameError = Self.emailRequired
                 }
                 if newValue == .password {
                     passwordError = nil
@@ -242,7 +244,7 @@ struct LoginView: View {
     }
 
     private func submit() {
-        usernameError = username.trimmingCharacters(in: .whitespaces).isEmpty ? Self.invalidEmail : nil
+        usernameError = username.trimmingCharacters(in: .whitespaces).isEmpty ? Self.emailRequired : nil
         passwordError = password.isEmpty ? Self.passwordRequired : nil
         guard canSubmit else { return }
         focused = nil

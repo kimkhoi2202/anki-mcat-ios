@@ -73,14 +73,24 @@ final class AnkiStore: ObservableObject {
     /// must choose to upload (keep this device) or download (keep the server).
     @Published var pendingConflict = false
 
-    /// User-selected sync server (nil = default AnkiWeb), edited on the Settings
-    /// screen and used as the endpoint when logging in. Mirrors AnkiDroid's
-    /// custom sync server preference (read by `getEndpoint()`); persisted in
-    /// UserDefaults so it survives launches and logout.
+    /// The sync server the user has chosen for the *next* login (nil = default
+    /// AnkiWeb), edited on the Settings screen while logged out. Mirrors
+    /// AnkiDroid's custom sync server preference (read by `getEndpoint()`);
+    /// persisted in UserDefaults so it survives launches and logout. It is the
+    /// user's intent only — never overwritten by a server-assigned shard, which
+    /// lives in `activeSyncServer`.
     @Published private(set) var preferredSyncServer: String?
 
-    /// The group's self-hosted sync server (deployed on Fly.io).
-    static let mcatSyncServerURL = "https://anki-mcat-sync.fly.dev/"
+    /// The sync server actually in use while logged in, taken from the stored
+    /// credentials' endpoint (which AnkiWeb may set to an assigned shard, e.g.
+    /// `sync.ankiweb.net`); nil = AnkiWeb default. Only meaningful when
+    /// `isLoggedIn`. `sync()` uses `creds.endpoint`, so this is what the Settings
+    /// screen shows (read-only) to avoid diverging from the server in use.
+    @Published private(set) var activeSyncServer: String?
+
+    /// The group's self-hosted sync server (deployed on Fly.io). `nonisolated` so
+    /// the (non-isolated) Settings server classifier can compare against it.
+    nonisolated static let mcatSyncServerURL = "https://anki-mcat-sync.fly.dev/"
     private static let preferredServerKey = "preferredSyncServerEndpoint"
     /// Wall-clock cap on the media-sync poll loop, so a stuck server-side media
     /// sync can't spin the banner (and keep the Sync button disabled) forever.
@@ -878,14 +888,16 @@ final class AnkiStore: ObservableObject {
         if let creds = SyncKeychain.load() {
             isLoggedIn = true
             syncUsername = creds.username
-            if let endpoint = creds.endpoint, !endpoint.isEmpty {
-                preferredSyncServer = endpoint
-            }
+            // Reflect the server actually in use (which may be an AnkiWeb shard)
+            // without clobbering the user's next-login choice in
+            // `preferredSyncServer`. nil endpoint = AnkiWeb default.
+            activeSyncServer = creds.endpoint
         }
     }
 
-    /// Persists the user's chosen sync server (nil/"" = AnkiWeb) and publishes it.
-    /// The Settings server picker writes here; `login` reads it as the endpoint.
+    /// Persists the user's chosen sync server for the next login (nil/"" =
+    /// AnkiWeb) and publishes it. The Settings server picker writes here while
+    /// logged out; `login` reads it as the endpoint to authenticate against.
     func setPreferredSyncServer(_ endpoint: String?) {
         let trimmed = endpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
         let value = (trimmed?.isEmpty == false) ? trimmed : nil
@@ -924,7 +936,10 @@ final class AnkiStore: ObservableObject {
             )
             isLoggedIn = true
             syncUsername = user
-            setPreferredSyncServer(resolvedEndpoint)
+            // Remember the *chosen* server for next time (not the shard AnkiWeb
+            // may resolve to); the resolved endpoint is the one now in use.
+            setPreferredSyncServer(serverOrNil)
+            activeSyncServer = resolvedEndpoint
             return true
         } catch {
             if let syncError = SyncError(error) {
@@ -943,6 +958,8 @@ final class AnkiStore: ObservableObject {
         SyncKeychain.clear()
         isLoggedIn = false
         syncUsername = ""
+        // No server is in use once logged out; the picker becomes editable again.
+        activeSyncServer = nil
         // Keep `preferredSyncServer` so the next login uses the same server
         // (AnkiDroid likewise keeps the custom sync server preference on logout).
         syncPhase = .idle
@@ -1016,10 +1033,12 @@ final class AnkiStore: ObservableObject {
             let response = try await runDetached {
                 try backend.syncCollection(auth: authForCollection, syncMedia: false)
             }
-            // The server may hand us a new endpoint to use going forward.
+            // The server may hand us a new endpoint (shard) to use going forward.
+            // Record it as the in-use endpoint (creds + activeSyncServer), but not
+            // as the user's chosen server — an AnkiWeb shard isn't a custom server.
             if response.hasNewEndpoint, !response.newEndpoint.isEmpty {
                 auth = Backend.syncAuth(hkey: creds.hkey, endpoint: response.newEndpoint)
-                setPreferredSyncServer(response.newEndpoint)
+                activeSyncServer = response.newEndpoint
                 try? SyncKeychain.save(
                     SyncCredentials(username: creds.username, hkey: creds.hkey, endpoint: response.newEndpoint)
                 )

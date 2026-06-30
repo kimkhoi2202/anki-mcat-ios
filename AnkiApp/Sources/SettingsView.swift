@@ -16,7 +16,8 @@ struct SettingsView: View {
     @AppStorage(AppTheme.storageKey) private var appThemeRaw = AppTheme.system.rawValue
     @State private var serverChoice: ServerChoice = .ankiweb
     @State private var customServerURL = ""
-    @State private var serverLoaded = false
+    /// Inline validation error for the custom ("Other") server URL, if any.
+    @State private var serverError: String?
 
     var body: some View {
         Form {
@@ -34,8 +35,13 @@ struct SettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             store.loadPreferences()
-            loadServerState()
+            reconcileServer()
         }
+        // Re-seed the picker when the login state or the in-use server changes
+        // (e.g. logging out while on this screen, or a shard reassignment), so it
+        // never diverges from the server `sync()` actually uses.
+        .onChange(of: store.isLoggedIn) { _ in reconcileServer() }
+        .onChange(of: store.activeSyncServer) { _ in reconcileServer() }
     }
 
     // MARK: - Account / Sync
@@ -73,9 +79,12 @@ struct SettingsView: View {
 
     // MARK: - Sync server
 
-    /// Editable sync-server picker. AnkiDroid keeps the custom sync server in
-    /// Preferences (not on the login screen); we mirror that here. The choice is
-    /// written to `store.preferredSyncServer`, which `login` uses as the endpoint.
+    /// Sync-server picker. AnkiDroid keeps the custom sync server in Preferences
+    /// (not on the login screen); we mirror that here. While logged out the
+    /// choice is written to `store.preferredSyncServer` (used by `login` as the
+    /// endpoint). While logged in the picker is read-only and mirrors the server
+    /// actually in use (`store.activeSyncServer`), since AnkiDroid requires
+    /// logging out to change the sync server.
     private var serverSection: some View {
         Section {
             Picker(selection: $serverChoice) {
@@ -89,6 +98,7 @@ struct SettingsView: View {
             }
             .pickerStyle(.menu)
             .tint(DS.textSecondary)
+            .disabled(store.isLoggedIn)
             .onChange(of: serverChoice) { _ in applyServer() }
 
             if serverChoice == .other {
@@ -99,13 +109,23 @@ struct SettingsView: View {
                     .autocorrectionDisabled()
                     .font(DS.Typography.body)
                     .foregroundStyle(DS.textPrimary)
+                    .disabled(store.isLoggedIn)
                     .onChange(of: customServerURL) { _ in applyServer() }
+
+                if let serverError {
+                    Text(serverError)
+                        .font(DS.Typography.caption)
+                        .foregroundStyle(DS.again)
+                        .accessibilityLabel("Error: \(serverError)")
+                }
             }
         } header: {
             sectionHeader("Sync server")
         } footer: {
             sectionFooter(
-                "Used when you log in. To switch servers, log out and log in again."
+                store.isLoggedIn
+                    ? "To switch servers, log out and log in again."
+                    : "Used when you log in to sync."
             )
         }
     }
@@ -237,32 +257,59 @@ struct SettingsView: View {
             .foregroundStyle(DS.textSecondary)
     }
 
-    /// Seeds the picker from the persisted preference (once per appearance).
-    private func loadServerState() {
-        guard !serverLoaded else { return }
-        serverLoaded = true
-        let endpoint = store.preferredSyncServer
-        if endpoint == nil || endpoint?.isEmpty == true {
-            serverChoice = .ankiweb
-        } else if endpoint!.normalizedURL == AnkiStore.mcatSyncServerURL.normalizedURL {
-            serverChoice = .mcat
-        } else {
-            serverChoice = .other
-            customServerURL = endpoint!
-        }
+    /// Reconciles the picker with the store. While logged in it mirrors the
+    /// server actually in use (`activeSyncServer`, which AnkiWeb may set to an
+    /// assigned shard) and is read-only; while logged out it shows the next-login
+    /// choice (`preferredSyncServer`) and is editable. Any AnkiWeb host —
+    /// including `*.ankiweb.net` shards — classifies as AnkiWeb, so a shard never
+    /// masquerades as a custom ("Other") server.
+    private func reconcileServer() {
+        let endpoint = store.isLoggedIn ? store.activeSyncServer : store.preferredSyncServer
+        let choice = ServerChoice.classify(endpoint)
+        serverChoice = choice
+        customServerURL = (choice == .other) ? (endpoint ?? "") : ""
+        serverError = nil
     }
 
-    /// Writes the current picker choice to the store's persisted preference.
+    /// Writes the current picker choice to the store's persisted next-login
+    /// preference. No-op while logged in (the active server is fixed until
+    /// logout). For "Other", validates the URL and refuses to apply — without
+    /// silently falling back to AnkiWeb — when it is empty or malformed,
+    /// surfacing an inline error instead.
     private func applyServer() {
+        guard !store.isLoggedIn else { return }
         switch serverChoice {
         case .mcat:
+            serverError = nil
             store.setPreferredSyncServer(AnkiStore.mcatSyncServerURL)
         case .ankiweb:
+            serverError = nil
             store.setPreferredSyncServer(nil)
         case .other:
             let trimmed = customServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            store.setPreferredSyncServer(trimmed.isEmpty ? nil : trimmed)
+            if let error = Self.customServerError(trimmed) {
+                serverError = error
+            } else {
+                serverError = nil
+                store.setPreferredSyncServer(trimmed)
+            }
         }
+    }
+
+    /// Validates a custom sync server URL, returning an inline error message or
+    /// nil when acceptable (a non-empty `http`/`https` URL with a host). Keeps an
+    /// invalid value from being stored unvalidated and only failing later in
+    /// `syncLogin`.
+    private static func customServerError(_ urlString: String) -> String? {
+        if urlString.isEmpty { return "Enter a server URL." }
+        guard let components = URLComponents(string: urlString),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host, !host.isEmpty
+        else {
+            return "Enter a valid http:// or https:// URL."
+        }
+        return nil
     }
 }
 
@@ -271,6 +318,19 @@ private enum ServerChoice: Hashable {
     case mcat
     case ankiweb
     case other
+
+    /// Classifies a stored endpoint into a picker choice. A nil/empty endpoint or
+    /// any AnkiWeb host — `ankiweb.net` or a `*.ankiweb.net` shard such as
+    /// `sync.ankiweb.net` / `sync-xxx.ankiweb.net` — is AnkiWeb; the MCAT preset
+    /// URL is MCAT; anything else is a custom ("Other") server.
+    static func classify(_ endpoint: String?) -> ServerChoice {
+        guard let endpoint,
+              !endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return .ankiweb }
+        if endpoint.normalizedURL == AnkiStore.mcatSyncServerURL.normalizedURL { return .mcat }
+        if endpoint.isAnkiWebHost { return .ankiweb }
+        return .other
+    }
 }
 
 private extension String {
@@ -280,5 +340,15 @@ private extension String {
         var s = trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         while s.hasSuffix("/") { s.removeLast() }
         return s
+    }
+
+    /// Whether this endpoint points at AnkiWeb — the apex `ankiweb.net` or any
+    /// `*.ankiweb.net` shard (e.g. `sync.ankiweb.net`, `sync-xxx.ankiweb.net`) —
+    /// so a server-assigned shard isn't misclassified as a custom server.
+    var isAnkiWebHost: Bool {
+        guard let host = URLComponents(
+            string: trimmingCharacters(in: .whitespacesAndNewlines)
+        )?.host?.lowercased() else { return false }
+        return host == "ankiweb.net" || host.hasSuffix(".ankiweb.net")
     }
 }
