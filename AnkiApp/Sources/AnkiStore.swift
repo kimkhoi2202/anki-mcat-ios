@@ -115,8 +115,8 @@ final class AnkiStore: ObservableObject {
     /// The current card's audio (sound/video filenames) per side, autoplayed on
     /// front/back and replayed by "Replay audio". Cloned from Anki, which plays
     /// the question side on show and the answer side on reveal.
-    private var currentQuestionAudio: [String] = []
-    private var currentAnswerAudio: [String] = []
+    private var currentQuestionAudio: [CardAudio] = []
+    private var currentAnswerAudio: [CardAudio] = []
     private let cardAudioPlayer = CardAudioPlayer()
 
     /// The card currently shown in the reviewer, if any — used to open Card Info

@@ -1,6 +1,13 @@
 import Foundation
 import SwiftProtobuf
 
+/// A unit of card audio to play in order: a recorded media file (`[sound:…]`)
+/// or text to synthesize via TTS (`{{tts}}`).
+public enum CardAudio: Sendable, Equatable {
+    case sound(String)
+    case tts(text: String, lang: String)
+}
+
 /// Review-loop convenience methods. Service/method indices come from the
 /// generated `_backend_generated.py` reference.
 public extension Backend {
@@ -53,14 +60,17 @@ public extension Backend {
     /// the text where they were. We strip those markers for native display and
     /// return the audio/video filenames (relative to the media folder) to play.
     /// TTS tags are skipped for now.
-    func extractAudio(text: String, questionSide: Bool) throws -> (text: String, audio: [String]) {
+    func extractAudio(text: String, questionSide: Bool) throws -> (text: String, audio: [CardAudio]) {
         var req = Anki_CardRendering_ExtractAvTagsRequest()
         req.text = text
         req.questionSide = questionSide
         let resp = try run(service: 27, method: 3, req, returning: Anki_CardRendering_ExtractAvTagsResponse.self)
-        let audio = resp.avTags.compactMap { tag -> String? in
-            if case .soundOrVideo(let filename)? = tag.value { return filename }
-            return nil
+        let audio: [CardAudio] = resp.avTags.compactMap { tag in
+            switch tag.value {
+            case .soundOrVideo(let filename): return .sound(filename)
+            case .tts(let tts): return tts.fieldText.isEmpty ? nil : .tts(text: tts.fieldText, lang: tts.lang)
+            case .none: return nil
+            }
         }
         let cleaned = resp.text.replacingOccurrences(
             of: "\\[anki:play:[^\\]]*\\]", with: "", options: .regularExpression
