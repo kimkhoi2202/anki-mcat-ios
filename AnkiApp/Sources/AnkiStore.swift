@@ -25,6 +25,26 @@ final class AnkiStore: ObservableObject {
     @Published var showingAnswer = false
     @Published var reviewDone = false
 
+    // MARK: - "Focus weak topics" study mode (points-at-stake, PRD 7a)
+
+    /// Whether the current review session is studying the deck weakest-topic-first
+    /// (driven by the engine's points-at-stake ordering) rather than the normal
+    /// scheduler order.
+    @Published var weakTopicsMode = false
+    /// Per-topic weakness read-out for the current deck, ordered weakest-first.
+    /// Populated by `loadWeakTopics(deckID:deckName:)` for the read-out screen.
+    @Published var weakTopics: [WeakTopic] = []
+    /// Name of the deck the weak-topics read-out/session is for (for display).
+    @Published var weakTopicsDeckName = ""
+
+    /// Due review card ids for the weak-topics session, ordered by descending
+    /// points-at-stake (weakest topic first) — the ordering the review loop walks.
+    private var weakTopicsOrder: [Int64] = []
+    /// How far through `weakTopicsOrder` the session has progressed.
+    private var weakTopicsCursor = 0
+    /// Card id → topic, so the reviewer can label the current card's topic.
+    private var topicByCardID: [Int64: String] = [:]
+
     /// Whether the backend has an action to undo (drives the Undo control).
     @Published var canUndo = false
     /// Localized name of the next undoable action (e.g. "Answer Card").
@@ -84,6 +104,17 @@ final class AnkiStore: ObservableObject {
     /// from the reviewer's toolbar.
     var currentCardID: Int64? { currentCard?.card.id }
 
+    /// The topic of the card currently shown, when studying in weak-topics mode
+    /// (drives the reviewer's "Focus: <topic>" badge). Nil outside that mode or
+    /// for cards the points-at-stake queue didn't score.
+    var currentCardTopic: String? {
+        guard weakTopicsMode, let id = currentCard?.card.id else { return nil }
+        return topicByCardID[id]
+    }
+
+    /// Number of due review cards in the current weak-topics session.
+    var weakTopicsCardCount: Int { weakTopicsOrder.count }
+
     /// Directory holding the collection and its media (the app's Documents).
     private var documentsURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -106,6 +137,7 @@ final class AnkiStore: ObservableObject {
             self.backend = backend
             try openDefaultCollection(backend)
             try seedIfNeeded(backend)
+            try seedWeakTopicsIfNeeded(backend)
             refreshDecks()
             refreshUndo()
             loadLoginState()
@@ -145,6 +177,8 @@ final class AnkiStore: ObservableObject {
         do {
             try backend.setCurrentDeck(id: id)
             currentDeckID = id
+            // A normal deck tap studies in scheduler order, not weak-topics order.
+            weakTopicsMode = false
             reviewDone = false
             showingAnswer = false
             currentQuestion = ""
@@ -425,7 +459,58 @@ final class AnkiStore: ObservableObject {
         UserDefaults.standard.set(true, forKey: key)
     }
 
+    /// Seeds an "MCAT" deck of *due review* cards across three topics with FSRS
+    /// memory state, so the "Focus weak topics" mode has real points-at-stake
+    /// data to rank and study. Stability drives recall (lower stability → lower
+    /// retrievability → higher weakness), so Physics surfaces above Psychology
+    /// above Biochemistry. Mirrors the AnkiKit test's `seedDueReviewCard`: add a
+    /// note, then write the card's scheduling/memory fields via `update_cards`.
+    /// Runs once (guarded by a `UserDefaults` flag).
+    private func seedWeakTopicsIfNeeded(_ backend: Backend) throws {
+        let key = "seeded_points_at_stake_v1"
+        if UserDefaults.standard.bool(forKey: key) { return }
+        guard let basic = try backend.notetypeNames().first(where: { $0.name.hasPrefix("Basic") }) else { return }
+
+        let deckID = try backend.createDeck(name: "MCAT")
+        // (topic, question, answer, stability). Two cards per topic. With the
+        // last review fixed ~20 days ago, FSRS stability (in days) sets each
+        // topic's recall and therefore its weakness: low stability → low recall
+        // → weakest (Physics), rising through Psychology to Biochemistry.
+        let seed: [(topic: String, q: String, a: String, stability: Float)] = [
+            ("Physics", "Units of the gravitational constant G?", "N·m²/kg²", 1.0),
+            ("Physics", "Snell's law relates what?", "Angles to refractive indices", 1.6),
+            ("Psychology", "Who proposed the hierarchy of needs?", "Abraham Maslow", 6),
+            ("Psychology", "Who described classical conditioning?", "Ivan Pavlov", 8),
+            ("Biochemistry", "Rate-limiting enzyme of glycolysis?", "Phosphofructokinase-1", 30),
+            ("Biochemistry", "Enzyme that unwinds DNA at the fork?", "Helicase", 42),
+        ]
+        let lastReview = Int64(Date().timeIntervalSince1970) - 20 * 86_400
+        for item in seed {
+            let nid = try backend.addNote(
+                notetypeID: basic.id, fields: [item.q, item.a],
+                deckID: deckID, tags: ["MCAT::\(item.topic)"]
+            )
+            guard let cardID = try backend.searchCards(query: "nid:\(nid)").first else { continue }
+            var card = try backend.getCard(cardID: cardID)
+            card.ctype = 2          // CardType::Review
+            card.queue = 2          // CardQueue::Review
+            card.due = 0            // due today
+            card.interval = 20
+            card.reps = 1
+            var memory = Anki_Cards_FsrsMemoryState()
+            memory.stability = item.stability
+            memory.difficulty = 5
+            card.memoryState = memory
+            card.lastReviewTimeSecs = lastReview
+            try backend.updateCards([card], skipUndoEntry: true)
+        }
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
     func startReview() {
+        // In weak-topics mode the session is primed by startWeakTopicsReview();
+        // don't fall back to the normal scheduler order here.
+        guard !weakTopicsMode else { return }
         if currentQuestion.isEmpty && !reviewDone { loadNext() }
     }
 
@@ -435,31 +520,45 @@ final class AnkiStore: ObservableObject {
         do {
             let q = try backend.queuedCards()
             guard let first = q.cards.first else {
-                currentCard = nil
-                reviewDone = true
-                currentQuestion = ""
-                currentAnswer = ""
-                currentCSS = ""
-                currentIntervals = []
-                refreshUndo()
+                finishReview()
                 return
             }
-            reviewDone = false
-            currentCard = first
-            currentOrdinal = Int(first.card.templateIdx)
-            let rendered = try backend.renderCard(cardID: first.card.id)
-            currentQuestion = rendered.question
-            currentAnswer = rendered.answer
-            currentCSS = rendered.css
-            // One interval label per button: [again, hard, good, easy].
-            // Ignore an unexpected shape rather than mislabeling buttons.
-            let intervals = (try? backend.describeNextStates(first.states)) ?? []
-            currentIntervals = intervals.count == 4 ? intervals : []
-            cardShownAt = Date()
-            refreshUndo()
+            try present(first)
         } catch {
             status = "Review error: \(error)"
         }
+    }
+
+    /// Renders a queued card into the reviewer's published state. Shared by the
+    /// normal queue loader and the weak-topics loader so both present cards (and
+    /// their answer-button intervals) identically; only the *choice* of card
+    /// differs between modes.
+    private func present(_ queued: Anki_Scheduler_QueuedCards.QueuedCard) throws {
+        guard let backend else { return }
+        reviewDone = false
+        currentCard = queued
+        currentOrdinal = Int(queued.card.templateIdx)
+        let rendered = try backend.renderCard(cardID: queued.card.id)
+        currentQuestion = rendered.question
+        currentAnswer = rendered.answer
+        currentCSS = rendered.css
+        // One interval label per button: [again, hard, good, easy].
+        // Ignore an unexpected shape rather than mislabeling buttons.
+        let intervals = (try? backend.describeNextStates(queued.states)) ?? []
+        currentIntervals = intervals.count == 4 ? intervals : []
+        cardShownAt = Date()
+        refreshUndo()
+    }
+
+    /// Clears reviewer state to the "all caught up" end-of-session screen.
+    private func finishReview() {
+        currentCard = nil
+        reviewDone = true
+        currentQuestion = ""
+        currentAnswer = ""
+        currentCSS = ""
+        currentIntervals = []
+        refreshUndo()
     }
 
     func reveal() { showingAnswer = true }
@@ -468,7 +567,14 @@ final class AnkiStore: ObservableObject {
         guard let backend, let card = currentCard else { return }
         let ms = UInt32(min(60_000, Date().timeIntervalSince(cardShownAt) * 1000))
         try? backend.answer(card: card, rating: rating, millisecondsTaken: ms)
-        loadNext()
+        if weakTopicsMode {
+            // Advance past the card we just answered, then surface the next
+            // weakest due review card.
+            weakTopicsCursor += 1
+            loadNextWeakTopicCard()
+        } else {
+            loadNext()
+        }
     }
 
     /// Reverts the last undoable action (e.g. the previous answer) and reloads
@@ -477,9 +583,100 @@ final class AnkiStore: ObservableObject {
         guard let backend, canUndo else { return }
         do {
             _ = try backend.undo()
-            loadNext()
+            if weakTopicsMode {
+                weakTopicsCursor = max(0, weakTopicsCursor - 1)
+                loadNextWeakTopicCard()
+            } else {
+                loadNext()
+            }
         } catch {
             status = "Undo error: \(error)"
+        }
+    }
+
+    // MARK: - "Focus weak topics" study mode
+
+    /// Loads the points-at-stake read-out for `deckID` without starting a review:
+    /// scopes study to the deck, calls the engine's `pointsAtStakeQueue` (the
+    /// Rust change, service 13/39), and publishes the per-topic weakness summary
+    /// (weakest first) plus the weakest-first card order the session will walk.
+    func loadWeakTopics(deckID: Int64, deckName: String, topicPrefix: String = "MCAT::") {
+        guard let backend else { return }
+        do {
+            try backend.setCurrentDeck(id: deckID)
+            currentDeckID = deckID
+            weakTopicsDeckName = deckName
+            // The engine scopes the due review queue to the current deck, so this
+            // ranks only this deck's topics.
+            let queue = try backend.pointsAtStakeQueue(topicPrefix: topicPrefix, weightBySize: false)
+            // cards already arrive sorted by descending points-at-stake (weakest
+            // first); keep that order to drive the review loop.
+            weakTopicsOrder = queue.cards.map(\.cardID)
+            topicByCardID = Dictionary(
+                queue.cards.map { ($0.cardID, $0.topic) }, uniquingKeysWith: { first, _ in first }
+            )
+            weakTopicsCursor = 0
+            weakTopics = queue.topics
+                .map { summary in
+                    WeakTopic(
+                        topic: summary.topic,
+                        cardCount: Int(summary.cardCount),
+                        weakness: Double(summary.weakness),
+                        pointsAtStake: Double(summary.topicWeight * summary.weakness),
+                        meanRetrievability: summary.hasMeanRetrievability
+                            ? Double(summary.meanRetrievability) : nil
+                    )
+                }
+                .sorted { $0.weakness > $1.weakness }
+        } catch {
+            status = "Weak topics error: \(error)"
+            weakTopics = []
+            weakTopicsOrder = []
+            topicByCardID = [:]
+        }
+    }
+
+    /// Begins a review session in weak-topics order using the ordering most
+    /// recently computed by `loadWeakTopics`. Presents the deck's due review
+    /// cards weakest-topic-first.
+    func startWeakTopicsReview() {
+        weakTopicsMode = true
+        reviewDone = false
+        showingAnswer = false
+        currentCard = nil
+        currentQuestion = ""
+        currentAnswer = ""
+        currentCSS = ""
+        currentIntervals = []
+        weakTopicsCursor = 0
+        loadNextWeakTopicCard()
+    }
+
+    /// Presents the next due review card in points-at-stake (weakest-first)
+    /// order. Re-reads the live queue each time so the cards carry their real
+    /// scheduling `states` (needed to answer); we just pick them in weak-topics
+    /// order instead of scheduler order. Cards no longer in the queue (already
+    /// answered, or not due) are skipped; when the order is exhausted the session
+    /// ends.
+    private func loadNextWeakTopicCard() {
+        guard let backend else { return }
+        showingAnswer = false
+        do {
+            let queued = try backend.queuedCards()
+            let byID = Dictionary(
+                queued.cards.map { ($0.card.id, $0) }, uniquingKeysWith: { first, _ in first }
+            )
+            while weakTopicsCursor < weakTopicsOrder.count {
+                let cardID = weakTopicsOrder[weakTopicsCursor]
+                if let queuedCard = byID[cardID] {
+                    try present(queuedCard)
+                    return
+                }
+                weakTopicsCursor += 1
+            }
+            finishReview()
+        } catch {
+            status = "Review error: \(error)"
         }
     }
 
@@ -1015,4 +1212,22 @@ struct ReviewingPrefs: Equatable {
         showRemainingDueCounts = reviewing.showRemainingDueCounts
         showPlayButtonsOnAudio = !reviewing.hideAudioPlayButtons
     }
+}
+
+/// A topic's weakness read-out for the "Focus weak topics" study mode (PRD 7a),
+/// built from the engine's points-at-stake per-topic summary. Decouples the
+/// SwiftUI layer from the generated protobuf type.
+struct WeakTopic: Identifiable, Equatable {
+    /// Topic name (the component below the `MCAT::` prefix), also the identity.
+    var id: String { topic }
+    let topic: String
+    /// Due review cards in this topic.
+    let cardCount: Int
+    /// `1 − mean(FSRS retrievability)` in `0...1`; higher means weaker. Shown as
+    /// a percentage and drives the ordering.
+    let weakness: Double
+    /// `topic_weight × weakness` — the score the engine sorts cards by.
+    let pointsAtStake: Double
+    /// Mean FSRS retrievability across the topic's memory-state cards, if any.
+    let meanRetrievability: Double?
 }

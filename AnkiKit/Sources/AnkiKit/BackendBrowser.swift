@@ -97,6 +97,20 @@ public extension Backend {
         return try run(service: 5, method: 0, req, returning: Anki_Cards_Card.self)
     }
 
+    /// CardsService.updateCards (5, 1).
+    ///
+    /// Persists full `Card` records back to the collection (read-modify-write
+    /// from `getCard`). Used to write card-level scheduling fields the higher
+    /// level RPCs don't expose directly — e.g. seeding FSRS memory state for the
+    /// points-at-stake tests. Pass `skipUndoEntry: true` to avoid recording an
+    /// undo step.
+    func updateCards(_ cards: [Anki_Cards_Card], skipUndoEntry: Bool = false) throws {
+        var req = Anki_Cards_UpdateCardsRequest()
+        req.cards = cards
+        req.skipUndoEntry = skipUndoEntry
+        _ = try run(service: 5, method: 1, input: try req.serializedData())
+    }
+
     /// Builds one display row, setting the active columns first so the call is
     /// self-contained (the batch `cardBrowserRows` sets them once and uses the
     /// private builder directly to avoid repeating the per-row column write).
