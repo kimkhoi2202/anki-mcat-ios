@@ -99,6 +99,13 @@ final class AnkiStore: ObservableObject {
     /// `Backend` is `Sendable` and internally thread-safe (mutex-guarded).
     var sharedBackend: Backend? { backend }
 
+    /// The current card's audio (sound/video filenames) per side, autoplayed on
+    /// front/back and replayed by "Replay audio". Cloned from Anki, which plays
+    /// the question side on show and the answer side on reveal.
+    private var currentQuestionAudio: [String] = []
+    private var currentAnswerAudio: [String] = []
+    private let cardAudioPlayer = CardAudioPlayer()
+
     /// The card currently shown in the reviewer, if any — used to open Card Info
     /// from the reviewer's toolbar.
     var currentCardID: Int64? { currentCard?.card.id }
@@ -481,9 +488,15 @@ final class AnkiStore: ObservableObject {
         currentCard = queued
         currentOrdinal = Int(queued.card.templateIdx)
         let rendered = try backend.renderCard(cardID: queued.card.id)
-        currentQuestion = rendered.question
-        currentAnswer = rendered.answer
+        let q = (try? backend.extractAudio(text: rendered.question, questionSide: true))
+            ?? (text: rendered.question, audio: [])
+        let a = (try? backend.extractAudio(text: rendered.answer, questionSide: false))
+            ?? (text: rendered.answer, audio: [])
+        currentQuestion = q.text
+        currentAnswer = a.text
         currentCSS = rendered.css
+        currentQuestionAudio = q.audio
+        currentAnswerAudio = a.audio
         // One interval label per button: [again, hard, good, easy].
         // Ignore an unexpected shape rather than mislabeling buttons.
         let intervals = (try? backend.describeNextStates(queued.states)) ?? []
@@ -494,6 +507,8 @@ final class AnkiStore: ObservableObject {
         isMarked = (try? backend.isNoteMarked(noteID: queued.card.noteID)) ?? false
         cardShownAt = Date()
         refreshUndo()
+        // Autoplay the question side's audio, as Anki does on showing a card.
+        cardAudioPlayer.play(currentQuestionAudio, mediaFolder: mediaFolderURL)
     }
 
     /// Clears reviewer state to the "all caught up" end-of-session screen.
@@ -506,10 +521,17 @@ final class AnkiStore: ObservableObject {
         currentIntervals = []
         currentFlag = 0
         isMarked = false
+        currentQuestionAudio = []
+        currentAnswerAudio = []
+        cardAudioPlayer.stop()
         refreshUndo()
     }
 
-    func reveal() { showingAnswer = true }
+    func reveal() {
+        showingAnswer = true
+        // Autoplay the answer side's audio, as Anki does on flipping to the back.
+        cardAudioPlayer.play(currentAnswerAudio, mediaFolder: mediaFolderURL)
+    }
 
     /// Returns from the answer back to the question (the "tap center = flip"
     /// gesture toggling A → Q). Cheap local state flip; no engine call.
@@ -629,9 +651,15 @@ final class AnkiStore: ObservableObject {
         guard let backend, let card = currentCard else { return }
         do {
             let rendered = try backend.renderCard(cardID: card.card.id)
-            currentQuestion = rendered.question
-            currentAnswer = rendered.answer
+            let q = (try? backend.extractAudio(text: rendered.question, questionSide: true))
+                ?? (text: rendered.question, audio: [])
+            let a = (try? backend.extractAudio(text: rendered.answer, questionSide: false))
+                ?? (text: rendered.answer, audio: [])
+            currentQuestion = q.text
+            currentAnswer = a.text
             currentCSS = rendered.css
+            currentQuestionAudio = q.audio
+            currentAnswerAudio = a.audio
             if let fresh = try? backend.getCard(cardID: card.card.id) {
                 currentFlag = Int(fresh.flags)
             }
@@ -647,7 +675,15 @@ final class AnkiStore: ObservableObject {
     /// (restarting any embedded media). Clone of AnkiDroid's `replayMedia` in
     /// spirit; a native `[sound:]`/AV-tag player is deferred.
     func replayAudio() {
-        replayToken += 1
+        cardAudioPlayer.play(
+            showingAnswer ? currentAnswerAudio : currentQuestionAudio,
+            mediaFolder: mediaFolderURL
+        )
+    }
+
+    /// Stops any card audio (e.g. when leaving the reviewer).
+    func stopReviewAudio() {
+        cardAudioPlayer.stop()
     }
 
     /// Shared tail for bury/suspend/delete: the current card has left the queue,

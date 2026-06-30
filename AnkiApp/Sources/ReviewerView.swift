@@ -249,6 +249,7 @@ struct ReviewerView: View {
         }
         .navigationTitle("Review")
         .navigationBarTitleDisplayMode(.inline)
+        .onDisappear { store.stopReviewAudio() }
         .toolbar { reviewerToolbar }
         // The card-action menu is a self-presented overlay (rather than a
         // SwiftUI `Menu`) so it can show flag swatches + card/note variants like

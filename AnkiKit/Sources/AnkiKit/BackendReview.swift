@@ -47,6 +47,27 @@ public extension Backend {
         return (Backend.joinNodes(resp.questionNodes), Backend.joinNodes(resp.answerNodes), resp.css)
     }
 
+    /// CardRenderingService.extractAvTags (27, 3). Splits a rendered card side
+    /// into (display text, audio filenames): Anki renders the card, then extracts
+    /// its `[sound:…]` / AV tags for playback, leaving `[anki:play:…]` markers in
+    /// the text where they were. We strip those markers for native display and
+    /// return the audio/video filenames (relative to the media folder) to play.
+    /// TTS tags are skipped for now.
+    func extractAudio(text: String, questionSide: Bool) throws -> (text: String, audio: [String]) {
+        var req = Anki_CardRendering_ExtractAvTagsRequest()
+        req.text = text
+        req.questionSide = questionSide
+        let resp = try run(service: 27, method: 3, req, returning: Anki_CardRendering_ExtractAvTagsResponse.self)
+        let audio = resp.avTags.compactMap { tag -> String? in
+            if case .soundOrVideo(let filename)? = tag.value { return filename }
+            return nil
+        }
+        let cleaned = resp.text.replacingOccurrences(
+            of: "\\[anki:play:[^\\]]*\\]", with: "", options: .regularExpression
+        )
+        return (cleaned, audio)
+    }
+
     /// SchedulerService.describeNextStates (13, 24).
     ///
     /// Given a queued card's precomputed `states`, returns one human-readable
