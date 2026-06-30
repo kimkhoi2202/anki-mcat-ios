@@ -1,12 +1,15 @@
 import SwiftUI
 import AnkiKit
 
-/// Sync login screen, cloning AnkiDroid's `LoginFragment`: an email/username
-/// field, a password field, and — adapted for self-hosted servers — a sync-server
-/// dropdown (our self-hosted MCAT server, AnkiWeb, or "Other…", which reveals a
-/// custom URL field).
+/// Sync login screen, a close port of AnkiDroid's `LoginFragment`
+/// (`res/layout/fragment_my_account.xml`): a hero logo, a username field with a
+/// leading mail icon, a password field with a leading lock icon and a show/hide
+/// toggle, a disabled-until-valid "Log In" button, and the AnkiWeb account links
+/// (reset password, sign up, privacy, forgot email).
 ///
-/// Submitting calls `sync_login`; on success the host key is stored in the
+/// The sync **server** is chosen on the Settings screen (as in AnkiDroid, whose
+/// custom sync server lives in Preferences), not here. Submitting calls
+/// `sync_login` against that server; on success the host key is stored in the
 /// Keychain and a sync is kicked off (AnkiDroid offers "Sync now?" after login).
 struct LoginView: View {
     @ObservedObject var store: AnkiStore
@@ -14,65 +17,33 @@ struct LoginView: View {
 
     @State private var username = ""
     @State private var password = ""
-    /// Which sync server to use; `.other` reveals the custom URL field.
-    @State private var serverChoice: ServerChoice = .mcat
-    /// Custom server URL, used only when `serverChoice == .other`.
-    @State private var customServerURL = ""
+    @State private var showPassword = false
+    @State private var usernameError: String?
+    @State private var passwordError: String?
+    @State private var usernameTouched = false
+    @State private var passwordTouched = false
     @State private var submitting = false
     @FocusState private var focused: Field?
 
-    private enum Field { case username, password, server }
+    private enum Field { case username, password }
 
-    /// The group's self-hosted sync server (deployed on Fly.io).
-    static let mcatServerURL = "https://anki-mcat-sync.fly.dev/"
+    // AnkiDroid validation strings (res/values: invalid_email, password_empty).
+    private static let invalidEmail = "Enter a valid email"
+    private static let passwordRequired = "Password is required"
 
-    /// Sync server presets offered in the dropdown.
-    private enum ServerChoice: Hashable, CaseIterable {
-        case mcat
-        case ankiweb
-        case other
+    // AnkiWeb account links (AnkiDroid res/values/constants.xml).
+    private static let resetPasswordURL = URL(string: "https://ankiweb.net/account/resetpw")!
+    private static let signUpURL = URL(string: "https://ankiweb.net/account/register")!
+    private static let privacyURL = URL(string: "https://ankiweb.net/account/privacy")!
+    private static let forgotEmailURL = URL(
+        string: "https://github.com/ankidroid/Anki-Android/wiki/FAQ#forgotten-ankiweb-email-instructions"
+    )!
 
-        var label: String {
-            switch self {
-            case .mcat: return "MCAT Sync (our server)"
-            case .ankiweb: return "AnkiWeb (default)"
-            case .other: return "Other…"
-            }
-        }
-    }
-
-    /// The endpoint string passed to `login` ("" means AnkiWeb / default).
-    private var resolvedEndpoint: String {
-        switch serverChoice {
-        case .mcat: return Self.mcatServerURL
-        case .ankiweb: return ""
-        case .other: return customServerURL
-        }
-    }
-
+    /// Mirrors AnkiDroid's `loginButtonEnabled`: both fields non-empty.
     private var canSubmit: Bool {
-        guard !username.trimmingCharacters(in: .whitespaces).isEmpty,
-              !password.isEmpty,
-              !submitting
-        else { return false }
-        if serverChoice == .other {
-            return !customServerURL.trimmingCharacters(in: .whitespaces).isEmpty
-        }
-        return true
-    }
-
-    /// Maps a stored/launch-arg endpoint to the matching dropdown selection.
-    private func selectServer(for endpoint: String?) {
-        let value = (endpoint ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if value.isEmpty {
-            serverChoice = .ankiweb
-        } else if value.normalizedURL == Self.mcatServerURL.normalizedURL {
-            serverChoice = .mcat
-            customServerURL = ""
-        } else {
-            serverChoice = .other
-            customServerURL = value
-        }
+        !username.trimmingCharacters(in: .whitespaces).isEmpty
+            && !password.isEmpty
+            && !submitting
     }
 
     var body: some View {
@@ -81,20 +52,20 @@ struct LoginView: View {
                 DS.background.ignoresSafeArea()
                 ScrollView {
                     VStack(alignment: .leading, spacing: DS.Spacing.l) {
-                        header
+                        hero
                         fields
                         if let error = store.loginErrorMessage {
                             errorBanner(error)
                         }
                         submitButton
-                        footnote
+                        links
                     }
                     .padding(DS.Spacing.l)
                     .frame(maxWidth: 520)
                     .frame(maxWidth: .infinity)
                 }
             }
-            .navigationTitle("Sync Login")
+            .navigationTitle("AnkiWeb Account")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -102,101 +73,129 @@ struct LoginView: View {
                         .disabled(submitting)
                 }
             }
-            .onAppear {
-                // Prefill from the stored account.
-                username = store.syncUsername
-                // Prefill the server dropdown from the last-used endpoint, if any.
-                if let saved = store.customSyncServer {
-                    selectServer(for: saved)
+            .onChange(of: focused) { newValue in
+                // Validate on blur and clear on focus, like AnkiDroid's
+                // onUserNameFocusChange / onPasswordFocusChange. A field is only
+                // flagged once it has actually been focused (touched), so we never
+                // show an error before the user has had a chance to type.
+                if newValue == .username { usernameTouched = true }
+                if newValue == .password { passwordTouched = true }
+                if newValue == .username {
+                    usernameError = nil
+                } else if usernameTouched, username.trimmingCharacters(in: .whitespaces).isEmpty {
+                    usernameError = Self.invalidEmail
                 }
+                if newValue == .password {
+                    passwordError = nil
+                } else if passwordTouched, password.isEmpty {
+                    passwordError = Self.passwordRequired
+                }
+            }
+            .onAppear {
+                username = store.syncUsername
                 #if DEBUG
-                // Launch-argument overrides for automated screenshots (debug-only).
-                let defaults = UserDefaults.standard
-                if let user = defaults.string(forKey: "syncUser") { username = user }
-                if let server = defaults.string(forKey: "syncServer") { selectServer(for: server) }
+                if let user = UserDefaults.standard.string(forKey: "syncUser") { username = user }
                 #endif
                 focused = username.isEmpty ? .username : .password
             }
         }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.s) {
-            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(DS.accent)
-            Text("Log in to sync")
-                .font(DS.Typography.title)
-                .foregroundStyle(DS.textPrimary)
-            Text("Sign in to your AnkiWeb account, or point at a self-hosted sync server below.")
-                .font(DS.Typography.caption)
-                .foregroundStyle(DS.textSecondary)
+    // MARK: - Hero
+
+    private var hero: some View {
+        VStack(spacing: DS.Spacing.m) {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [DS.accent, DS.accent.opacity(0.65)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: 96, height: 96)
+                .overlay(
+                    Image(systemName: "rectangle.stack.fill")
+                        .font(.system(size: 42, weight: .semibold))
+                        .foregroundStyle(.white)
+                )
+                .shadow(color: DS.accent.opacity(0.3), radius: 12, y: 6)
+            VStack(spacing: DS.Spacing.xs) {
+                Text("Log in to sync")
+                    .font(DS.Typography.title)
+                    .foregroundStyle(DS.textPrimary)
+                Text("Sign in to your AnkiWeb account. Choose a self-hosted server in Settings.")
+                    .font(DS.Typography.caption)
+                    .foregroundStyle(DS.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
         }
+        .frame(maxWidth: .infinity)
         .padding(.bottom, DS.Spacing.s)
     }
 
+    // MARK: - Fields
+
     private var fields: some View {
         VStack(spacing: DS.Spacing.m) {
-            LabeledField(title: "Email / Username") {
-                TextField("you@example.com", text: $username)
-                    .textContentType(.username)
-                    .keyboardType(.emailAddress)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .focused($focused, equals: .username)
-                    .submitLabel(.next)
-                    .onSubmit { focused = .password }
-            }
-            LabeledField(title: "Password") {
-                SecureField("Password", text: $password)
-                    .textContentType(.password)
-                    .focused($focused, equals: .password)
-                    .submitLabel(serverChoice == .other ? .next : .go)
-                    .onSubmit {
-                        if serverChoice == .other { focused = .server } else { submit() }
-                    }
-            }
-            serverField
-            if serverChoice == .other {
-                LabeledField(title: "Server URL") {
-                    TextField("https://my-sync-server.example.com/", text: $customServerURL)
-                        .textContentType(.URL)
-                        .keyboardType(.URL)
+            LabeledField(title: "Username", error: usernameError) {
+                HStack(spacing: DS.Spacing.s) {
+                    Image(systemName: "envelope")
+                        .foregroundStyle(DS.textSecondary)
+                        .frame(width: 20)
+                    TextField("you@example.com", text: $username)
+                        .textContentType(.username)
+                        .keyboardType(.emailAddress)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .focused($focused, equals: .server)
-                        .submitLabel(.go)
-                        .onSubmit { submit() }
+                        .focused($focused, equals: .username)
+                        .submitLabel(.next)
+                        .onSubmit { focused = .password }
+                        .onChange(of: username) { _ in
+                            if !username.trimmingCharacters(in: .whitespaces).isEmpty {
+                                usernameError = nil
+                            }
+                        }
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+            LabeledField(title: "Password", error: passwordError) {
+                HStack(spacing: DS.Spacing.s) {
+                    Image(systemName: "lock")
+                        .foregroundStyle(DS.textSecondary)
+                        .frame(width: 20)
+                    passwordInput
+                    Button {
+                        showPassword.toggle()
+                    } label: {
+                        Image(systemName: showPassword ? "eye.slash" : "eye")
+                            .foregroundStyle(DS.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(showPassword ? "Hide password" : "Show password")
+                }
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: serverChoice)
     }
 
-    /// A dropdown picking the sync server: our self-hosted server, AnkiWeb, or a
-    /// custom URL ("Other…", which reveals the URL field below).
-    private var serverField: some View {
-        LabeledField(title: "Sync server") {
-            Menu {
-                Picker("Sync server", selection: $serverChoice) {
-                    ForEach(ServerChoice.allCases, id: \.self) { choice in
-                        Text(choice.label).tag(choice)
-                    }
-                }
-            } label: {
-                HStack(spacing: DS.Spacing.s) {
-                    Text(serverChoice.label)
-                        .foregroundStyle(DS.textPrimary)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption)
-                        .foregroundStyle(DS.textSecondary)
-                }
-                .contentShape(Rectangle())
+    /// The password entry, switching between a masked `SecureField` and a plain
+    /// `TextField` for the show/hide toggle (AnkiDroid's `password_toggle`).
+    @ViewBuilder
+    private var passwordInput: some View {
+        Group {
+            if showPassword {
+                TextField("Password", text: $password)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            } else {
+                SecureField("Password", text: $password)
             }
-            .accessibilityLabel("Sync server")
-            .accessibilityValue(serverChoice.label)
+        }
+        .textContentType(.password)
+        .focused($focused, equals: .password)
+        .submitLabel(.go)
+        .onSubmit { submit() }
+        .onChange(of: password) { _ in
+            if !password.isEmpty { passwordError = nil }
         }
     }
 
@@ -213,11 +212,34 @@ struct LoginView: View {
         .disabled(!canSubmit)
     }
 
-    private var footnote: some View {
-        Text("Your password is exchanged for a sync key, which is stored securely in the Keychain.")
-            .font(DS.Typography.caption)
-            .foregroundStyle(DS.textSecondary)
-            .padding(.top, DS.Spacing.xs)
+    // MARK: - Links (AnkiDroid's AnkiWeb account links)
+
+    private var links: some View {
+        VStack(spacing: DS.Spacing.m) {
+            Link("Reset password", destination: Self.resetPasswordURL)
+
+            VStack(spacing: 2) {
+                Text("Don’t have an AnkiWeb account? It’s free!")
+                    .font(DS.Typography.caption.weight(.semibold))
+                    .foregroundStyle(DS.textPrimary)
+                Text("Note: AnkiWeb is a separate service.")
+                    .font(DS.Typography.caption)
+                    .italic()
+                    .foregroundStyle(DS.textSecondary)
+            }
+            .multilineTextAlignment(.center)
+
+            Link("Sign up", destination: Self.signUpURL)
+
+            HStack(spacing: DS.Spacing.l) {
+                Link("Privacy", destination: Self.privacyURL)
+                Link("Forgot Email?", destination: Self.forgotEmailURL)
+            }
+        }
+        .font(DS.Typography.caption.weight(.medium))
+        .tint(DS.accent)
+        .frame(maxWidth: .infinity)
+        .padding(.top, DS.Spacing.s)
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -238,15 +260,13 @@ struct LoginView: View {
     }
 
     private func submit() {
+        usernameError = username.trimmingCharacters(in: .whitespaces).isEmpty ? Self.invalidEmail : nil
+        passwordError = password.isEmpty ? Self.passwordRequired : nil
         guard canSubmit else { return }
         focused = nil
         submitting = true
         Task {
-            let success = await store.login(
-                username: username,
-                password: password,
-                endpoint: resolvedEndpoint
-            )
+            let success = await store.login(username: username, password: password)
             submitting = false
             if success {
                 dismiss()
@@ -257,9 +277,11 @@ struct LoginView: View {
     }
 }
 
-/// A titled input row: a small caption label above a DesignSystem-styled field.
+/// A titled input row: a small caption label above a DesignSystem-styled field,
+/// with an optional inline error message (and red border) below it.
 private struct LabeledField<Content: View>: View {
     let title: String
+    var error: String?
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -278,18 +300,14 @@ private struct LabeledField<Content: View>: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: DS.Radius.medium, style: .continuous)
-                        .strokeBorder(DS.separator, lineWidth: 1)
+                        .strokeBorder(error == nil ? DS.separator : DS.again, lineWidth: 1)
                 )
+            if let error {
+                Text(error)
+                    .font(DS.Typography.caption)
+                    .foregroundStyle(DS.again)
+                    .accessibilityLabel("Error: \(error)")
+            }
         }
-    }
-}
-
-private extension String {
-    /// Lowercased, trailing-slash-stripped form for comparing server URLs so
-    /// that e.g. `https://host/` and `https://host` match the same preset.
-    var normalizedURL: String {
-        var s = trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        while s.hasSuffix("/") { s.removeLast() }
-        return s
     }
 }

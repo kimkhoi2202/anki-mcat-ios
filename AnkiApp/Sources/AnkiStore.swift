@@ -60,9 +60,15 @@ final class AnkiStore: ObservableObject {
     /// must choose to upload (keep this device) or download (keep the server).
     @Published var pendingConflict = false
 
-    /// Custom sync server endpoint (nil = default AnkiWeb), surfaced read-only on
-    /// the Settings screen. Mirrors `savedEndpoint`.
-    @Published private(set) var customSyncServer: String?
+    /// User-selected sync server (nil = default AnkiWeb), edited on the Settings
+    /// screen and used as the endpoint when logging in. Mirrors AnkiDroid's
+    /// custom sync server preference (read by `getEndpoint()`); persisted in
+    /// UserDefaults so it survives launches and logout.
+    @Published private(set) var preferredSyncServer: String?
+
+    /// The group's self-hosted sync server (deployed on Fly.io).
+    static let mcatSyncServerURL = "https://anki-mcat-sync.fly.dev/"
+    private static let preferredServerKey = "preferredSyncServerEndpoint"
 
     // MARK: - Preferences state (engine-backed)
 
@@ -74,11 +80,6 @@ final class AnkiStore: ObservableObject {
     /// whether the Settings screen shows the reviewing toggles).
     @Published private(set) var preferencesAvailable = false
 
-    /// Custom server endpoint from the stored credentials (nil = default
-    /// AnkiWeb). Kept in sync with the published `customSyncServer`.
-    private var savedEndpoint: String? {
-        didSet { customSyncServer = savedEndpoint }
-    }
     /// Auth + media USN captured when a full-sync conflict is raised, reused once
     /// the user picks a resolution.
     private var pendingConflictAuth: Anki_Sync_SyncAuth?
@@ -125,6 +126,7 @@ final class AnkiStore: ObservableObject {
             try seedIfNeeded(backend)
             refreshDecks()
             refreshUndo()
+            loadPreferredSyncServer()
             loadLoginState()
             loadPreferences()
             status = "Engine OK"
@@ -682,19 +684,42 @@ final class AnkiStore: ObservableObject {
         if let creds = SyncKeychain.load() {
             isLoggedIn = true
             syncUsername = creds.username
-            savedEndpoint = creds.endpoint
+            if let endpoint = creds.endpoint, !endpoint.isEmpty {
+                preferredSyncServer = endpoint
+            }
         }
+    }
+
+    /// Persists the user's chosen sync server (nil/"" = AnkiWeb) and publishes it.
+    /// The Settings server picker writes here; `login` reads it as the endpoint.
+    func setPreferredSyncServer(_ endpoint: String?) {
+        let trimmed = endpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = (trimmed?.isEmpty == false) ? trimmed : nil
+        preferredSyncServer = value
+        let defaults = UserDefaults.standard
+        if let value {
+            defaults.set(value, forKey: Self.preferredServerKey)
+        } else {
+            defaults.removeObject(forKey: Self.preferredServerKey)
+        }
+    }
+
+    /// Loads the persisted sync server preference at launch.
+    private func loadPreferredSyncServer() {
+        preferredSyncServer = UserDefaults.standard.string(forKey: Self.preferredServerKey)
     }
 
     /// Exchanges username/password (+ optional custom server) for a host key and
     /// persists it. Returns true on success. On failure, `loginErrorMessage` is
     /// set for the login sheet. Mirrors AnkiDroid's `LoginViewModel.handleLogin`.
-    func login(username: String, password: String, endpoint: String?) async -> Bool {
+    func login(username: String, password: String, endpoint: String? = nil) async -> Bool {
         guard let backend else { return false }
         loginErrorMessage = nil
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        let server = endpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let serverOrNil = (server?.isEmpty == false) ? server : nil
+        // Endpoint comes from the Settings server preference unless one is passed
+        // explicitly (e.g. the debug auto-login hook). Mirrors getEndpoint().
+        let chosen = (endpoint ?? preferredSyncServer)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let serverOrNil = (chosen?.isEmpty == false) ? chosen : nil
         do {
             let auth = try await runDetached {
                 try backend.syncLogin(username: user, password: password, endpoint: serverOrNil)
@@ -705,7 +730,7 @@ final class AnkiStore: ObservableObject {
             )
             isLoggedIn = true
             syncUsername = user
-            savedEndpoint = resolvedEndpoint
+            setPreferredSyncServer(resolvedEndpoint)
             return true
         } catch {
             if let syncError = SyncError(error) {
@@ -724,7 +749,8 @@ final class AnkiStore: ObservableObject {
         SyncKeychain.clear()
         isLoggedIn = false
         syncUsername = ""
-        savedEndpoint = nil
+        // Keep `preferredSyncServer` so the next login uses the same server
+        // (AnkiDroid likewise keeps the custom sync server preference on logout).
         syncPhase = .idle
     }
 
@@ -795,7 +821,7 @@ final class AnkiStore: ObservableObject {
             // The server may hand us a new endpoint to use going forward.
             if response.hasNewEndpoint, !response.newEndpoint.isEmpty {
                 auth = Backend.syncAuth(hkey: creds.hkey, endpoint: response.newEndpoint)
-                savedEndpoint = response.newEndpoint
+                setPreferredSyncServer(response.newEndpoint)
                 try? SyncKeychain.save(
                     SyncCredentials(username: creds.username, hkey: creds.hkey, endpoint: response.newEndpoint)
                 )

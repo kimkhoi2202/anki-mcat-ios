@@ -14,10 +14,14 @@ import AnkiKit
 struct SettingsView: View {
     @ObservedObject var store: AnkiStore
     @AppStorage(AppTheme.storageKey) private var appThemeRaw = AppTheme.system.rawValue
+    @State private var serverChoice: ServerChoice = .ankiweb
+    @State private var customServerURL = ""
+    @State private var serverLoaded = false
 
     var body: some View {
         Form {
             accountSection
+            serverSection
             appearanceSection
             reviewingSection
             dataSection
@@ -28,7 +32,10 @@ struct SettingsView: View {
         .tint(DS.accent)
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
-        .task { store.loadPreferences() }
+        .task {
+            store.loadPreferences()
+            loadServerState()
+        }
     }
 
     // MARK: - Account / Sync
@@ -37,9 +44,6 @@ struct SettingsView: View {
         Section {
             if store.isLoggedIn {
                 DSStatRow("Account", value: store.syncUsername.isEmpty ? "AnkiWeb" : store.syncUsername)
-                if let server = store.customSyncServer, !server.isEmpty {
-                    DSStatRow("Sync server", value: server)
-                }
                 Button(role: .destructive) {
                     store.logout()
                 } label: {
@@ -63,6 +67,45 @@ struct SettingsView: View {
                 store.isLoggedIn
                     ? "Your collection syncs with this account."
                     : "Sign in to your AnkiWeb account (or a self-hosted server) to sync."
+            )
+        }
+    }
+
+    // MARK: - Sync server
+
+    /// Editable sync-server picker. AnkiDroid keeps the custom sync server in
+    /// Preferences (not on the login screen); we mirror that here. The choice is
+    /// written to `store.preferredSyncServer`, which `login` uses as the endpoint.
+    private var serverSection: some View {
+        Section {
+            Picker(selection: $serverChoice) {
+                Text("MCAT Sync (our server)").tag(ServerChoice.mcat)
+                Text("AnkiWeb (default)").tag(ServerChoice.ankiweb)
+                Text("Other…").tag(ServerChoice.other)
+            } label: {
+                Text("Sync server")
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+            }
+            .pickerStyle(.menu)
+            .tint(DS.textSecondary)
+            .onChange(of: serverChoice) { _ in applyServer() }
+
+            if serverChoice == .other {
+                TextField("https://my-sync-server.example.com/", text: $customServerURL)
+                    .textContentType(.URL)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+                    .onChange(of: customServerURL) { _ in applyServer() }
+            }
+        } header: {
+            sectionHeader("Sync server")
+        } footer: {
+            sectionFooter(
+                "Used when you log in. To switch servers, log out and log in again."
             )
         }
     }
@@ -192,5 +235,50 @@ struct SettingsView: View {
         Text(text)
             .font(DS.Typography.caption)
             .foregroundStyle(DS.textSecondary)
+    }
+
+    /// Seeds the picker from the persisted preference (once per appearance).
+    private func loadServerState() {
+        guard !serverLoaded else { return }
+        serverLoaded = true
+        let endpoint = store.preferredSyncServer
+        if endpoint == nil || endpoint?.isEmpty == true {
+            serverChoice = .ankiweb
+        } else if endpoint!.normalizedURL == AnkiStore.mcatSyncServerURL.normalizedURL {
+            serverChoice = .mcat
+        } else {
+            serverChoice = .other
+            customServerURL = endpoint!
+        }
+    }
+
+    /// Writes the current picker choice to the store's persisted preference.
+    private func applyServer() {
+        switch serverChoice {
+        case .mcat:
+            store.setPreferredSyncServer(AnkiStore.mcatSyncServerURL)
+        case .ankiweb:
+            store.setPreferredSyncServer(nil)
+        case .other:
+            let trimmed = customServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            store.setPreferredSyncServer(trimmed.isEmpty ? nil : trimmed)
+        }
+    }
+}
+
+/// Sync server presets offered in the Settings dropdown.
+private enum ServerChoice: Hashable {
+    case mcat
+    case ankiweb
+    case other
+}
+
+private extension String {
+    /// Lowercased, trailing-slash-stripped form for comparing server URLs so
+    /// that e.g. `https://host/` and `https://host` match the same preset.
+    var normalizedURL: String {
+        var s = trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while s.hasSuffix("/") { s.removeLast() }
+        return s
     }
 }
