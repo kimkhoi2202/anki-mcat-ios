@@ -23,6 +23,11 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "6.0"
+        # Device builds: automatic signing. Set DEVELOPMENT_TEAM to your Apple
+        # Developer Team ID (or pass DEVELOPMENT_TEAM=XXXX to xcodebuild) to build
+        # for / install on a physical device. Simulator builds need no team.
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
         GENERATE_INFOPLIST_FILE: "YES"
         INFOPLIST_KEY_CFBundleDisplayName: "Anki Speedrun"
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
