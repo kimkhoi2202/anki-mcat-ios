@@ -134,19 +134,23 @@ struct FilteredDeckView: View {
         let deckName = trimmedName
         guard !deckName.isEmpty else { return }
         creating = true
-        defer { creating = false }
-        do {
-            let result = try store.createFilteredDeck(
-                name: deckName,
-                search: search.trimmingCharacters(in: .whitespacesAndNewlines),
-                limit: limit,
-                order: order,
-                reschedule: reschedule
-            )
-            onCreated(result.deckID)
-            dismiss()
-        } catch {
-            errorMessage = describe(error)
+        // Build off the main actor so the gather doesn't hang the UI; `creating`
+        // stays true for the duration so the Build button shows as busy.
+        Task { @MainActor in
+            defer { creating = false }
+            do {
+                let result = try await store.createFilteredDeck(
+                    name: deckName,
+                    search: search.trimmingCharacters(in: .whitespacesAndNewlines),
+                    limit: limit,
+                    order: order,
+                    reschedule: reschedule
+                )
+                onCreated(result.deckID)
+                dismiss()
+            } catch {
+                errorMessage = describe(error)
+            }
         }
     }
 

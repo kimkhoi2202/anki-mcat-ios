@@ -22,6 +22,10 @@ struct ImportExportView: View {
     @State private var resultMessage: String?
     @State private var errorMessage: String?
     @State private var share: ShareItem?
+    /// A picked whole-collection package awaiting the destructive-replace
+    /// confirmation. Non-nil drives the confirm alert (clone of AnkiDroid's
+    /// `DIALOG_IMPORT_REPLACE_CONFIRM`).
+    @State private var pendingReplace: PendingReplace?
 
     /// `.apkg`/`.colpkg` are custom extensions Anki doesn't register a system
     /// UTI for, so resolve them to (dynamic) `UTType`s by filename extension.
@@ -58,8 +62,28 @@ struct ImportExportView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+        // Destructive whole-collection replace confirmation, cloning AnkiDroid's
+        // DIALOG_IMPORT_REPLACE_CONFIRM: the import only runs on explicit confirm.
+        .alert(
+            "Replace collection?",
+            isPresented: replaceConfirmPresented,
+            presenting: pendingReplace
+        ) { pending in
+            Button("Replace", role: .destructive) { confirmReplace(pending) }
+            Button("Cancel", role: .cancel) { pendingReplace = nil }
+        } message: { pending in
+            Text("This will delete your existing collection and replace it with the data of file “\(pending.displayName)”.")
+        }
         .task {
             if selectedDeckID == nil { selectedDeckID = defaultExportDeckID }
+            #if DEBUG
+            // Screenshot/automation hook: show the destructive replace
+            // confirmation with a sample collection file, without driving the
+            // system file picker.
+            if ProcessInfo.processInfo.arguments.contains("-startInImportReplaceConfirm") {
+                pendingReplace = PendingReplace(url: URL(fileURLWithPath: "/tmp/collection.colpkg"))
+            }
+            #endif
         }
     }
 
@@ -148,10 +172,24 @@ struct ImportExportView: View {
         switch result {
         case .success(let urls):
             guard let url = urls.first else { return }
-            runImport(url)
+            // A .colpkg (or the conventional collection.apkg) replaces the WHOLE
+            // collection — destructive and irreversible — so require an explicit
+            // confirmation first, cloning AnkiDroid's DIALOG_IMPORT_REPLACE_CONFIRM.
+            // Any other .apkg only adds its notes, so it imports straight away.
+            if AnkiStore.isCollectionPackage(url.lastPathComponent) {
+                pendingReplace = PendingReplace(url: url)
+            } else {
+                runImport(url)
+            }
         case .failure(let error):
             errorMessage = describe(error)
         }
+    }
+
+    /// Proceeds with a whole-collection replace the user has explicitly confirmed.
+    private func confirmReplace(_ pending: PendingReplace) {
+        pendingReplace = nil
+        runImport(pending.url)
     }
 
     private func runImport(_ url: URL) {
@@ -243,6 +281,10 @@ struct ImportExportView: View {
         Binding(get: { resultMessage != nil }, set: { if !$0 { resultMessage = nil } })
     }
 
+    private var replaceConfirmPresented: Binding<Bool> {
+        Binding(get: { pendingReplace != nil }, set: { if !$0 { pendingReplace = nil } })
+    }
+
     private var errorPresented: Binding<Bool> {
         Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
     }
@@ -264,6 +306,14 @@ struct ImportExportView: View {
 private struct ShareItem: Identifiable {
     let id = UUID()
     let url: URL
+}
+
+/// A pending whole-collection replace awaiting confirmation: the picked package
+/// URL plus the filename shown in the destructive-confirm prompt.
+private struct PendingReplace: Identifiable {
+    let id = UUID()
+    let url: URL
+    var displayName: String { url.lastPathComponent }
 }
 
 /// Minimal `UIActivityViewController` bridge for the system share sheet, used to

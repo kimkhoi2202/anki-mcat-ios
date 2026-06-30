@@ -161,29 +161,33 @@ final class AnkiStore: ObservableObject {
     // MARK: - Deck management
 
     /// Creates a new deck (`::`-separated names create subdecks), then refreshes
-    /// the deck list so it appears. Throws so the caller can surface a clear
-    /// message (e.g. an invalid name). Clone of AnkiDroid's create-deck action.
-    func createDeck(name: String) throws {
+    /// the deck list so it appears. Runs the backend write off the main actor so
+    /// the UI stays responsive. Throws so the caller can surface a clear message
+    /// (e.g. an invalid name). Clone of AnkiDroid's create-deck action.
+    func createDeck(name: String) async throws {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        _ = try backend.createDeck(name: name)
+        _ = try await runDetached { try backend.createDeck(name: name) }
         refreshDecks()
         refreshUndo()
     }
 
     /// Renames a deck in place (reparenting its subdecks), then refreshes the
-    /// list. Clone of AnkiDroid's rename context action.
-    func renameDeck(id: Int64, name: String) throws {
+    /// list. Runs off the main actor so a large reparent doesn't hang the UI.
+    /// Clone of AnkiDroid's rename context action.
+    func renameDeck(id: Int64, name: String) async throws {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        try backend.renameDeck(id: id, name: name)
+        try await runDetached { try backend.renameDeck(id: id, name: name) }
         refreshDecks()
         refreshUndo()
     }
 
-    /// Deletes a deck and its cards, then refreshes the list. Clone of
-    /// AnkiDroid's delete-deck action (the confirmation lives in the view).
-    func deleteDeck(id: Int64) throws {
+    /// Deletes a deck and its cards, then refreshes the list. Runs off the main
+    /// actor (deleting a big deck removes all its cards) so the UI stays
+    /// responsive. Clone of AnkiDroid's delete-deck action (the confirmation
+    /// lives in the view).
+    func deleteDeck(id: Int64) async throws {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        _ = try backend.removeDecks(ids: [id])
+        _ = try await runDetached { try backend.removeDecks(ids: [id]) }
         // Deleting the current deck falls study back to the Default deck.
         if currentDeckID == id { currentDeckID = 1 }
         refreshDecks()
@@ -341,14 +345,19 @@ final class AnkiStore: ObservableObject {
     }
 
     /// Applies a notetype change to the given notes using the chosen mapping,
-    /// then refreshes derived state (cards may be added/removed). Throws so the
-    /// view can surface a clear message.
+    /// then refreshes derived state (cards may be added/removed). Runs the
+    /// conversion off the main actor (it rewrites every affected note/card) so
+    /// the UI doesn't hang. Throws so the view can surface a clear message.
     func changeNotetype(
         noteIDs: [Int64], info: ChangeNotetypeInfo,
         fieldMap: [Int?], templateMap: [Int?]
-    ) throws {
+    ) async throws {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        try backend.changeNotetype(noteIDs: noteIDs, info: info, fieldMap: fieldMap, templateMap: templateMap)
+        try await runDetached {
+            try backend.changeNotetype(
+                noteIDs: noteIDs, info: info, fieldMap: fieldMap, templateMap: templateMap
+            )
+        }
         refreshDecks()
         refreshUndo()
     }
@@ -364,11 +373,15 @@ final class AnkiStore: ObservableObject {
     func createFilteredDeck(
         name: String, search: String, limit: Int,
         order: FilteredDeckOrder, reschedule: Bool
-    ) throws -> FilteredDeckResult {
+    ) async throws -> FilteredDeckResult {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        let result = try backend.createFilteredDeck(
-            name: name, search: search, limit: limit, order: order, reschedule: reschedule
-        )
+        // Gathering cards into the filtered deck can be heavy on a large
+        // collection, so run it off the main actor to keep the UI responsive.
+        let result = try await runDetached {
+            try backend.createFilteredDeck(
+                name: name, search: search, limit: limit, order: order, reschedule: reschedule
+            )
+        }
         currentDeckID = result.deckID
         refreshDecks()
         refreshUndo()

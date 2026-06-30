@@ -32,6 +32,9 @@ struct ChangeNotetypeView: View {
     @State private var templateMap: [Int] = []
     @State private var errorMessage: String?
     @State private var didLoad = false
+    /// True while the conversion is running, so the Save button shows as busy
+    /// (the change runs off the main actor and can take a moment).
+    @State private var saving = false
 
     /// Sentinel for "(Nothing)" in a mapping picker (the engine's `-1`).
     private let noneTag = -1
@@ -59,7 +62,7 @@ struct ChangeNotetypeView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { save() }
                         .fontWeight(.semibold)
-                        .disabled(info == nil)
+                        .disabled(info == nil || saving)
                 }
             }
             .alert(
@@ -201,14 +204,20 @@ struct ChangeNotetypeView: View {
         // Cloze keeps an empty template map (the engine ignores it); otherwise
         // pass the chosen template mapping.
         let templates = info.isCloze ? [] : templateMap.map { $0 == noneTag ? nil : $0 }
-        do {
-            try store.changeNotetype(
-                noteIDs: [noteID], info: info, fieldMap: fields, templateMap: templates
-            )
-            onChanged()
-            dismiss()
-        } catch {
-            errorMessage = describe(error)
+        saving = true
+        // Convert off the main actor (it rewrites every affected card) so the UI
+        // doesn't hang; the Save button stays disabled while it runs.
+        Task { @MainActor in
+            defer { saving = false }
+            do {
+                try await store.changeNotetype(
+                    noteIDs: [noteID], info: info, fieldMap: fields, templateMap: templates
+                )
+                onChanged()
+                dismiss()
+            } catch {
+                errorMessage = describe(error)
+            }
         }
     }
 
