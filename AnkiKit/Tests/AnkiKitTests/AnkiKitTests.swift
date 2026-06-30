@@ -788,4 +788,80 @@ final class AnkiKitTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Points at Stake (the Rust change, running on the engine)
+
+    /// Seeds a *due review* card tagged with `tags`, carrying an FSRS memory
+    /// state whose `stability` we control plus a last-review time of one day ago
+    /// — so the card's retrievability (and therefore its topic's weakness) is
+    /// driven purely by stability: lower stability → lower retrievability →
+    /// higher weakness. Mirrors the rslib `points_at_stake` test's
+    /// `add_due_review_card`, but goes through real RPCs (`add_note`, `get_card`,
+    /// `update_cards`) rather than low-level storage.
+    private func seedDueReviewCard(
+        _ backend: Backend, notetypeID: Int64, tags: [String], stability: Float
+    ) throws -> Int64 {
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1, tags: tags)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "nid:\(nid)").first,
+                                   "the added note should have a card")
+        var card = try backend.getCard(cardID: cardID)
+        card.ctype = 2          // CardType::Review
+        card.queue = 2          // CardQueue::Review
+        card.due = 0            // due today (a fresh collection is day 0)
+        card.interval = 10
+        card.reps = 1
+        var memory = Anki_Cards_FsrsMemoryState()
+        memory.stability = stability
+        memory.difficulty = 5
+        card.memoryState = memory
+        // One day ago, so elapsed time > 0 and the stability difference matters.
+        card.lastReviewTimeSecs = Int64(Date().timeIntervalSince1970) - 86_400
+        try backend.updateCards([card], skipUndoEntry: true)
+        return cardID
+    }
+
+    /// The Rust change end-to-end on the engine: two due review cards in
+    /// different MCAT topics — one strong (high stability → high retrievability →
+    /// low weakness), one weak (low stability → low retrievability → high
+    /// weakness). `pointsAtStakeQueue` (SchedulerService, service 13, method 39)
+    /// must return them weakest-topic-first and populate the per-topic summaries.
+    /// This calls the real engine RPC and gets scored data back, proving method
+    /// 13/39 is baked into AnkiCore.
+    func testPointsAtStakeQueueOrdersWeakTopicFirst() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+
+        let strong = try seedDueReviewCard(
+            backend, notetypeID: notetypeID, tags: ["MCAT::Strong"], stability: 10_000
+        )
+        let weak = try seedDueReviewCard(
+            backend, notetypeID: notetypeID, tags: ["MCAT::Weak"], stability: 1
+        )
+
+        let queue = try backend.pointsAtStakeQueue(topicPrefix: "MCAT::", weightBySize: false)
+
+        // Both due review cards come back, weakest topic first.
+        let order = queue.cards.map(\.cardID)
+        XCTAssertEqual(order, [weak, strong], "the weaker topic must be surfaced first")
+
+        let weakCard = try XCTUnwrap(queue.cards.first { $0.cardID == weak })
+        let strongCard = try XCTUnwrap(queue.cards.first { $0.cardID == strong })
+        XCTAssertEqual(weakCard.topic, "Weak", "topic is the component below the MCAT:: prefix")
+        XCTAssertEqual(strongCard.topic, "Strong")
+        XCTAssertGreaterThan(weakCard.pointsAtStake, strongCard.pointsAtStake,
+                             "the weak topic's score must exceed the strong topic's")
+        XCTAssertGreaterThan(weakCard.weakness, strongCard.weakness,
+                             "lower retrievability means higher weakness")
+
+        // Per-topic aggregates are populated (one card in each topic).
+        XCTAssertEqual(queue.topics.count, 2, "the two MCAT topics should be summarized")
+        let weakTopic = try XCTUnwrap(queue.topics.first { $0.topic == "Weak" },
+                                      "the weak topic should have a summary")
+        let strongTopic = try XCTUnwrap(queue.topics.first { $0.topic == "Strong" },
+                                        "the strong topic should have a summary")
+        XCTAssertEqual(weakTopic.cardCount, 1)
+        XCTAssertEqual(strongTopic.cardCount, 1)
+        XCTAssertGreaterThan(weakTopic.weakness, strongTopic.weakness,
+                             "the weak topic summary must report higher weakness")
+    }
 }
