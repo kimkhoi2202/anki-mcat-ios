@@ -362,16 +362,16 @@ final class AnkiKitTests: XCTestCase {
         let backend = try freshCollection()
         let notetypeID = try basicNotetypeID(backend)
 
-        let deckID = try backend.createDeck(name: "Spanish")
+        let deckID = try backend.createDeck(name: "MCAT")
         XCTAssertGreaterThan(deckID, 0, "a created deck should have a real id")
         XCTAssertTrue(
-            try backend.deckNames().contains { $0.id == deckID && $0.name == "Spanish" },
+            try backend.deckNames().contains { $0.id == deckID && $0.name == "MCAT" },
             "the new deck should appear in the deck list"
         )
 
-        try backend.renameDeck(id: deckID, name: "Spanish Verbs")
+        try backend.renameDeck(id: deckID, name: "MCAT Biology")
         let renamed = try backend.deckNames().first { $0.id == deckID }
-        XCTAssertEqual(renamed?.name, "Spanish Verbs", "the deck should keep its id but change name")
+        XCTAssertEqual(renamed?.name, "MCAT Biology", "the deck should keep its id but change name")
 
         // Put a card in the deck so the delete reports the card it removes
         // (remove_decks returns the card count, not the deck count).
@@ -787,5 +787,159 @@ final class AnkiKitTests: XCTestCase {
                 return XCTFail("expected a backend error for an empty filtered deck")
             }
         }
+    }
+
+    // MARK: - Points at Stake (the Rust change, running on the engine)
+
+    /// Seeds a *due review* card tagged with `tags`, carrying an FSRS memory
+    /// state whose `stability` we control plus a last-review time of one day ago
+    /// — so the card's retrievability (and therefore its topic's weakness) is
+    /// driven purely by stability: lower stability → lower retrievability →
+    /// higher weakness. Mirrors the rslib `points_at_stake` test's
+    /// `add_due_review_card`, but goes through real RPCs (`add_note`, `get_card`,
+    /// `update_cards`) rather than low-level storage.
+    private func seedDueReviewCard(
+        _ backend: Backend, notetypeID: Int64, tags: [String], stability: Float
+    ) throws -> Int64 {
+        let nid = try backend.addNote(notetypeID: notetypeID, fields: ["Q", "A"], deckID: 1, tags: tags)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "nid:\(nid)").first,
+                                   "the added note should have a card")
+        var card = try backend.getCard(cardID: cardID)
+        card.ctype = 2          // CardType::Review
+        card.queue = 2          // CardQueue::Review
+        card.due = 0            // due today (a fresh collection is day 0)
+        card.interval = 10
+        card.reps = 1
+        var memory = Anki_Cards_FsrsMemoryState()
+        memory.stability = stability
+        memory.difficulty = 5
+        card.memoryState = memory
+        // One day ago, so elapsed time > 0 and the stability difference matters.
+        card.lastReviewTimeSecs = Int64(Date().timeIntervalSince1970) - 86_400
+        try backend.updateCards([card], skipUndoEntry: true)
+        return cardID
+    }
+
+    /// The Rust change end-to-end on the engine: two due review cards in
+    /// different MCAT topics — one strong (high stability → high retrievability →
+    /// low weakness), one weak (low stability → low retrievability → high
+    /// weakness). `pointsAtStakeQueue` (SchedulerService, service 13, method 39)
+    /// must return them weakest-topic-first and populate the per-topic summaries.
+    /// This calls the real engine RPC and gets scored data back, proving method
+    /// 13/39 is baked into AnkiCore.
+    func testPointsAtStakeQueueOrdersWeakTopicFirst() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+
+        let strong = try seedDueReviewCard(
+            backend, notetypeID: notetypeID, tags: ["MCAT::Strong"], stability: 10_000
+        )
+        let weak = try seedDueReviewCard(
+            backend, notetypeID: notetypeID, tags: ["MCAT::Weak"], stability: 1
+        )
+
+        let queue = try backend.pointsAtStakeQueue(topicPrefix: "MCAT::", weightBySize: false)
+
+        // Both due review cards come back, weakest topic first.
+        let order = queue.cards.map(\.cardID)
+        XCTAssertEqual(order, [weak, strong], "the weaker topic must be surfaced first")
+
+        let weakCard = try XCTUnwrap(queue.cards.first { $0.cardID == weak })
+        let strongCard = try XCTUnwrap(queue.cards.first { $0.cardID == strong })
+        XCTAssertEqual(weakCard.topic, "Weak", "topic is the component below the MCAT:: prefix")
+        XCTAssertEqual(strongCard.topic, "Strong")
+        XCTAssertGreaterThan(weakCard.pointsAtStake, strongCard.pointsAtStake,
+                             "the weak topic's score must exceed the strong topic's")
+        XCTAssertGreaterThan(weakCard.weakness, strongCard.weakness,
+                             "lower retrievability means higher weakness")
+
+        // Per-topic aggregates are populated (one card in each topic).
+        XCTAssertEqual(queue.topics.count, 2, "the two MCAT topics should be summarized")
+        let weakTopic = try XCTUnwrap(queue.topics.first { $0.topic == "Weak" },
+                                      "the weak topic should have a summary")
+        let strongTopic = try XCTUnwrap(queue.topics.first { $0.topic == "Strong" },
+                                        "the strong topic should have a summary")
+        XCTAssertEqual(weakTopic.cardCount, 1)
+        XCTAssertEqual(strongTopic.cardCount, 1)
+        XCTAssertGreaterThan(weakTopic.weakness, strongTopic.weakness,
+                             "the weak topic summary must report higher weakness")
+    }
+
+    // MARK: - Coverage map (PRD 7c)
+
+    /// `coverage(forTopics:)` reports, per topic and overall, which outline
+    /// topics have >= 1 card. Seeding two of four topics (one with two cards, one
+    /// via a *descendant* subtag) leaves the other two uncovered, so coverage is
+    /// exactly 50%: it proves the engine tag search, the descendant match, the
+    /// per-section rollups, and the give-up threshold. Drives the same RPC the
+    /// app's CoverageView uses (`SearchService.searchCards`, 29/1).
+    func testCoverageReflectsSeededAndMissingTopics() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+
+        // A small two-section taxonomy standing in for the AAMC outline.
+        let topics = [
+            CoverageTopic(id: "S1.Alpha", section: "S1", name: "Alpha", tag: "MCAT::S1::Alpha"),
+            CoverageTopic(id: "S1.Beta", section: "S1", name: "Beta", tag: "MCAT::S1::Beta"),
+            CoverageTopic(id: "S2.Gamma", section: "S2", name: "Gamma", tag: "MCAT::S2::Gamma"),
+            CoverageTopic(id: "S2.Delta", section: "S2", name: "Delta", tag: "MCAT::S2::Delta"),
+        ]
+
+        // Alpha: two cards. Gamma: one exact + one *descendant* subtag card.
+        // Beta and Delta: deliberately left with no cards.
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["a1", "x"], deckID: 1, tags: ["MCAT::S1::Alpha"])
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["a2", "x"], deckID: 1, tags: ["MCAT::S1::Alpha"])
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["g1", "x"], deckID: 1, tags: ["MCAT::S2::Gamma"])
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["g2", "x"], deckID: 1, tags: ["MCAT::S2::Gamma::Subtopic"])
+
+        let report = try backend.coverage(forTopics: topics)
+
+        // Overall: 2 of 4 topics covered → exactly the 50% give-up line.
+        XCTAssertEqual(report.totalTopics, 4)
+        XCTAssertEqual(report.coveredTopics, 2, "Alpha and Gamma are covered; Beta and Delta are not")
+        XCTAssertEqual(report.fractionCovered, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(report.percentCovered, 50)
+        XCTAssertTrue(report.meetsCoverageThreshold, "50% meets the >= 50% threshold")
+
+        // Sections come back in first-seen (outline) order.
+        XCTAssertEqual(report.sections.map(\.section), ["S1", "S2"])
+
+        let s1 = try XCTUnwrap(report.sections.first { $0.section == "S1" })
+        XCTAssertEqual(s1.coveredCount, 1)
+        XCTAssertEqual(s1.totalCount, 2)
+        let alpha = try XCTUnwrap(s1.topics.first { $0.id == "S1.Alpha" })
+        XCTAssertTrue(alpha.isCovered)
+        XCTAssertEqual(alpha.cardCount, 2, "both Alpha cards count")
+        let beta = try XCTUnwrap(s1.topics.first { $0.id == "S1.Beta" })
+        XCTAssertFalse(beta.isCovered, "Beta has no cards")
+        XCTAssertEqual(beta.cardCount, 0)
+
+        let s2 = try XCTUnwrap(report.sections.first { $0.section == "S2" })
+        let gamma = try XCTUnwrap(s2.topics.first { $0.id == "S2.Gamma" })
+        XCTAssertTrue(gamma.isCovered)
+        XCTAssertEqual(gamma.cardCount, 2, "the exact tag and the descendant subtag both count toward Gamma")
+        let delta = try XCTUnwrap(s2.topics.first { $0.id == "S2.Delta" })
+        XCTAssertFalse(delta.isCovered, "Delta has no cards")
+    }
+
+    /// Coverage below the give-up line abstains. With three of four topics
+    /// uncovered (25%), `meetsCoverageThreshold` is false — the signal the
+    /// CoverageView uses to show the "Not enough coverage to score yet" banner
+    /// instead of a score.
+    func testCoverageBelowThresholdAbstains() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        let topics = [
+            CoverageTopic(id: "S1.Alpha", section: "S1", name: "Alpha", tag: "MCAT::S1::Alpha"),
+            CoverageTopic(id: "S1.Beta", section: "S1", name: "Beta", tag: "MCAT::S1::Beta"),
+            CoverageTopic(id: "S1.Gamma", section: "S1", name: "Gamma", tag: "MCAT::S1::Gamma"),
+            CoverageTopic(id: "S1.Delta", section: "S1", name: "Delta", tag: "MCAT::S1::Delta"),
+        ]
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["a", "x"], deckID: 1, tags: ["MCAT::S1::Alpha"])
+
+        let report = try backend.coverage(forTopics: topics)
+        XCTAssertEqual(report.coveredTopics, 1)
+        XCTAssertEqual(report.percentCovered, 25)
+        XCTAssertFalse(report.meetsCoverageThreshold, "25% is below the 50% line, so the app abstains")
     }
 }
