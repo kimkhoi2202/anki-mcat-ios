@@ -188,6 +188,11 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInReview") {
                 goReview = true
             }
+            // Open the reviewer with the card-action menu showing (for the
+            // reviewer-menu screenshot); ReviewerView reads the same argument.
+            if ProcessInfo.processInfo.arguments.contains("-startInReviewMenu") {
+                goReview = true
+            }
             if ProcessInfo.processInfo.arguments.contains("-startInSettings") {
                 goSettings = true
             }

@@ -25,6 +25,19 @@ final class AnkiStore: ObservableObject {
     @Published var showingAnswer = false
     @Published var reviewDone = false
 
+    /// Current card's flag color (0 = none, 1...7 = red/orange/green/blue/pink/
+    /// turquoise/purple). Drives the on-card flag indicator and the menu's
+    /// current-flag checkmark, updated in place by the flag action.
+    @Published var currentFlag = 0
+    /// Whether the current card's note is marked (carries the `marked` tag).
+    /// Drives the on-card star indicator and the Mark/Unmark menu item.
+    @Published var isMarked = false
+    /// Bumped by "Replay audio" to force the card WebView to reload the current
+    /// side, restarting any embedded media. (A native `[sound:]`/AV-tag audio
+    /// player is not yet implemented, so this is a best-effort replay of media
+    /// embedded in the card template.)
+    @Published var replayToken = 0
+
     /// Whether the backend has an action to undo (drives the Undo control).
     @Published var canUndo = false
     /// Localized name of the next undoable action (e.g. "Answer Card").
@@ -83,6 +96,10 @@ final class AnkiStore: ObservableObject {
     /// The card currently shown in the reviewer, if any — used to open Card Info
     /// from the reviewer's toolbar.
     var currentCardID: Int64? { currentCard?.card.id }
+
+    /// The note behind the current card, if any — used by the reviewer's note
+    /// actions (Edit / Mark / Bury note / Suspend note / Delete note).
+    var currentNoteID: Int64? { currentCard?.card.noteID }
 
     /// Directory holding the collection and its media (the app's Documents).
     private var documentsURL: URL {
@@ -151,6 +168,8 @@ final class AnkiStore: ObservableObject {
             currentAnswer = ""
             currentCSS = ""
             currentIntervals = []
+            currentFlag = 0
+            isMarked = false
             currentCard = nil
             loadNext()
         } catch {
@@ -462,6 +481,10 @@ final class AnkiStore: ObservableObject {
         // Ignore an unexpected shape rather than mislabeling buttons.
         let intervals = (try? backend.describeNextStates(queued.states)) ?? []
         currentIntervals = intervals.count == 4 ? intervals : []
+        // Flag/marked indicators for the new card (mirrors AnkiDroid emitting
+        // flagFlow / isMarkedFlow on each card change).
+        currentFlag = Int(queued.card.flags)
+        isMarked = (try? backend.isNoteMarked(noteID: queued.card.noteID)) ?? false
         cardShownAt = Date()
         refreshUndo()
     }
@@ -474,15 +497,156 @@ final class AnkiStore: ObservableObject {
         currentAnswer = ""
         currentCSS = ""
         currentIntervals = []
+        currentFlag = 0
+        isMarked = false
         refreshUndo()
     }
 
     func reveal() { showingAnswer = true }
 
+    /// Returns from the answer back to the question (the "tap center = flip"
+    /// gesture toggling A → Q). Cheap local state flip; no engine call.
+    func flipBack() { showingAnswer = false }
+
     func rate(_ rating: Anki_Scheduler_CardAnswer.Rating) {
         guard let backend, let card = currentCard else { return }
         let ms = UInt32(min(60_000, Date().timeIntervalSince(cardShownAt) * 1000))
         try? backend.answer(card: card, rating: rating, millisecondsTaken: ms)
+        loadNext()
+    }
+
+    // MARK: - Reviewer card actions
+
+    /// Card-action menu actions, cloning AnkiDroid's `ReviewerViewModel`.
+    ///
+    /// Flag and Mark update the current card *in place* (so the indicators change
+    /// without leaving the card); Bury, Suspend, and Delete remove the current
+    /// card from the queue and advance to the next one (AnkiDroid's
+    /// `updateCurrentCard()` after these actions). Each runs through an undoable
+    /// backend op, so the toolbar Undo reverts it.
+
+    /// Sets (1...7) or clears (0) the current card's flag color, updating the
+    /// on-card indicator in place. Clone of `ReviewerViewModel.setFlag`.
+    func setReviewerFlag(_ flag: Int) {
+        guard let backend, let cardID = currentCardID else { return }
+        do {
+            _ = try backend.setFlag(cardIDs: [cardID], flag: flag)
+            currentFlag = flag
+            refreshUndo()
+        } catch {
+            status = "Flag error: \(error)"
+        }
+    }
+
+    /// Toggles the current card's flag: tapping the active color clears it,
+    /// otherwise sets the new color (clone of `ReviewerViewModel.toggleFlag`).
+    func toggleReviewerFlag(_ flag: Int) {
+        setReviewerFlag(currentFlag == flag ? 0 : flag)
+    }
+
+    /// Toggles the `marked` tag on the current card's note, updating the on-card
+    /// star in place. Clone of `ReviewerViewModel.toggleMark`.
+    func toggleMark() {
+        guard let backend, let noteID = currentNoteID else { return }
+        do {
+            isMarked = try backend.toggleMark(noteID: noteID)
+            refreshUndo()
+        } catch {
+            status = "Mark error: \(error)"
+        }
+    }
+
+    /// Buries the current card (manual bury) and advances. Clone of `buryCard`.
+    func buryCard() {
+        guard let backend, let cardID = currentCardID else { return }
+        do {
+            _ = try backend.buryCards(cardIDs: [cardID])
+            afterCardRemovedFromQueue()
+        } catch {
+            status = "Bury error: \(error)"
+        }
+    }
+
+    /// Buries every card of the current card's note and advances. Clone of
+    /// `buryNote`.
+    func buryNote() {
+        guard let backend, let noteID = currentNoteID else { return }
+        do {
+            _ = try backend.buryNotes(noteIDs: [noteID])
+            afterCardRemovedFromQueue()
+        } catch {
+            status = "Bury error: \(error)"
+        }
+    }
+
+    /// Suspends the current card and advances. Clone of `suspendCard`.
+    func suspendCard() {
+        guard let backend, let cardID = currentCardID else { return }
+        do {
+            _ = try backend.suspendCards(cardIDs: [cardID])
+            afterCardRemovedFromQueue()
+        } catch {
+            status = "Suspend error: \(error)"
+        }
+    }
+
+    /// Suspends every card of the current card's note and advances. Clone of
+    /// `suspendNote`.
+    func suspendNote() {
+        guard let backend, let noteID = currentNoteID else { return }
+        do {
+            _ = try backend.suspendNotes(noteIDs: [noteID])
+            afterCardRemovedFromQueue()
+        } catch {
+            status = "Suspend error: \(error)"
+        }
+    }
+
+    /// Deletes the current card's note (and its cards) and advances. Clone of
+    /// `deleteNote`.
+    func deleteCurrentNote() {
+        guard let backend, let noteID = currentNoteID else { return }
+        do {
+            _ = try backend.removeNotes(noteIDs: [noteID])
+            afterCardRemovedFromQueue()
+        } catch {
+            status = "Delete error: \(error)"
+        }
+    }
+
+    /// Re-renders the current card in place after its note was edited (so the
+    /// reviewer reflects the new fields without advancing), refreshing the
+    /// flag/marked indicators and deck counts. Clone of AnkiDroid refreshing the
+    /// shown card after returning from the editor.
+    func reloadCurrentCard() {
+        guard let backend, let card = currentCard else { return }
+        do {
+            let rendered = try backend.renderCard(cardID: card.card.id)
+            currentQuestion = rendered.question
+            currentAnswer = rendered.answer
+            currentCSS = rendered.css
+            if let fresh = try? backend.getCard(cardID: card.card.id) {
+                currentFlag = Int(fresh.flags)
+            }
+            isMarked = (try? backend.isNoteMarked(noteID: card.card.noteID)) ?? isMarked
+            refreshDecks()
+            refreshUndo()
+        } catch {
+            status = "Reload error: \(error)"
+        }
+    }
+
+    /// Replays the current side's audio by forcing the card WebView to reload
+    /// (restarting any embedded media). Clone of AnkiDroid's `replayMedia` in
+    /// spirit; a native `[sound:]`/AV-tag player is deferred.
+    func replayAudio() {
+        replayToken += 1
+    }
+
+    /// Shared tail for bury/suspend/delete: the current card has left the queue,
+    /// so refresh the deck counts and load the next card.
+    private func afterCardRemovedFromQueue() {
+        refreshDecks()
         loadNext()
     }
 
