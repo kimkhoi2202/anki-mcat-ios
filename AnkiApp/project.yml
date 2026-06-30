@@ -31,3 +31,6 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
         INFOPLIST_KEY_CFBundleDisplayName: "Anki Speedrun"
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+        # We ship an asset catalog (the login logo) but no app icon yet; tell the
+        # asset compiler not to require an "AppIcon" set.
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""

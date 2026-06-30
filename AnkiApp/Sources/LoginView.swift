@@ -104,34 +104,16 @@ struct LoginView: View {
     // MARK: - Hero
 
     private var hero: some View {
-        VStack(spacing: DS.Spacing.m) {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [DS.accent, DS.accent.opacity(0.65)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: 96, height: 96)
-                .overlay(
-                    Image(systemName: "rectangle.stack.fill")
-                        .font(.system(size: 42, weight: .semibold))
-                        .foregroundStyle(.white)
-                )
-                .shadow(color: DS.accent.opacity(0.3), radius: 12, y: 6)
-            VStack(spacing: DS.Spacing.xs) {
-                Text("Log in to sync")
-                    .font(DS.Typography.title)
-                    .foregroundStyle(DS.textPrimary)
-                Text("Sign in to your AnkiWeb account. Choose a self-hosted server in Settings.")
-                    .font(DS.Typography.caption)
-                    .foregroundStyle(DS.textSecondary)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.bottom, DS.Spacing.s)
+        // AnkiDroid's real login banner (res/drawable/login_logo): the sync
+        // illustration — this device's collection (filled star) linked to AnkiWeb
+        // (outlined star). Converted from AnkiDroid's source art.
+        Image("AnkiLoginLogo")
+            .resizable()
+            .scaledToFit()
+            .frame(maxWidth: 300)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, DS.Spacing.m)
+            .accessibilityLabel("AnkiDroid sync")
     }
 
     // MARK: - Fields
