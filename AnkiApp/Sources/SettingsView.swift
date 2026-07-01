@@ -23,6 +23,11 @@ struct SettingsView: View {
     @AppStorage(FullScreenReviewer.storageKey) private var fullScreenReviewer = false
     /// In-app haptic feedback toggle (default on); read by `Haptics`.
     @AppStorage(Haptics.enabledKey) private var hapticsEnabled = true
+    /// In-app language override for Anki's built-in text. "system" follows the
+    /// device's languages; a concrete code (e.g. "ja", "pt-BR") opens the engine's
+    /// translation catalog in that language. Changing it re-opens the collection
+    /// so every `Loc.tr(...)` result and bundled web screen updates.
+    @AppStorage("appLanguageOverride") private var appLanguageOverride = "system"
     @State private var serverChoice: ServerChoice = .ankiweb
     @State private var customServerURL = ""
     /// Inline validation error for the custom ("Other") server URL, if any.
@@ -54,6 +59,7 @@ struct SettingsView: View {
             syncSection
             notificationsSection
             appearanceSection
+            languageSection
             schedulingSection
             reviewingSection
             autoAdvanceSection
@@ -117,7 +123,7 @@ struct SettingsView: View {
                 Button(role: .destructive) {
                     store.logout()
                 } label: {
-                    Label("Log out", systemImage: "rectangle.portrait.and.arrow.right")
+                    Label(Loc.tr("sync-log-out-button"), systemImage: "rectangle.portrait.and.arrow.right")
                 }
             } else {
                 Text("Not logged in")
@@ -202,9 +208,9 @@ struct SettingsView: View {
     private var syncSection: some View {
         Section {
             Toggle("Automatically sync on open/close", isOn: $store.autoSyncEnabled)
-            Toggle("Synchronize audio and images too", isOn: $store.fetchMediaOnSync)
+            Toggle(Loc.tr("preferences-synchronize-audio-and-images-too"), isOn: $store.fetchMediaOnSync)
         } header: {
-            sectionHeader("Syncing")
+            sectionHeader(Loc.tr("preferences-network"))
         } footer: {
             sectionFooter(
                 store.isLoggedIn
@@ -258,7 +264,7 @@ struct SettingsView: View {
                     Text(theme.label).tag(theme)
                 }
             } label: {
-                Text("Theme")
+                Text(Loc.tr("preferences-theme"))
                     .font(DS.Typography.body)
                     .foregroundStyle(DS.textPrimary)
             }
@@ -284,7 +290,7 @@ struct SettingsView: View {
                 .font(DS.Typography.body)
                 .foregroundStyle(DS.textPrimary)
         } header: {
-            sectionHeader("Appearance")
+            sectionHeader(Loc.tr("preferences-appearance"))
         } footer: {
             sectionFooter("“System” follows your device's light/dark appearance. Interface size scales the app's text. Full-screen review hides the status bar for a distraction-free session. Haptics add subtle vibrations when grading, flipping, and confirming actions.")
         }
@@ -302,6 +308,76 @@ struct SettingsView: View {
         )
     }
 
+    // MARK: - Language
+
+    /// Overrides the language for Anki's built-in text (buttons, menus, and the
+    /// bundled web screens). "System" follows the device's languages; a concrete
+    /// choice opens the engine's shared translation catalog in that language —
+    /// the same catalog Anki Desktop and AnkiDroid use. Changing it re-opens the
+    /// collection so every string updates live. User content (cards/decks) is
+    /// never translated.
+    private var languageSection: some View {
+        Section {
+            Picker(selection: languageBinding) {
+                Text("System").tag("system")
+                ForEach(Self.languageOptions, id: \.code) { option in
+                    Text(option.nativeName).tag(option.code)
+                }
+            } label: {
+                Text(Loc.tr("preferences-language"))
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+            }
+            .pickerStyle(.menu)
+            .tint(DS.textSecondary)
+            .accessibilityIdentifier("languagePicker")
+        } header: {
+            sectionHeader(Loc.tr("preferences-language"))
+        } footer: {
+            sectionFooter("Choose the language for Anki's built-in text (buttons, menus, and screens). “System” follows your device's language. Your cards and decks are never translated.")
+        }
+    }
+
+    /// Binds the language picker to the persisted override, re-opening the
+    /// collection in the new language when the choice actually changes (so a
+    /// re-select of the same language doesn't churn the backend).
+    private var languageBinding: Binding<String> {
+        Binding(
+            get: { appLanguageOverride },
+            set: { newValue in
+                guard newValue != appLanguageOverride else { return }
+                appLanguageOverride = newValue
+                Task { await store.reopenForLanguageChange() }
+            }
+        )
+    }
+
+    /// A curated set of major Anki UI languages, labeled by native name. Codes
+    /// match Anki's translation catalog (e.g. `pt-BR`, `zh-CN`, `zh-TW`); the
+    /// picker adds a "System" option separately.
+    private static let languageOptions: [(code: String, nativeName: String)] = [
+        ("en", "English"),
+        ("es", "Español"),
+        ("fr", "Français"),
+        ("de", "Deutsch"),
+        ("it", "Italiano"),
+        ("pt-BR", "Português (Brasil)"),
+        ("ja", "日本語"),
+        ("ko", "한국어"),
+        ("zh-CN", "简体中文"),
+        ("zh-TW", "繁體中文"),
+        ("ru", "Русский"),
+        ("ar", "العربية"),
+        ("nl", "Nederlands"),
+        ("pl", "Polski"),
+        ("tr", "Türkçe"),
+        ("uk", "Українська"),
+        ("vi", "Tiếng Việt"),
+        ("id", "Bahasa Indonesia"),
+        ("th", "ไทย"),
+        ("hi", "हिन्दी"),
+    ]
+
     // MARK: - Scheduling (engine-backed)
 
     /// Anki's Preferences ▸ Scheduling. Engine-backed via `Preferences.scheduling`
@@ -312,7 +388,7 @@ struct SettingsView: View {
             if store.preferencesAvailable {
                 Stepper(value: rolloverBinding, in: 0...23) {
                     HStack {
-                        Text("Next day starts at")
+                        Text(Loc.tr("preferences-next-day-starts-at"))
                         Spacer()
                         Text(rolloverLabel(store.schedulingPrefs.rollover))
                             .foregroundStyle(DS.textSecondary)
@@ -321,7 +397,7 @@ struct SettingsView: View {
                 }
                 Stepper(value: learnAheadBinding, in: 0...1440, step: 5) {
                     HStack {
-                        Text("Learn ahead limit")
+                        Text(Loc.tr("preferences-learn-ahead-limit"))
                         Spacer()
                         Text("\(store.schedulingPrefs.learnAheadMinutes) min")
                             .foregroundStyle(DS.textSecondary)
@@ -334,7 +410,7 @@ struct SettingsView: View {
                     .foregroundStyle(DS.textSecondary)
             }
         } header: {
-            sectionHeader("Scheduling")
+            sectionHeader(Loc.tr("preferences-scheduling"))
         } footer: {
             sectionFooter("“Next day starts at” sets the hour a new day begins for due cards. “Learn ahead limit” lets the scheduler show learning cards early when nothing else is due. Stored in your collection.")
         }
@@ -347,25 +423,25 @@ struct SettingsView: View {
     private var reviewingSection: some View {
         Section {
             if store.preferencesAvailable {
-                Toggle("Show next review time above answer buttons", isOn: boolBinding(
+                Toggle(Loc.tr("preferences-show-next-review-time-above-answer"), isOn: boolBinding(
                     get: { store.reviewingPrefs.showIntervalsOnButtons },
                     set: store.setShowIntervalsOnButtons
                 ))
-                Toggle("Show remaining card count", isOn: boolBinding(
+                Toggle(Loc.tr("preferences-show-remaining-card-count"), isOn: boolBinding(
                     get: { store.reviewingPrefs.showRemainingDueCounts },
                     set: store.setShowRemainingDueCounts
                 ))
-                Toggle("Show play buttons on cards with audio", isOn: boolBinding(
+                Toggle(Loc.tr("preferences-show-play-buttons-on-cards-with"), isOn: boolBinding(
                     get: { store.reviewingPrefs.showPlayButtonsOnAudio },
                     set: store.setShowPlayButtonsOnAudio
                 ))
-                Toggle("Interrupt current audio when answering", isOn: boolBinding(
+                Toggle(Loc.tr("preferences-interrupt-current-audio-when-answering"), isOn: boolBinding(
                     get: { store.reviewingPrefs.interruptAudioWhenAnswering },
                     set: store.setInterruptAudioWhenAnswering
                 ))
                 Stepper(value: timeboxMinutesBinding, in: 0...600, step: 5) {
                     HStack {
-                        Text("Timebox time limit")
+                        Text(Loc.tr("preferences-timebox-time-limit"))
                         Spacer()
                         Text(store.reviewingPrefs.timeLimitMinutes == 0
                              ? "Off"
@@ -396,9 +472,9 @@ struct SettingsView: View {
     /// reviewer reads them per card from the engine — not from this screen.
     private var autoAdvanceSection: some View {
         Section {
-            Toggle("Auto advance", isOn: $store.autoAdvanceEnabled)
+            Toggle(Loc.tr("actions-auto-advance"), isOn: $store.autoAdvanceEnabled)
         } header: {
-            sectionHeader("Auto Advance")
+            sectionHeader(Loc.tr("actions-auto-advance"))
         } footer: {
             sectionFooter(
                 "When on, cards advance on their own using the timing and actions from each deck's options (Deck Options ▸ Auto Advance). Set a side's seconds to 0 there to disable it. The toggle is stored on this device."
@@ -439,28 +515,28 @@ struct SettingsView: View {
     private var editingSection: some View {
         Section {
             if store.preferencesAvailable {
-                Toggle("Paste without shift key strips formatting", isOn: boolBinding(
+                Toggle(Loc.tr("preferences-paste-without-shift-key-strips-formatting"), isOn: boolBinding(
                     get: { store.editingPrefs.pasteStripsFormatting },
                     set: store.setPasteStripsFormatting
                 ))
-                Toggle("Paste clipboard images as PNG", isOn: boolBinding(
+                Toggle(Loc.tr("preferences-paste-clipboard-images-as-png"), isOn: boolBinding(
                     get: { store.editingPrefs.pasteImagesAsPng },
                     set: store.setPasteImagesAsPng
                 ))
-                Toggle("When adding, default to current deck", isOn: boolBinding(
+                Toggle(Loc.tr("preferences-when-adding-default-to-current-deck"), isOn: boolBinding(
                     get: { store.editingPrefs.addingDefaultsToCurrentDeck },
                     set: store.setAddingDefaultsToCurrentDeck
                 ))
-                Toggle("Ignore accents in search (slower)", isOn: boolBinding(
+                Toggle(Loc.tr("preferences-ignore-accents-in-search"), isOn: boolBinding(
                     get: { store.editingPrefs.ignoreAccentsInSearch },
                     set: store.setIgnoreAccentsInSearch
                 ))
-                Toggle("Render LaTeX", isOn: boolBinding(
+                Toggle(Loc.tr("media-check-render-latex"), isOn: boolBinding(
                     get: { store.editingPrefs.renderLatex },
                     set: store.setRenderLatex
                 ))
                 HStack {
-                    Text("Default search text")
+                    Text(Loc.tr("preferences-default-search-text"))
                     Spacer()
                     TextField("e.g. deck:current", text: $defaultSearchTextDraft)
                         .multilineTextAlignment(.trailing)
@@ -476,7 +552,7 @@ struct SettingsView: View {
                     .foregroundStyle(DS.textSecondary)
             }
         } header: {
-            sectionHeader("Editing")
+            sectionHeader(Loc.tr("preferences-editing"))
         } footer: {
             sectionFooter("Stored in your collection and kept in sync across devices. “When adding, default to current deck” off means the deck changes with the note type.")
         }
@@ -493,13 +569,13 @@ struct SettingsView: View {
         Section {
             if store.preferencesAvailable {
                 Stepper(value: backupCountBinding(\.daily, store.setDailyBackupsToKeep), in: 0...999) {
-                    countLabel("Daily backups to keep", store.backupLimits.daily)
+                    countLabel(Loc.tr("preferences-daily-backups"), store.backupLimits.daily)
                 }
                 Stepper(value: backupCountBinding(\.weekly, store.setWeeklyBackupsToKeep), in: 0...999) {
-                    countLabel("Weekly backups to keep", store.backupLimits.weekly)
+                    countLabel(Loc.tr("preferences-weekly-backups"), store.backupLimits.weekly)
                 }
                 Stepper(value: backupCountBinding(\.monthly, store.setMonthlyBackupsToKeep), in: 0...999) {
-                    countLabel("Monthly backups to keep", store.backupLimits.monthly)
+                    countLabel(Loc.tr("preferences-monthly-backups"), store.backupLimits.monthly)
                 }
                 Stepper(value: backupCountBinding(\.minimumIntervalMins, store.setMinutesBetweenBackups), in: 0...1440, step: 5) {
                     countLabel("Minutes between backups", store.backupLimits.minimumIntervalMins)
@@ -525,7 +601,7 @@ struct SettingsView: View {
                     .foregroundStyle(DS.textSecondary)
             }
         } header: {
-            sectionHeader("Backups")
+            sectionHeader(Loc.tr("preferences-backups"))
         } footer: {
             sectionFooter("Anki periodically backs up your collection. Backups are kept on this device; restore one via Import & Export.")
         }
@@ -554,13 +630,13 @@ struct SettingsView: View {
             NavigationLink {
                 ManageNotetypesView(store: store)
             } label: {
-                Label("Manage note types", systemImage: "square.stack.3d.up")
+                Label(Loc.tr("qt-misc-manage-note-types"), systemImage: "square.stack.3d.up")
                     .font(DS.Typography.body)
                     .foregroundStyle(DS.textPrimary)
             }
             .accessibilityIdentifier("manageNotetypes")
         } header: {
-            sectionHeader("Note types")
+            sectionHeader(Loc.tr("notetypes-note-types"))
         } footer: {
             sectionFooter("Add, clone, rename, or delete note types, and edit their fields and card templates.")
         }
@@ -595,13 +671,13 @@ struct SettingsView: View {
             NavigationLink {
                 AdvancedSettingsView(store: store)
             } label: {
-                Label("Advanced", systemImage: "wrench.and.screwdriver")
+                Label(Loc.tr("deck-config-advanced-title"), systemImage: "wrench.and.screwdriver")
                     .font(DS.Typography.body)
                     .foregroundStyle(DS.textPrimary)
             }
             .accessibilityIdentifier("advancedSettings")
         } header: {
-            sectionHeader("Advanced")
+            sectionHeader(Loc.tr("deck-config-advanced-title"))
         } footer: {
             sectionFooter("Database maintenance: check database, find empty cards, force a full sync, or restore from a backup.")
         }

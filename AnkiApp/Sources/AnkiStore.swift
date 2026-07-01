@@ -376,17 +376,7 @@ final class AnkiStore: ObservableObject {
         // override (Settings ▸ Language) wins over the device's languages; "en" is
         // always the final fallback (Anki's source language). Read here on the
         // main actor and captured as a Sendable [String] for the detached open.
-        let backendLangs: [String] = {
-            var langs: [String]
-            if let override = UserDefaults.standard.string(forKey: "appLanguageOverride"),
-               override != "system", !override.isEmpty {
-                langs = [override]
-            } else {
-                langs = Locale.preferredLanguages
-            }
-            if !langs.contains("en") { langs.append("en") }
-            return langs
-        }()
+        let backendLangs = Self.preferredBackendLangs()
         let newBackend: Backend
         do {
             // Create + open the collection off the main actor; the handle stays
@@ -427,6 +417,77 @@ final class AnkiStore: ObservableObject {
         loadGesturePrefs()
         loadSyncPrefs()
         status = "Engine OK"
+    }
+
+    /// The engine's preferred-language list, in priority order: an in-app override
+    /// (Settings ▸ Language, the `appLanguageOverride` default) when set to a
+    /// concrete language, otherwise the device's preferred languages — always
+    /// ending in English (Anki's source language) as the final fallback. Shared by
+    /// `boot()` and `reopenForLanguageChange()` so both open the collection with an
+    /// identical language resolution. Call on the main actor and capture the
+    /// resulting `[String]` (Sendable) for the detached open.
+    private static func preferredBackendLangs() -> [String] {
+        var langs: [String]
+        if let override = UserDefaults.standard.string(forKey: "appLanguageOverride"),
+           override != "system", !override.isEmpty {
+            langs = [override]
+        } else {
+            langs = Locale.preferredLanguages
+        }
+        if !langs.contains("en") { langs.append("en") }
+        return langs
+    }
+
+    /// Re-opens the collection in a freshly-created backend so a Language change
+    /// (Settings ▸ Language) takes effect immediately. The engine picks its
+    /// translation catalog at `Backend.init(preferredLangs:)` — the catalog that
+    /// `Loc.tr(...)` and the bundled web screens read — so switching languages
+    /// means closing the current collection and re-opening it in a new backend
+    /// built with the new preferred languages. Mirrors `boot()`'s open logic (same
+    /// `preferredBackendLangs()`, same `openDefaultCollection`) and, like the other
+    /// close→reopen paths, runs under `runExclusive` with the blocking FFI work on
+    /// a detached task so no concurrent `@MainActor` backend call hits a closed
+    /// collection.
+    func reopenForLanguageChange() async {
+        guard let oldBackend = backend else { return }
+        let mediaFolder = mediaFolderURL
+        let colPath = collectionURL.path
+        let mediaDBPath = mediaDBURL.path
+        let backendLangs = Self.preferredBackendLangs()
+        let newBackend: Backend
+        do {
+            newBackend = try await runExclusive {
+                try await runDetached {
+                    // Close the current collection first so the new backend can
+                    // open the same db file without contending for the SQLite lock;
+                    // tolerate an already-closed handle.
+                    _ = try? oldBackend.closeCollection()
+                    let backend = try Backend(preferredLangs: backendLangs)
+                    do {
+                        try Self.openDefaultCollection(
+                            backend, mediaFolder: mediaFolder,
+                            colPath: colPath, mediaDBPath: mediaDBPath
+                        )
+                    } catch {
+                        // Re-opening in the new backend failed; restore the old
+                        // one so the app isn't left with a closed collection.
+                        _ = try? oldBackend.openCollection(
+                            path: colPath, mediaFolder: mediaFolder.path, mediaDB: mediaDBPath
+                        )
+                        throw error
+                    }
+                    return backend
+                }
+            }
+        } catch {
+            status = "Couldn't switch language: \(error)"
+            return
+        }
+        // Swap in the new backend (the old one deinits and frees its handle) and
+        // repoint the translation bridge, then refresh the language-dependent UI.
+        self.backend = newBackend
+        Loc.configure(backend: newBackend)
+        await reloadDeckTree()
     }
 
     /// Loads the persisted app-local sync settings (auto-sync on open/close,
