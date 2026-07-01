@@ -44,7 +44,7 @@ struct NotetypeFieldsEditorView: View {
                     .onDelete(perform: deleteFields)
                 }
             } header: {
-                sectionHeader("Fields")
+                sectionHeader(Loc.tr("notetypes-fields"))
             } footer: {
                 sectionFooter("Drag in Edit mode to reorder. The sort field (★) is shown in the browser’s Sort Field column. A note type needs at least one field.")
             }
@@ -52,12 +52,12 @@ struct NotetypeFieldsEditorView: View {
         .scrollContentBackground(.hidden)
         .background(DS.background.ignoresSafeArea())
         .tint(DS.accent)
-        .navigationTitle("Fields")
+        .navigationTitle(Loc.tr("notetypes-fields"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { addText = ""; showAdd = true } label: {
-                    Label("Add field", systemImage: "plus")
+                    Label(Loc.tr("fields-add-field"), systemImage: "plus")
                 }
                 .accessibilityIdentifier("addField")
                 .disabled(busy)
@@ -65,15 +65,15 @@ struct NotetypeFieldsEditorView: View {
             ToolbarItem(placement: .topBarTrailing) { EditButton() }
         }
         .overlay { if busy { progressOverlay } }
-        .alert("Add field", isPresented: $showAdd) {
+        .alert(Loc.tr("fields-add-field"), isPresented: $showAdd) {
             TextField("Field name", text: $addText).autocorrectionDisabled()
-            Button("Cancel", role: .cancel) {}
-            Button("Add") { addField() }
+            Button(Loc.tr("actions-cancel"), role: .cancel) {}
+            Button(Loc.tr("actions-add")) { addField() }
         }
         .alert("Rename field", isPresented: renamePresented) {
             TextField("Field name", text: $renameText).autocorrectionDisabled()
-            Button("Cancel", role: .cancel) { renameIndex = nil }
-            Button("Rename") { commitRename() }
+            Button(Loc.tr("actions-cancel"), role: .cancel) { renameIndex = nil }
+            Button(Loc.tr("actions-rename")) { commitRename() }
         }
         .alert(
             "Couldn’t update fields",
@@ -110,21 +110,21 @@ struct NotetypeFieldsEditorView: View {
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if fields.count > 1 {
                 Button(role: .destructive) { removeField(at: index) } label: {
-                    Label("Delete", systemImage: "trash")
+                    Label(Loc.tr("actions-delete"), systemImage: "trash")
                 }
             }
             Button { beginRename(index) } label: {
-                Label("Rename", systemImage: "pencil")
+                Label(Loc.tr("actions-rename"), systemImage: "pencil")
             }
             .tint(DS.accent)
         }
         .contextMenu {
-            Button { beginRename(index) } label: { Label("Rename", systemImage: "pencil") }
+            Button { beginRename(index) } label: { Label(Loc.tr("actions-rename"), systemImage: "pencil") }
             if index != sortFieldIndex {
                 Button { setSortField(index) } label: { Label("Make sort field", systemImage: "star") }
             }
             if fields.count > 1 {
-                Button(role: .destructive) { removeField(at: index) } label: { Label("Delete", systemImage: "trash") }
+                Button(role: .destructive) { removeField(at: index) } label: { Label(Loc.tr("actions-delete"), systemImage: "trash") }
             }
         }
     }

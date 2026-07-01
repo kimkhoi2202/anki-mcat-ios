@@ -53,7 +53,7 @@ struct NotePreviewView: View {
                 }
             }
             .background(DS.background.ignoresSafeArea())
-            .navigationTitle("Preview")
+            .navigationTitle(Loc.tr("actions-preview"))
             .navigationBarTitleDisplayMode(.inline)
             .tint(DS.accent)
             .toolbar {
@@ -107,7 +107,9 @@ struct NotePreviewView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             Picker("Side", selection: $side) {
-                ForEach(Side.allCases) { side in Text(side.rawValue).tag(side) }
+                ForEach(Side.allCases) { side in
+                    Text(Loc.tr(side == .front ? "notetypes-front-field" : "notetypes-back-field")).tag(side)
+                }
             }
             .pickerStyle(.segmented)
         }

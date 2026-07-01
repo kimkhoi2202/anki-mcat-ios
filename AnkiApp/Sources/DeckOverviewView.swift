@@ -45,7 +45,7 @@ struct DeckOverviewView: View {
                 missingState
             }
         }
-        .navigationTitle(deck?.name ?? "Deck")
+        .navigationTitle(deck?.name ?? Loc.tr("decks-deck"))
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(isPresented: $goReview) {
             ReviewerView(store: store)
@@ -109,11 +109,11 @@ struct DeckOverviewView: View {
     /// list's columns but enlarged for the overview.
     private func countsCard(for deck: DeckTreeEntry) -> some View {
         HStack(spacing: 0) {
-            countTile(label: "New", count: deck.newCount, color: DS.accent)
+            countTile(label: Loc.tr("actions-new"), count: deck.newCount, color: DS.accent)
             divider
-            countTile(label: "Learn", count: deck.learnCount, color: DS.again)
+            countTile(label: Loc.tr("decks-learn-header"), count: deck.learnCount, color: DS.again)
             divider
-            countTile(label: "Due", count: deck.reviewCount, color: DS.easy)
+            countTile(label: Loc.tr("decks-review-header"), count: deck.reviewCount, color: DS.easy)
         }
         .dsCard(padding: DS.Spacing.l)
     }
@@ -145,7 +145,7 @@ struct DeckOverviewView: View {
             Button {
                 study(deck)
             } label: {
-                Text("Study Now")
+                Text(Loc.tr("studying-study-now"))
             }
             .buttonStyle(.dsPrimary)
             .accessibilityIdentifier("studyDeck")
@@ -155,7 +155,7 @@ struct DeckOverviewView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 36))
                     .foregroundStyle(DS.easy)
-                Text("Congratulations! You have finished this deck for now.")
+                Text(Loc.tr("scheduling-congratulations-finished"))
                     .font(DS.Typography.body)
                     .foregroundStyle(DS.textPrimary)
                     .multilineTextAlignment(.center)
@@ -179,16 +179,16 @@ struct DeckOverviewView: View {
     @ViewBuilder
     private func quickLinks(for deck: DeckTreeEntry) -> some View {
         VStack(spacing: 0) {
-            linkRow(title: "Browse", systemImage: "magnifyingglass") {
+            linkRow(title: Loc.tr("qt-misc-browse"), systemImage: "magnifyingglass") {
                 goBrowse = true
             }
             if !deck.filtered {
                 rowDivider
-                linkRow(title: "Custom study", systemImage: "slider.horizontal.3") {
+                linkRow(title: Loc.tr("actions-custom-study"), systemImage: "slider.horizontal.3") {
                     showCustomStudy = true
                 }
                 rowDivider
-                linkRow(title: "Deck options", systemImage: "gearshape") {
+                linkRow(title: Loc.tr("deck-config-title"), systemImage: "gearshape") {
                     showOptions = true
                 }
             }

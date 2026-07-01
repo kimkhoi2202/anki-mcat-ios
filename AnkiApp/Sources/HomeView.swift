@@ -136,7 +136,7 @@ struct HomeView: View {
             .sheet(item: $deckExportShare) { item in
                 ShareSheet(items: [item.url])
             }
-            .navigationTitle("Decks")
+            .navigationTitle(Loc.tr("actions-decks"))
             .navigationDestination(isPresented: $goReview) {
                 ReviewerView(store: store)
             }
@@ -214,7 +214,7 @@ struct HomeView: View {
                         Button {
                             showAddNote = true
                         } label: {
-                            Label("Add note", systemImage: "square.and.pencil")
+                            Label(Loc.tr("actions-add-note"), systemImage: "square.and.pencil")
                         }
                         Button {
                             showSharedDecks = true
@@ -281,16 +281,16 @@ struct HomeView: View {
                 TextField("Deck name", text: $deckNameInput)
                     .autocorrectionDisabled()
                 Button("Create") { createDeck() }
-                Button("Cancel", role: .cancel) { deckNameInput = "" }
+                Button(Loc.tr("actions-cancel"), role: .cancel) { deckNameInput = "" }
             } message: {
                 Text("Use “::” to make a subdeck, e.g. Spanish::Verbs.")
             }
             // Rename deck — same dialog AnkiDroid reuses for renames.
-            .alert("Rename Deck", isPresented: renamePresented) {
+            .alert(Loc.tr("actions-rename-deck"), isPresented: renamePresented) {
                 TextField("Deck name", text: $deckNameInput)
                     .autocorrectionDisabled()
-                Button("Rename") { performRename() }
-                Button("Cancel", role: .cancel) { renameTarget = nil; deckNameInput = "" }
+                Button(Loc.tr("actions-rename")) { performRename() }
+                Button(Loc.tr("actions-cancel"), role: .cancel) { renameTarget = nil; deckNameInput = "" }
             } message: {
                 Text("Enter a new name for this deck.")
             }
@@ -300,7 +300,7 @@ struct HomeView: View {
                 TextField("Subdeck name", text: $subdeckNameInput)
                     .autocorrectionDisabled()
                 Button("Create") { performCreateSubdeck() }
-                Button("Cancel", role: .cancel) { createSubdeckParent = nil; subdeckNameInput = "" }
+                Button(Loc.tr("actions-cancel"), role: .cancel) { createSubdeckParent = nil; subdeckNameInput = "" }
             } message: {
                 Text(createSubdeckMessage)
             }
@@ -311,8 +311,8 @@ struct HomeView: View {
                 titleVisibility: .visible,
                 presenting: pendingDelete
             ) { deck in
-                Button("Delete", role: .destructive) { performDelete(deck) }
-                Button("Cancel", role: .cancel) { pendingDelete = nil }
+                Button(Loc.tr("actions-delete"), role: .destructive) { performDelete(deck) }
+                Button(Loc.tr("actions-cancel"), role: .cancel) { pendingDelete = nil }
             } message: { deck in
                 Text("This permanently deletes “\(deck.fullName)” and all of its cards. You can undo it from the reviewer.")
             }
@@ -345,7 +345,7 @@ struct HomeView: View {
             Button("Download from server", role: .destructive) {
                 Task { await store.resolveConflict(upload: false) }
             }
-            Button("Cancel", role: .cancel) { store.cancelConflict() }
+            Button(Loc.tr("actions-cancel"), role: .cancel) { store.cancelConflict() }
         } message: {
             Text("The collections can’t be combined.\nWhich collection do you want to keep?")
         }
@@ -690,12 +690,12 @@ struct HomeView: View {
         Button {
             browseDeck(deck)
         } label: {
-            Label("Browse", systemImage: "magnifyingglass")
+            Label(Loc.tr("qt-misc-browse"), systemImage: "magnifyingglass")
         }
         Button {
             addNoteTarget = AddNoteTarget(deckID: deck.id)
         } label: {
-            Label("Add note", systemImage: "square.and.pencil")
+            Label(Loc.tr("actions-add-note"), systemImage: "square.and.pencil")
         }
 
         Divider()
@@ -703,11 +703,12 @@ struct HomeView: View {
         Button {
             beginRename(deck)
         } label: {
-            Label("Rename", systemImage: "pencil")
+            Label(Loc.tr("actions-rename"), systemImage: "pencil")
         }
         Button {
             beginCreateSubdeck(deck)
         } label: {
+            // "Create subdeck" has no matching catalog key, so it stays English.
             Label("Create subdeck", systemImage: "folder.badge.plus")
         }
 
@@ -717,24 +718,24 @@ struct HomeView: View {
             Button {
                 rebuildFiltered(deck)
             } label: {
-                Label("Rebuild", systemImage: "arrow.clockwise")
+                Label(Loc.tr("actions-rebuild"), systemImage: "arrow.clockwise")
             }
             Button {
                 emptyFiltered(deck)
             } label: {
-                Label("Empty", systemImage: "tray")
+                Label(Loc.tr("studying-empty"), systemImage: "tray")
             }
         } else {
             Button {
                 optionsTarget = deck
             } label: {
-                Label("Options", systemImage: "slider.horizontal.3")
+                Label(Loc.tr("actions-options"), systemImage: "slider.horizontal.3")
             }
             // Custom study opens Anki's preset dialog scoped to this deck.
             Button {
                 customStudyTarget = CustomStudyTarget(deckID: deck.id)
             } label: {
-                Label("Custom study", systemImage: "graduationcap")
+                Label(Loc.tr("actions-custom-study"), systemImage: "graduationcap")
             }
         }
 
@@ -742,12 +743,13 @@ struct HomeView: View {
         Button {
             unburyDeck(deck)
         } label: {
-            Label("Unbury", systemImage: "eye")
+            Label(Loc.tr("studying-unbury"), systemImage: "eye")
         }
         // Export this deck (and its subdecks) as a shareable .apkg.
         Button {
             exportDeck(deck)
         } label: {
+            // "Export deck" differs from the catalog's "Export", so keep English.
             Label("Export deck", systemImage: "square.and.arrow.up")
         }
 
@@ -756,7 +758,7 @@ struct HomeView: View {
             Button(role: .destructive) {
                 pendingDelete = deck
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label(Loc.tr("actions-delete"), systemImage: "trash")
             }
         }
     }
@@ -1126,7 +1128,7 @@ private struct SyncToolbarButton: View {
                     Button(role: .destructive) {
                         store.logout()
                     } label: {
-                        Label("Log out", systemImage: "rectangle.portrait.and.arrow.right")
+                        Label(Loc.tr("sync-log-out-button"), systemImage: "rectangle.portrait.and.arrow.right")
                     }
                 }
             }
@@ -1156,7 +1158,7 @@ private struct SyncBanner: View {
         case .idle:
             EmptyView()
         case .syncing(let text):
-            progressCard(title: text.isEmpty ? "Syncing…" : text, detail: nil)
+            progressCard(title: text.isEmpty ? Loc.tr("sync-syncing") : text, detail: nil)
         case .mediaSyncing(let text):
             progressCard(title: "Syncing media…", detail: text.isEmpty ? nil : text)
         case .success(let message):
@@ -1171,7 +1173,7 @@ private struct SyncBanner: View {
                 .onTapGesture { store.dismissSyncResult() }
                 .overlay(alignment: .trailing) {
                     if failure.kind == .auth {
-                        Button("Log in") { store.showLogin = true }
+                        Button(Loc.tr("sync-log-in-button")) { store.showLogin = true }
                             .font(DS.Typography.caption.weight(.semibold))
                             .foregroundStyle(DS.accent)
                             .padding(.trailing, DS.Spacing.m)

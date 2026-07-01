@@ -45,7 +45,7 @@ struct DrawingCanvasView: View {
             .tint(DS.accent)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                    Button(Loc.tr("actions-cancel")) {
                         onFinish(nil)
                         dismiss()
                     }

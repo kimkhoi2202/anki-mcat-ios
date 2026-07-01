@@ -55,10 +55,10 @@ struct FilteredDeckView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(Loc.tr("actions-cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Build") { create() }
+                    Button(Loc.tr("decks-build")) { create() }
                         .fontWeight(.semibold)
                         .disabled(creating || trimmedName.isEmpty)
                 }
@@ -124,7 +124,7 @@ struct FilteredDeckView: View {
                     Text(option.label).tag(option)
                 }
             } label: {
-                rowLabel("Order")
+                rowLabel(Loc.tr("scheduling-order"))
             }
 
             Stepper(value: limit, in: 1...9999) {
@@ -167,11 +167,11 @@ struct FilteredDeckView: View {
     private var optionsSection: some View {
         Section {
             Toggle(isOn: $reschedule) {
-                rowLabel("Reschedule")
+                rowLabel(Loc.tr("browsing-reschedule"))
             }
             .tint(DS.accent)
         } header: {
-            sectionHeader("Options")
+            sectionHeader(Loc.tr("actions-options"))
         } footer: {
             sectionFooter("Reschedule lets answers affect the cards’ due dates, like normal review.")
         }

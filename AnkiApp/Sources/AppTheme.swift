@@ -16,12 +16,16 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// Short label for the theme picker (mirrors AnkiDroid's app theme labels).
+    /// Short label for the theme picker. Light/Dark come from Anki's shared
+    /// catalog (`preferences-theme-*`); "System" has no matching key, so it stays
+    /// English. `@MainActor` because `Loc.tr` reads the engine — the only call
+    /// site is the Settings theme picker (main actor).
+    @MainActor
     var label: String {
         switch self {
         case .system: return "System"
-        case .light: return "Light"
-        case .dark: return "Dark"
+        case .light: return Loc.tr("preferences-theme-light")
+        case .dark: return Loc.tr("preferences-theme-dark")
         }
     }
 

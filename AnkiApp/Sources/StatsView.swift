@@ -21,7 +21,7 @@ struct StatsView: View {
                     .background(DS.background)
             }
         }
-        .navigationTitle("Statistics")
+        .navigationTitle(Loc.tr("statistics-title"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }

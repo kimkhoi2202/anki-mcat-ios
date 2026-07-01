@@ -52,7 +52,7 @@ struct AdvancedSettingsView: View {
         .scrollContentBackground(.hidden)
         .background(DS.background.ignoresSafeArea())
         .tint(DS.accent)
-        .navigationTitle("Advanced")
+        .navigationTitle(Loc.tr("deck-config-advanced-title"))
         .navigationBarTitleDisplayMode(.inline)
         .disabled(store.isBackendBusy)
         .task {
@@ -75,13 +75,13 @@ struct AdvancedSettingsView: View {
             Button("Delete \(summary.cardCount) Cards", role: .destructive) {
                 Task { await performDeleteEmptyCards(summary) }
             }
-            Button("Cancel", role: .cancel) {}
+            Button(Loc.tr("actions-cancel"), role: .cancel) {}
         } message: { summary in
             Text(summary.headline)
         }
         .alert("Force full sync?", isPresented: $showFullSyncConfirm) {
             Button("Force Full Sync") { Task { await performArmFullSync() } }
-            Button("Cancel", role: .cancel) {}
+            Button(Loc.tr("actions-cancel"), role: .cancel) {}
         } message: {
             Text("On your next sync your entire collection will be uploaded or downloaded in one direction, rather than the usual quick sync. Use this to resolve a sync conflict. It won't sync now.")
         }
@@ -97,7 +97,7 @@ struct AdvancedSettingsView: View {
             Button("Restore & Replace Collection", role: .destructive) {
                 Task { await performRestore(file) }
             }
-            Button("Cancel", role: .cancel) { restoreTarget = nil }
+            Button(Loc.tr("actions-cancel"), role: .cancel) { restoreTarget = nil }
         } message: { file in
             Text("This replaces your entire collection with “\(file.name)”. Your current cards, decks, and study progress will be lost. This can't be undone.")
         }
@@ -111,7 +111,7 @@ struct AdvancedSettingsView: View {
                 Task { await performCheckDatabase() }
             } label: {
                 HStack {
-                    Label("Check database", systemImage: "stethoscope")
+                    Label(Loc.tr("database-check-title"), systemImage: "stethoscope")
                         .foregroundStyle(DS.accent)
                     if checkRunning {
                         Spacer()
@@ -138,7 +138,7 @@ struct AdvancedSettingsView: View {
                 }
             }
         } header: {
-            sectionHeader("Check database")
+            sectionHeader(Loc.tr("database-check-title"))
         } footer: {
             sectionFooter("Runs a full integrity check and repair of your collection, then optimizes it. Fixes problems from crashes or bad imports.")
         }
@@ -188,7 +188,7 @@ struct AdvancedSettingsView: View {
                     .foregroundStyle(DS.easy)
             }
         } header: {
-            sectionHeader("Empty cards")
+            sectionHeader(Loc.tr("actions-empty-cards"))
         } footer: {
             sectionFooter("Finds cards whose template produces no content (often from cloze notes or template edits). Deleting them removes any note left with no cards.")
         }
@@ -220,7 +220,7 @@ struct AdvancedSettingsView: View {
                     .foregroundStyle(DS.textSecondary)
             }
         } header: {
-            sectionHeader("Sync")
+            sectionHeader(Loc.tr("qt-misc-sync"))
         } footer: {
             sectionFooter("Forces the next sync to upload or download your whole collection in one direction. Use this to recover from a sync conflict. It doesn't sync right now.")
         }

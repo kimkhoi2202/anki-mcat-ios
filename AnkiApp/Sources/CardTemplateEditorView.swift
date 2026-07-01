@@ -117,23 +117,23 @@ struct CardTemplateEditorView: View {
             .tint(DS.accent)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(Loc.tr("actions-cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { save() }
+                    Button(Loc.tr("actions-save")) { save() }
                         .fontWeight(.semibold)
                         .disabled(notetype == nil || saving)
                 }
             }
-            .alert("Add card type", isPresented: $showAddCard) {
+            .alert(Loc.tr("card-templates-add-card-type"), isPresented: $showAddCard) {
                 TextField("Name", text: $addCardName).autocorrectionDisabled()
-                Button("Cancel", role: .cancel) {}
-                Button("Add") { addCard() }
+                Button(Loc.tr("actions-cancel"), role: .cancel) {}
+                Button(Loc.tr("actions-add")) { addCard() }
             }
-            .alert("Rename card type", isPresented: $showRenameCard) {
+            .alert(Loc.tr("card-templates-rename-card-type"), isPresented: $showRenameCard) {
                 TextField("Name", text: $renameCardName).autocorrectionDisabled()
-                Button("Cancel", role: .cancel) {}
-                Button("Rename") { renameCard() }
+                Button(Loc.tr("actions-cancel"), role: .cancel) {}
+                Button(Loc.tr("actions-rename")) { renameCard() }
             }
             .confirmationDialog(
                 "Delete this card type?",
@@ -141,7 +141,7 @@ struct CardTemplateEditorView: View {
                 titleVisibility: .visible
             ) {
                 Button("Delete card type", role: .destructive) { deleteCard() }
-                Button("Cancel", role: .cancel) {}
+                Button(Loc.tr("actions-cancel"), role: .cancel) {}
             } message: {
                 Text("Saving will remove this card and its cards from every note of this type.")
             }
@@ -170,7 +170,7 @@ struct CardTemplateEditorView: View {
             Divider().overlay(DS.separator)
 
             Picker("Edit", selection: $editTab) {
-                ForEach(EditTab.allCases) { tab in Text(tab.rawValue).tag(tab) }
+                ForEach(EditTab.allCases) { tab in Text(editTabLabel(tab)).tag(tab) }
             }
             .pickerStyle(.segmented)
             .padding(.horizontal, DS.Spacing.l)
@@ -194,7 +194,7 @@ struct CardTemplateEditorView: View {
     private func cardSelectorBar(_ notetype: Anki_Notetypes_Notetype) -> some View {
         HStack(spacing: DS.Spacing.s) {
             if notetype.isCloze {
-                Label("Cloze", systemImage: "rectangle.dashed")
+                Label(Loc.tr("notetypes-cloze-name"), systemImage: "rectangle.dashed")
                     .font(DS.Typography.body.weight(.semibold))
                     .foregroundStyle(DS.textPrimary)
                 Spacer(minLength: 0)
@@ -223,13 +223,13 @@ struct CardTemplateEditorView: View {
     private func cardMenu(_ notetype: Anki_Notetypes_Notetype) -> some View {
         Menu {
             Button { addCardName = ""; showAddCard = true } label: {
-                Label("Add card type", systemImage: "plus")
+                Label(Loc.tr("card-templates-add-card-type"), systemImage: "plus")
             }
             Button {
                 renameCardName = currentCardName(notetype)
                 showRenameCard = true
             } label: {
-                Label("Rename card type", systemImage: "pencil")
+                Label(Loc.tr("card-templates-rename-card-type"), systemImage: "pencil")
             }
             if notetype.templates.count > 1 {
                 Button { moveCard(by: -1) } label: { Label("Move up", systemImage: "arrow.up") }
@@ -268,15 +268,27 @@ struct CardTemplateEditorView: View {
         }
     }
 
+    /// Localized segment label for the Front / Back / Styling editor tabs (the
+    /// raw values stay English so they still serve as the picker's tag/id).
+    private func editTabLabel(_ tab: EditTab) -> String {
+        switch tab {
+        case .front: return Loc.tr("notetypes-front-field")
+        case .back: return Loc.tr("notetypes-back-field")
+        case .styling: return Loc.tr("card-templates-template-styling")
+        }
+    }
+
     private func previewPane(_ notetype: Anki_Notetypes_Notetype) -> some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Preview")
+                Text(Loc.tr("actions-preview"))
                     .font(DS.Typography.caption.weight(.semibold))
                     .foregroundStyle(DS.textSecondary)
                 Spacer(minLength: DS.Spacing.m)
                 Picker("Side", selection: $previewSide) {
-                    ForEach(PreviewSide.allCases) { side in Text(side.rawValue).tag(side) }
+                    ForEach(PreviewSide.allCases) { side in
+                        Text(Loc.tr(side == .question ? "notetypes-front-field" : "notetypes-back-field")).tag(side)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 180)

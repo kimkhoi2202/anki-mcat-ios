@@ -54,11 +54,11 @@ struct CustomStudyView: View {
             .scrollContentBackground(.hidden)
             .background(DS.background.ignoresSafeArea())
             .tint(DS.accent)
-            .navigationTitle("Custom study")
+            .navigationTitle(Loc.tr("actions-custom-study"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(Loc.tr("actions-cancel")) { dismiss() }
                 }
             }
             .task {
@@ -96,15 +96,18 @@ enum CustomStudyOption: Int, CaseIterable, Identifiable {
 
     var id: Int { rawValue }
 
-    /// Menu row label.
+    /// Menu row label, pulled from Anki's shared `custom-study-*` catalog so it
+    /// localizes like AnkiDroid. `@MainActor` because `Loc.tr` reads the engine;
+    /// all call sites are SwiftUI View contexts (main actor).
+    @MainActor
     var title: String {
         switch self {
-        case .extendNew: return "Increase today's new card limit"
-        case .extendReview: return "Increase today's review card limit"
-        case .reviewForgotten: return "Review forgotten cards"
-        case .reviewAhead: return "Review ahead"
-        case .previewNew: return "Preview new cards"
-        case .cardStateOrTag: return "Study by card state or tag"
+        case .extendNew: return Loc.tr("custom-study-increase-todays-new-card-limit")
+        case .extendReview: return Loc.tr("custom-study-increase-todays-review-card-limit")
+        case .reviewForgotten: return Loc.tr("custom-study-review-forgotten-cards")
+        case .reviewAhead: return Loc.tr("custom-study-review-ahead")
+        case .previewNew: return Loc.tr("custom-study-preview-new-cards")
+        case .cardStateOrTag: return Loc.tr("custom-study-study-by-card-state-or-tag")
         }
     }
 
@@ -119,15 +122,18 @@ enum CustomStudyOption: Int, CaseIterable, Identifiable {
         }
     }
 
-    /// Label shown before the number input (desktop's `preSpin`).
+    /// Label shown before the number input (desktop's `preSpin`), from Anki's
+    /// shared `custom-study-*` catalog. `@MainActor` for the same reason as
+    /// `title` (it reads the engine via `Loc.tr`).
+    @MainActor
     var inputLabel: String {
         switch self {
-        case .extendNew: return "Increase today's new card limit by"
-        case .extendReview: return "Increase today's review limit by"
-        case .reviewForgotten: return "Review cards forgotten in last"
-        case .reviewAhead: return "Review ahead by"
-        case .previewNew: return "Preview new cards added in the last"
-        case .cardStateOrTag: return "Select"
+        case .extendNew: return Loc.tr("custom-study-increase-todays-new-card-limit-by")
+        case .extendReview: return Loc.tr("custom-study-increase-todays-review-limit-by")
+        case .reviewForgotten: return Loc.tr("custom-study-review-cards-forgotten-in-last")
+        case .reviewAhead: return Loc.tr("custom-study-review-ahead-by")
+        case .previewNew: return Loc.tr("custom-study-preview-new-cards-added-in-the")
+        case .cardStateOrTag: return Loc.tr("custom-study-select")
         }
     }
 
@@ -207,7 +213,7 @@ private struct CustomStudyOptionDetail: View {
                 set: { if !$0 { errorMessage = nil } }
             )
         ) {
-            Button("OK", role: .cancel) { errorMessage = nil }
+            Button(Loc.tr("custom-study-ok"), role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
         }
@@ -245,7 +251,7 @@ private struct CustomStudyOptionDetail: View {
                 rowLabel("Cards")
             }
         } header: {
-            sectionHeader("Card state")
+            sectionHeader(Loc.tr("browsing-sidebar-card-state"))
         }
     }
 
@@ -281,7 +287,7 @@ private struct CustomStudyOptionDetail: View {
             Button {
                 apply()
             } label: {
-                Text(applying ? "Working…" : "OK")
+                Text(applying ? "Working…" : Loc.tr("custom-study-ok"))
             }
             .buttonStyle(.dsPrimary)
             .disabled(applying || clampedAmount == 0)

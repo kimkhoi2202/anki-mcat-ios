@@ -81,10 +81,10 @@ struct CSVImportView: View {
             .disabled(importing)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(Loc.tr("actions-cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Import") { runImport() }
+                    Button(Loc.tr("actions-import")) { runImport() }
                         .fontWeight(.semibold)
                         .disabled(importing || columnCount == 0)
                 }
@@ -117,11 +117,11 @@ struct CSVImportView: View {
                 rowLabel("Delimiter")
             }
 
-            Toggle("Allow HTML in fields", isOn: $isHTML)
+            Toggle(Loc.tr("importing-allow-html-in-fields"), isOn: $isHTML)
                 .font(DS.Typography.body)
                 .foregroundStyle(DS.textPrimary)
         } header: {
-            sectionHeader("File")
+            sectionHeader(Loc.tr("importing-file"))
         } footer: {
             sectionFooter("\(columnCount) column\(columnCount == 1 ? "" : "s") detected. HTML keeps formatting and media tags in fields rather than escaping them.")
         }
@@ -134,7 +134,7 @@ struct CSVImportView: View {
                     Text(option.name).tag(option.id)
                 }
             } label: {
-                rowLabel("Note type")
+                rowLabel(Loc.tr("notetypes-notetype"))
             }
 
             Picker(selection: $selectedDeckID) {
@@ -142,7 +142,7 @@ struct CSVImportView: View {
                     Text(deck.fullName).tag(deck.id)
                 }
             } label: {
-                rowLabel("Deck")
+                rowLabel(Loc.tr("decks-deck"))
             }
 
             Picker(selection: $dupeResolution) {
@@ -150,14 +150,14 @@ struct CSVImportView: View {
                 Text("Preserve existing").tag(Anki_ImportExport_CsvMetadata.DupeResolution.preserve)
                 Text("Import as new").tag(Anki_ImportExport_CsvMetadata.DupeResolution.duplicate)
             } label: {
-                rowLabel("Existing notes")
+                rowLabel(Loc.tr("importing-existing-notes"))
             }
 
             Picker(selection: $matchScope) {
                 Text("Note type").tag(Anki_ImportExport_CsvMetadata.MatchScope.notetype)
                 Text("Note type and deck").tag(Anki_ImportExport_CsvMetadata.MatchScope.notetypeAndDeck)
             } label: {
-                rowLabel("Match scope")
+                rowLabel(Loc.tr("importing-match-scope"))
             }
         } header: {
             sectionHeader("Import options")
@@ -179,7 +179,7 @@ struct CSVImportView: View {
                             ForEach(Array(fieldNames.enumerated()), id: \.offset) { index, name in
                                 Text(name).tag(index)
                             }
-                            Text("Tags").tag(tagsTag)
+                            Text(Loc.tr("editing-tags")).tag(tagsTag)
                             Text("Ignore").tag(ignoreTag)
                         }
                         .labelsHidden()
@@ -196,7 +196,7 @@ struct CSVImportView: View {
                 .padding(.vertical, DS.Spacing.xs)
             }
         } header: {
-            sectionHeader("Field mapping")
+            sectionHeader(Loc.tr("importing-field-mapping"))
         } footer: {
             sectionFooter("Map each column to a field, to Tags, or Ignore it. The note type's first field must be mapped.")
         }

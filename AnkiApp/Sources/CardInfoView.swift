@@ -29,7 +29,7 @@ struct CardInfoView: View {
                         .background(DS.background)
                 }
             }
-            .navigationTitle("Card Info")
+            .navigationTitle(Loc.tr("actions-card-info"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

@@ -67,11 +67,11 @@ struct LoginView: View {
                     .frame(maxWidth: .infinity)
                 }
             }
-            .navigationTitle("AnkiWeb Account")
+            .navigationTitle(Loc.tr("preferences-account"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
+                    Button(Loc.tr("actions-cancel")) { dismiss() }
                         .disabled(submitting)
                 }
             }
@@ -189,7 +189,7 @@ struct LoginView: View {
                 if submitting {
                     ProgressView().tint(.white)
                 }
-                Text(submitting ? "Signing in…" : "Log In")
+                Text(submitting ? "Signing in…" : Loc.tr("sync-log-in-button"))
             }
         }
         .buttonStyle(.dsPrimary)

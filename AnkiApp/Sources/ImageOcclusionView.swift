@@ -70,14 +70,14 @@ struct ImageOcclusionView: View {
                         .background(DS.background)
                 }
             }
-            .navigationTitle("Image Occlusion")
+            .navigationTitle(Loc.tr("notetypes-image-occlusion-name"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button(Loc.tr("actions-close")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isEditing ? "Save" : "Add") {
+                    Button(isEditing ? Loc.tr("actions-save") : Loc.tr("actions-add")) {
                         // Optional-chained so a tap before the page finishes
                         // loading is a harmless no-op instead of a JS error.
                         controller.evaluateJavaScript("globalThis.anki?.imageOcclusion?.save?.()")

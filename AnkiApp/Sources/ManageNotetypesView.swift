@@ -41,17 +41,17 @@ struct ManageNotetypesView: View {
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             Button(role: .destructive) { deleteTarget = item } label: {
-                                Label("Delete", systemImage: "trash")
+                                Label(Loc.tr("actions-delete"), systemImage: "trash")
                             }
                             Button { beginRename(item) } label: {
-                                Label("Rename", systemImage: "pencil")
+                                Label(Loc.tr("actions-rename"), systemImage: "pencil")
                             }
                             .tint(DS.accent)
                         }
                     }
                 }
             } header: {
-                sectionHeader("Note types")
+                sectionHeader(Loc.tr("notetypes-note-types"))
             } footer: {
                 sectionFooter("Tap a note type to edit its fields and card templates. Swipe a row to rename or delete it.")
             }
@@ -59,12 +59,12 @@ struct ManageNotetypesView: View {
         .scrollContentBackground(.hidden)
         .background(DS.background.ignoresSafeArea())
         .tint(DS.accent)
-        .navigationTitle("Manage Note Types")
+        .navigationTitle(Loc.tr("qt-misc-manage-note-types"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showAdd = true } label: {
-                    Label("Add note type", systemImage: "plus")
+                    Label(Loc.tr("notetypes-add-note-type"), systemImage: "plus")
                 }
                 .accessibilityIdentifier("addNotetype")
             }
@@ -77,8 +77,8 @@ struct ManageNotetypesView: View {
         .alert("Rename note type", isPresented: renamePresented) {
             TextField("Name", text: $renameText)
                 .autocorrectionDisabled()
-            Button("Cancel", role: .cancel) { renameTarget = nil }
-            Button("Rename") { commitRename() }
+            Button(Loc.tr("actions-cancel"), role: .cancel) { renameTarget = nil }
+            Button(Loc.tr("actions-rename")) { commitRename() }
         }
         .confirmationDialog(
             deleteTarget.map { "Delete “\($0.name)”?" } ?? "Delete note type?",
@@ -87,7 +87,7 @@ struct ManageNotetypesView: View {
             presenting: deleteTarget
         ) { target in
             Button("Delete note type", role: .destructive) { commitDelete(target) }
-            Button("Cancel", role: .cancel) { deleteTarget = nil }
+            Button(Loc.tr("actions-cancel"), role: .cancel) { deleteTarget = nil }
         } message: { target in
             Text(deleteMessage(for: target))
         }
@@ -237,14 +237,14 @@ struct NotetypeDetailView: View {
                         onChange()
                     }
                 } label: {
-                    Label("Fields", systemImage: "list.bullet.indent")
+                    Label(Loc.tr("notetypes-fields"), systemImage: "list.bullet.indent")
                         .font(DS.Typography.body)
                         .foregroundStyle(DS.textPrimary)
                 }
                 Button {
                     showTemplateEditor = true
                 } label: {
-                    Label("Cards", systemImage: "rectangle.on.rectangle.angled")
+                    Label(Loc.tr("notetypes-cards"), systemImage: "rectangle.on.rectangle.angled")
                         .font(DS.Typography.body)
                         .foregroundStyle(DS.textPrimary)
                 }
@@ -312,7 +312,7 @@ struct AddNotetypeView: View {
                     }
                     .onChange(of: selectedOptionID) { _ in seedName() }
                 } header: {
-                    sectionHeader("Type")
+                    sectionHeader(Loc.tr("notetypes-type"))
                 } footer: {
                     sectionFooter("“Add” starts from one of Anki’s built-in types; “Clone” copies an existing note type’s fields and cards.")
                 }
@@ -333,14 +333,14 @@ struct AddNotetypeView: View {
             .scrollContentBackground(.hidden)
             .background(DS.background.ignoresSafeArea())
             .tint(DS.accent)
-            .navigationTitle("Add Note Type")
+            .navigationTitle(Loc.tr("notetypes-add-note-type"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(Loc.tr("actions-cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") { add() }
+                    Button(Loc.tr("actions-add")) { add() }
                         .fontWeight(.semibold)
                         .disabled(saving || nameError != nil || selectedOption == nil)
                 }

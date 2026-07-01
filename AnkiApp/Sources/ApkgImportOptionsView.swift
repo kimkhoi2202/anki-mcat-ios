@@ -69,10 +69,10 @@ struct ApkgImportOptionsView: View {
             .disabled(importing)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(Loc.tr("actions-cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Import") { runImport() }
+                    Button(Loc.tr("actions-import")) { runImport() }
                         .fontWeight(.semibold)
                         .disabled(importing)
                         .accessibilityIdentifier("apkgImportConfirm")
@@ -110,7 +110,7 @@ struct ApkgImportOptionsView: View {
     private var packageSection: some View {
         Section {
             HStack {
-                rowLabel("File")
+                rowLabel(Loc.tr("importing-file"))
                 Spacer()
                 Text(fileURL.lastPathComponent)
                     .font(DS.Typography.body)
@@ -132,7 +132,7 @@ struct ApkgImportOptionsView: View {
                     Text(Self.title(for: condition)).tag(condition)
                 }
             } label: {
-                rowLabel("Update notes")
+                rowLabel(Loc.tr("importing-update-notes"))
             }
 
             Picker(selection: $updateNotetypes) {
@@ -140,10 +140,10 @@ struct ApkgImportOptionsView: View {
                     Text(Self.title(for: condition)).tag(condition)
                 }
             } label: {
-                rowLabel("Update note types")
+                rowLabel(Loc.tr("importing-update-notetypes"))
             }
 
-            Toggle("Merge note types", isOn: $mergeNotetypes)
+            Toggle(Loc.tr("importing-merge-notetypes"), isOn: $mergeNotetypes)
                 .font(DS.Typography.body)
                 .foregroundStyle(DS.textPrimary)
         } header: {
@@ -211,12 +211,15 @@ struct ApkgImportOptionsView: View {
         }
     }
 
-    /// The display title for an update-condition choice (mirrors Anki's dropdown).
+    /// The display title for an update-condition choice, from Anki's shared
+    /// catalog (`@MainActor` because `Loc.tr` reads the engine; the only call site
+    /// is the SwiftUI picker on the main actor).
+    @MainActor
     private static func title(for condition: ApkgImportUpdateCondition) -> String {
         switch condition {
-        case .ifNewer: return "If newer"
-        case .always: return "Always"
-        case .never: return "Never"
+        case .ifNewer: return Loc.tr("importing-update-if-newer")
+        case .always: return Loc.tr("importing-update-always")
+        case .never: return Loc.tr("importing-update-never")
         }
     }
 

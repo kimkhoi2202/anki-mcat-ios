@@ -53,14 +53,14 @@ struct ChangeNotetypeView: View {
             .scrollContentBackground(.hidden)
             .background(DS.background.ignoresSafeArea())
             .tint(DS.accent)
-            .navigationTitle("Change Note Type")
+            .navigationTitle(Loc.tr("browsing-change-note-type"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(Loc.tr("actions-cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") { save() }
+                    Button(Loc.tr("actions-save")) { save() }
                         .fontWeight(.semibold)
                         .disabled(info == nil || saving)
                 }
@@ -93,7 +93,7 @@ struct ChangeNotetypeView: View {
             }
             .onChange(of: selectedTargetID) { _ in reloadInfo() }
         } header: {
-            sectionHeader("Note type")
+            sectionHeader(Loc.tr("notetypes-notetype"))
         } footer: {
             sectionFooter("Choose the note type to convert this note to, then map its fields below.")
         }
@@ -109,7 +109,7 @@ struct ChangeNotetypeView: View {
                 )
             }
         } header: {
-            sectionHeader("Fields")
+            sectionHeader(Loc.tr("change-notetype-fields"))
         } footer: {
             sectionFooter("Each new field is filled from the chosen old field, or left empty.")
         }
@@ -125,7 +125,7 @@ struct ChangeNotetypeView: View {
                 )
             }
         } header: {
-            sectionHeader("Cards")
+            sectionHeader(Loc.tr("notetypes-cards"))
         } footer: {
             sectionFooter("Map each new card template to an old one, or discard it.")
         }
@@ -137,7 +137,7 @@ struct ChangeNotetypeView: View {
         title: String, selection: Binding<Int>, oldNames: [String]
     ) -> some View {
         Picker(selection: selection) {
-            Text("(Nothing)").tag(noneTag)
+            Text(Loc.tr("change-notetype-nothing")).tag(noneTag)
             ForEach(Array(oldNames.enumerated()), id: \.offset) { oldIndex, oldName in
                 Text(oldName).tag(oldIndex)
             }

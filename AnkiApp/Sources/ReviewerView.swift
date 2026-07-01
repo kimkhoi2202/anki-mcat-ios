@@ -642,15 +642,15 @@ struct ReviewerView: View {
             isPresented: $confirmDelete,
             titleVisibility: .visible
         ) {
-            Button("Delete note", role: .destructive) { store.deleteCurrentNote() }
-            Button("Cancel", role: .cancel) {}
+            Button(Loc.tr("studying-delete-note"), role: .destructive) { store.deleteCurrentNote() }
+            Button(Loc.tr("actions-cancel"), role: .cancel) {}
         } message: {
             Text("This permanently deletes the note and all of its cards. You can undo it from the toolbar.")
         }
         // "Set due date" prompt: an Anki date spec applied to the current card,
         // mirroring AnkiDroid's set-due-date dialog (accepts a number of days or
         // a range). Applying advances/refreshes like the other card actions.
-        .alert("Set due date", isPresented: $showSetDueDate) {
+        .alert(Loc.tr("actions-set-due-date"), isPresented: $showSetDueDate) {
             TextField("e.g. 0, 3, or 7-14", text: $dueDateText)
                 .keyboardType(.numbersAndPunctuation)
                 .autocorrectionDisabled()
@@ -658,7 +658,7 @@ struct ReviewerView: View {
                 store.setReviewerDueDate(dueDateText)
                 dueDateText = ""
             }
-            Button("Cancel", role: .cancel) { dueDateText = "" }
+            Button(Loc.tr("actions-cancel"), role: .cancel) { dueDateText = "" }
         } message: {
             Text("Show this card again after a number of days (e.g. 3), a random day in a range (7-14), or 0 for today.")
         }
@@ -949,7 +949,7 @@ struct ReviewerView: View {
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button(action: store.undo) {
-                Label("Undo", systemImage: "arrow.uturn.backward")
+                Label(Loc.tr("undo-undo"), systemImage: "arrow.uturn.backward")
             }
             .disabled(!store.canUndo)
             .accessibilityLabel(store.undoName.isEmpty ? "Undo" : "Undo \(store.undoName)")
@@ -1158,27 +1158,29 @@ private struct CardActionMenu: View {
         VStack(alignment: .leading, spacing: 0) {
             flagSection
             divider
+            // "Edit note" / "Unmark note" have no matching key in the bundled
+            // catalog subset, so they stay English (the localized keys don't exist).
             row("Edit note", systemImage: "pencil") { onDismiss(); onEdit() }
-            row(store.isMarked ? "Unmark note" : "Mark note",
+            row(store.isMarked ? "Unmark note" : Loc.tr("studying-mark-note"),
                 systemImage: store.isMarked ? "star.fill" : "star") {
                 store.toggleMark()
             }
             divider
-            row("Bury card", systemImage: "rectangle.stack") { onDismiss(); store.buryCard() }
-            row("Bury note", systemImage: "rectangle.stack.fill") { onDismiss(); store.buryNote() }
-            row("Suspend card", systemImage: "pause.circle") { onDismiss(); store.suspendCard() }
-            row("Suspend note", systemImage: "pause.circle.fill") { onDismiss(); store.suspendNote() }
-            row("Set due date", systemImage: "calendar") { onDismiss(); onSetDueDate() }
+            row(Loc.tr("studying-bury-card"), systemImage: "rectangle.stack") { onDismiss(); store.buryCard() }
+            row(Loc.tr("studying-bury-note"), systemImage: "rectangle.stack.fill") { onDismiss(); store.buryNote() }
+            row(Loc.tr("actions-suspend-card"), systemImage: "pause.circle") { onDismiss(); store.suspendCard() }
+            row(Loc.tr("studying-suspend-note"), systemImage: "pause.circle.fill") { onDismiss(); store.suspendNote() }
+            row(Loc.tr("actions-set-due-date"), systemImage: "calendar") { onDismiss(); onSetDueDate() }
             divider
             // Auto Advance is a checkable toggle (kept open like Mark), mirroring
             // AnkiDroid's reviewer "Auto Advance" menu item.
-            toggleRow("Auto advance", systemImage: "forward.circle", isOn: store.autoAdvanceEnabled) {
+            toggleRow(Loc.tr("actions-auto-advance"), systemImage: "forward.circle", isOn: store.autoAdvanceEnabled) {
                 store.autoAdvanceEnabled.toggle()
             }
-            row("Replay audio", systemImage: "speaker.wave.2") { onDismiss(); store.replayAudio() }
-            row("Card info", systemImage: "info.circle") { onDismiss(); onCardInfo() }
+            row(Loc.tr("actions-replay-audio"), systemImage: "speaker.wave.2") { onDismiss(); store.replayAudio() }
+            row(Loc.tr("actions-card-info"), systemImage: "info.circle") { onDismiss(); onCardInfo() }
             divider
-            row("Delete note", systemImage: "trash", role: .destructive) { onDismiss(); onDelete() }
+            row(Loc.tr("studying-delete-note"), systemImage: "trash", role: .destructive) { onDismiss(); onDelete() }
         }
         .padding(.vertical, DS.Spacing.xs)
         .background(DS.surface, in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous))
@@ -1193,7 +1195,7 @@ private struct CardActionMenu: View {
     /// AnkiDroid's flag submenu. Tapping a swatch toggles that color.
     private var flagSection: some View {
         VStack(alignment: .leading, spacing: DS.Spacing.s) {
-            Text("Flag")
+            Text(Loc.tr("browsing-flag"))
                 .font(DS.Typography.caption.weight(.semibold))
                 .foregroundStyle(DS.textSecondary)
             HStack(spacing: DS.Spacing.xs) {

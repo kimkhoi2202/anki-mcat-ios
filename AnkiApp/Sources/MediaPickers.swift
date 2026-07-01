@@ -220,7 +220,7 @@ struct AudioRecorderView: View {
             .tint(DS.accent)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                    Button(Loc.tr("actions-cancel")) {
                         recorder.cancel()
                         onFinish(nil)
                     }

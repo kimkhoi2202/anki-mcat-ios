@@ -112,14 +112,16 @@ struct NoteEditorView: View {
             .scrollContentBackground(.hidden)
             .background(DS.background.ignoresSafeArea())
             .tint(DS.accent)
-            .navigationTitle(isEditing ? "Edit Note" : "Add Note")
+            // "Edit Note" has no matching catalog key in the bundled subset, so it
+            // stays English; "Add Note" localizes via `actions-add-note`.
+            .navigationTitle(isEditing ? "Edit Note" : Loc.tr("actions-add-note"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     // ADD mode keeps the editor open across saves, so the leading
                     // button is the explicit "finish" (Done); EDIT mode keeps the
                     // familiar discard-and-dismiss "Cancel".
-                    Button(isEditing ? "Cancel" : "Done") { dismiss() }
+                    Button(isEditing ? Loc.tr("actions-cancel") : "Done") { dismiss() }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     // Preview the current uncommitted note's card(s) (front/back,
@@ -137,7 +139,7 @@ struct NoteEditorView: View {
                     // Image Occlusion notes are saved inside the web editor (its own
                     // Add/Save), so the note editor hides its save action for them.
                     if !isIONotetype {
-                        Button(isEditing ? "Save" : "Add") { save() }
+                        Button(isEditing ? Loc.tr("actions-save") : Loc.tr("actions-add")) { save() }
                             .fontWeight(.semibold)
                             .disabled(!didLoad || fieldNames.isEmpty)
                     }
@@ -201,7 +203,7 @@ struct NoteEditorView: View {
                 if CameraPicker.isAvailable {
                     Button("Take Photo") { presentIOImagePicker(.camera) }
                 }
-                Button("Cancel", role: .cancel) {}
+                Button(Loc.tr("actions-cancel"), role: .cancel) {}
             }
             .sheet(item: $ioImageSource) { source in
                 ioImagePickerView(for: source)
@@ -239,7 +241,7 @@ struct NoteEditorView: View {
                     Text(notetype.name).tag(notetype.id)
                 }
             } label: {
-                rowLabel("Type")
+                rowLabel(Loc.tr("notetypes-type"))
             }
             // Changing a note's type (re-mapping fields) is out of scope for
             // T2.1, so in EDIT mode the type is shown but fixed.
@@ -258,7 +260,7 @@ struct NoteEditorView: View {
                     .foregroundStyle(DS.accent)
             }
         } header: {
-            sectionHeader("Note type")
+            sectionHeader(Loc.tr("notetypes-notetype"))
         }
     }
 
@@ -269,10 +271,10 @@ struct NoteEditorView: View {
                     Text(deck.fullName).tag(deck.id)
                 }
             } label: {
-                rowLabel("Deck")
+                rowLabel(Loc.tr("decks-deck"))
             }
         } header: {
-            sectionHeader("Deck")
+            sectionHeader(Loc.tr("decks-deck"))
         }
     }
 
@@ -313,7 +315,7 @@ struct NoteEditorView: View {
                 fieldsWarningRow
             }
         } header: {
-            sectionHeader(isIONotetype ? "Image Occlusion" : "Fields")
+            sectionHeader(isIONotetype ? Loc.tr("notetypes-image-occlusion-name") : Loc.tr("notetypes-fields"))
         } footer: {
             if isIONotetype {
                 sectionFooter(isEditing
@@ -432,7 +434,7 @@ struct NoteEditorView: View {
                 tagSuggestionsRow
             }
         } header: {
-            sectionHeader("Tags")
+            sectionHeader(Loc.tr("editing-tags"))
         } footer: {
             sectionFooter("Separate tags with spaces. Use :: for nested tags (e.g. anatomy::heart).")
         }
@@ -501,7 +503,7 @@ struct NoteEditorView: View {
             // no source buttons are needed; present for exhaustiveness only.
             EmptyView()
         }
-        Button("Cancel", role: .cancel) {}
+        Button(Loc.tr("actions-cancel"), role: .cancel) {}
     }
 
     /// Presents the chosen picker just after the source dialog has dismissed —
@@ -564,7 +566,7 @@ struct NoteEditorView: View {
                 Button {
                     ioImageSourceShown = true
                 } label: {
-                    Label("Select Image", systemImage: "photo.on.rectangle.angled")
+                    Label(Loc.tr("notetypes-io-select-image"), systemImage: "photo.on.rectangle.angled")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)

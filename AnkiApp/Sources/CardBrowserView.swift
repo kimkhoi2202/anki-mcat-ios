@@ -176,7 +176,7 @@ struct CardBrowserView: View {
                 showingFindReplace = false
             }
         }
-        .alert("Find & Replace", isPresented: findReplaceResultPresented) {
+        .alert(Loc.tr("browsing-find-and-replace"), isPresented: findReplaceResultPresented) {
             Button("OK", role: .cancel) { model.findReplaceResult = nil }
         } message: {
             Text(model.findReplaceResult ?? "")
@@ -197,7 +197,7 @@ struct CardBrowserView: View {
             TextField("Tags (space-separated)", text: $tagInput)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
-            Button("Cancel", role: .cancel) { tagInput = "" }
+            Button(Loc.tr("actions-cancel"), role: .cancel) { tagInput = "" }
             Button(kind.actionTitle) {
                 switch kind {
                 case .add: model.bulkAddTags(tagInput)
@@ -217,7 +217,7 @@ struct CardBrowserView: View {
                 model.bulkDelete()
                 pendingBulkDelete = false
             }
-            Button("Cancel", role: .cancel) { pendingBulkDelete = false }
+            Button(Loc.tr("actions-cancel"), role: .cancel) { pendingBulkDelete = false }
         } message: {
             Text("This deletes the selected notes and all their cards. You can undo it from the reviewer.")
         }
@@ -262,11 +262,11 @@ struct CardBrowserView: View {
         .sheet(item: $previewTarget) { target in
             CardPreviewSheet(store: store, cardID: target.id)
         }
-        .alert("Save Current Search", isPresented: $showingSaveSearch) {
+        .alert(Loc.tr("browsing-sidebar-save-current-search"), isPresented: $showingSaveSearch) {
             TextField("Name", text: $saveSearchName)
                 .autocorrectionDisabled()
-            Button("Cancel", role: .cancel) { saveSearchName = "" }
-            Button("Save") {
+            Button(Loc.tr("actions-cancel"), role: .cancel) { saveSearchName = "" }
+            Button(Loc.tr("actions-save")) {
                 model.saveCurrentSearch(name: saveSearchName)
                 saveSearchName = ""
             }
@@ -284,11 +284,11 @@ struct CardBrowserView: View {
             titleVisibility: .visible,
             presenting: pendingDelete
         ) { row in
-            Button("Delete", role: .destructive) {
+            Button(Loc.tr("actions-delete"), role: .destructive) {
                 model.delete(row)
                 pendingDelete = nil
             }
-            Button("Cancel", role: .cancel) { pendingDelete = nil }
+            Button(Loc.tr("actions-cancel"), role: .cancel) { pendingDelete = nil }
         } message: { _ in
             // remove_notes deletes the note behind the card (and its siblings);
             // it records an undo entry, mirroring AnkiDroid's delete.
@@ -373,7 +373,7 @@ struct CardBrowserView: View {
                 Button(role: .destructive) {
                     pendingDelete = row
                 } label: {
-                    Label("Delete", systemImage: "trash")
+                    Label(Loc.tr("actions-delete"), systemImage: "trash")
                 }
                 Button {
                     model.toggleSuspend(row)
@@ -436,7 +436,7 @@ struct CardBrowserView: View {
         Button {
             model.enterSelection(initial: row.id)
         } label: {
-            Label("Select", systemImage: "checkmark.circle")
+            Label(Loc.tr("actions-select"), systemImage: "checkmark.circle")
         }
 
         Divider()
@@ -444,19 +444,19 @@ struct CardBrowserView: View {
         Button {
             openPreview(forRow: row.id)
         } label: {
-            Label("Preview", systemImage: "eye")
+            Label(Loc.tr("actions-preview"), systemImage: "eye")
         }
 
         Button {
             openCardInfo(forRow: row.id)
         } label: {
-            Label("Card Info", systemImage: "info.circle")
+            Label(Loc.tr("actions-card-info"), systemImage: "info.circle")
         }
 
         Button {
             openChangeNotetype(forRow: row.id)
         } label: {
-            Label("Change Note Type", systemImage: "arrow.triangle.2.circlepath")
+            Label(Loc.tr("browsing-change-note-type"), systemImage: "arrow.triangle.2.circlepath")
         }
 
         Divider()
@@ -464,8 +464,9 @@ struct CardBrowserView: View {
         Button {
             model.toggleSuspend(row)
         } label: {
+            // "Unsuspend" has no matching catalog key, so it stays English.
             Label(
-                row.suspended ? "Unsuspend" : "Suspend",
+                row.suspended ? "Unsuspend" : Loc.tr("studying-suspend"),
                 systemImage: row.suspended ? "play.fill" : "pause.fill"
             )
         }
@@ -479,7 +480,7 @@ struct CardBrowserView: View {
                 }
             }
         } label: {
-            Label("Flag", systemImage: "flag")
+            Label(Loc.tr("browsing-flag"), systemImage: "flag")
         }
 
         Divider()
@@ -487,7 +488,7 @@ struct CardBrowserView: View {
         Button(role: .destructive) {
             pendingDelete = row
         } label: {
-            Label("Delete", systemImage: "trash")
+            Label(Loc.tr("actions-delete"), systemImage: "trash")
         }
     }
 
@@ -541,7 +542,7 @@ struct CardBrowserView: View {
 
     /// Inline title: "Browse" normally; the live selected count while selecting.
     private var navigationTitle: String {
-        guard model.isSelecting else { return "Browse" }
+        guard model.isSelecting else { return Loc.tr("qt-misc-browse") }
         return model.selectedCount == 0
             ? "Select \(model.mode == .notes ? "Notes" : "Cards")"
             : "\(model.selectedCount) selected"
@@ -560,7 +561,7 @@ struct CardBrowserView: View {
     private var selectionToolbar: some ToolbarContent {
         if model.isSelecting {
             ToolbarItem(placement: .topBarLeading) {
-                Button("Cancel") { model.exitSelection() }
+                Button(Loc.tr("actions-cancel")) { model.exitSelection() }
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button(model.allSelected ? "Deselect All" : "Select All") {
@@ -570,7 +571,7 @@ struct CardBrowserView: View {
             }
         } else {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Select") { model.enterSelection() }
+                Button(Loc.tr("actions-select")) { model.enterSelection() }
                     .disabled(model.cardIDs.isEmpty)
             }
         }
@@ -605,8 +606,8 @@ struct CardBrowserView: View {
                 // Cards vs Notes: a checkmarked inline picker, like desktop's
                 // browser "Cards"/"Notes" toggle.
                 Picker("View", selection: modeBinding) {
-                    Label("Cards", systemImage: "rectangle.on.rectangle").tag(BrowserMode.cards)
-                    Label("Notes", systemImage: "note.text").tag(BrowserMode.notes)
+                    Label(Loc.tr("browsing-cards"), systemImage: "rectangle.on.rectangle").tag(BrowserMode.cards)
+                    Label(Loc.tr("browsing-notes"), systemImage: "note.text").tag(BrowserMode.notes)
                 }
                 Divider()
                 sortMenu
@@ -663,11 +664,11 @@ struct CardBrowserView: View {
     /// disabled with an empty selection.
     private var bulkActionBar: some View {
         HStack(spacing: 0) {
-            bulkBarButton("Deck", systemImage: "tray.full") { showingDeckPicker = true }
+            bulkBarButton(Loc.tr("decks-deck"), systemImage: "tray.full") { showingDeckPicker = true }
             flagBarMenu
             statusBarMenu
             tagsBarMenu
-            bulkBarButton("Delete", systemImage: "trash", destructive: true) {
+            bulkBarButton(Loc.tr("actions-delete"), systemImage: "trash", destructive: true) {
                 pendingBulkDelete = true
             }
         }
@@ -687,7 +688,7 @@ struct CardBrowserView: View {
                 }
             }
         } label: {
-            bulkBarLabel("Flag", systemImage: "flag")
+            bulkBarLabel(Loc.tr("browsing-flag"), systemImage: "flag")
         }
         .disabled(model.selectedCount == 0)
     }
@@ -698,21 +699,22 @@ struct CardBrowserView: View {
             Button {
                 model.bulkSetSuspended(true)
             } label: {
-                Label("Suspend", systemImage: "pause.fill")
+                Label(Loc.tr("studying-suspend"), systemImage: "pause.fill")
             }
             Button {
                 model.bulkSetSuspended(false)
             } label: {
+                // "Unsuspend" has no matching catalog key, so it stays English.
                 Label("Unsuspend", systemImage: "play.fill")
             }
             Divider()
             Button {
                 model.bulkBury()
             } label: {
-                Label("Bury", systemImage: "eye.slash")
+                Label(Loc.tr("studying-bury"), systemImage: "eye.slash")
             }
         } label: {
-            bulkBarLabel("Suspend", systemImage: "pause.circle")
+            bulkBarLabel(Loc.tr("studying-suspend"), systemImage: "pause.circle")
         }
         .disabled(model.selectedCount == 0)
     }
@@ -744,7 +746,7 @@ struct CardBrowserView: View {
                 Label("Remove Tags", systemImage: "tag.slash")
             }
         } label: {
-            bulkBarLabel("Tags", systemImage: "tag")
+            bulkBarLabel(Loc.tr("editing-tags"), systemImage: "tag")
         }
         .disabled(model.selectedCount == 0)
     }
@@ -919,11 +921,11 @@ private struct DeckPickerSheet: View {
                     .background(DS.background)
                 }
             }
-            .navigationTitle("Change Deck")
+            .navigationTitle(Loc.tr("browsing-change-deck"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { onCancel() }
+                    Button(Loc.tr("actions-cancel")) { onCancel() }
                 }
             }
         }
@@ -982,7 +984,7 @@ private struct ColumnPickerSheet: View {
             .environment(\.editMode, $editMode)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { onCancel() }
+                    Button(Loc.tr("actions-cancel")) { onCancel() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     EditButton()
@@ -1094,7 +1096,7 @@ private struct FindReplaceSheet: View {
                 }
 
                 Section {
-                    Toggle("Treat input as regular expression", isOn: $regex)
+                    Toggle(Loc.tr("browsing-treat-input-as-regular-expression"), isOn: $regex)
                     Toggle("Match case", isOn: $matchCase)
                     Picker("In", selection: $fieldSelection) {
                         Text("All fields").tag("")
@@ -1116,11 +1118,11 @@ private struct FindReplaceSheet: View {
                     Text("Find & Replace runs over the chosen notes' fields and is undoable.")
                 }
             }
-            .navigationTitle("Find & Replace")
+            .navigationTitle(Loc.tr("browsing-find-and-replace"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { onCancel() }
+                    Button(Loc.tr("actions-cancel")) { onCancel() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Replace") {
@@ -1183,7 +1185,7 @@ private struct CardPreviewSheet: View {
                         .foregroundStyle(DS.textSecondary)
                 }
             }
-            .navigationTitle("Preview")
+            .navigationTitle(Loc.tr("actions-preview"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1194,8 +1196,8 @@ private struct CardPreviewSheet: View {
                 ToolbarItem(placement: .principal) {
                     if preview != nil {
                         Picker("Side", selection: $showingBack) {
-                            Text("Front").tag(false)
-                            Text("Back").tag(true)
+                            Text(Loc.tr("notetypes-front-field")).tag(false)
+                            Text(Loc.tr("notetypes-back-field")).tag(true)
                         }
                         .pickerStyle(.segmented)
                         .frame(maxWidth: 200)
@@ -1273,7 +1275,7 @@ private struct BrowserSidebarSheet: View {
 
     @ViewBuilder
     private var savedSearchesSection: some View {
-        Section("Saved Searches") {
+        Section(Loc.tr("browsing-sidebar-saved-searches")) {
             if savedSearches.isEmpty {
                 Text("Save the current search with “Save Search”.")
                     .font(DS.Typography.caption)
@@ -1292,7 +1294,7 @@ private struct BrowserSidebarSheet: View {
     @ViewBuilder
     private var decksSection: some View {
         if !deckNodes.isEmpty {
-            Section("Decks") {
+            Section(Loc.tr("browsing-sidebar-decks")) {
                 ForEach(deckNodes) { node in
                     SidebarDeckRow(
                         node: node, activeQuery: activeQuery,
@@ -1308,7 +1310,7 @@ private struct BrowserSidebarSheet: View {
     /// (`tag:x::*`); a leaf an exact `tag:x`. Expansion persists per tag path.
     @ViewBuilder
     private var tagsSection: some View {
-        Section("Tags") {
+        Section(Loc.tr("browsing-sidebar-tags")) {
             filterRow("No tags", systemImage: "tag.slash",
                       isActive: activeQuery == "tag:none") { onApply("tag:none") }
             ForEach(tagNodes) { node in
@@ -1321,7 +1323,7 @@ private struct BrowserSidebarSheet: View {
     }
 
     private var flagsSection: some View {
-        Section("Flags") {
+        Section(Loc.tr("browsing-sidebar-flags")) {
             ForEach(CardFlag.allCases) { flag in
                 let term = "flag:\(flag.rawValue)"
                 filterRow(
@@ -1335,24 +1337,26 @@ private struct BrowserSidebarSheet: View {
     }
 
     private var cardStateSection: some View {
-        Section("Card State") {
-            filterRow("New", systemImage: "sparkles",
+        Section(Loc.tr("browsing-sidebar-card-state")) {
+            filterRow(Loc.tr("actions-new"), systemImage: "sparkles",
                       isActive: activeQuery == "is:new") { onApply("is:new") }
-            filterRow("Learning", systemImage: "hourglass",
+            filterRow(Loc.tr("scheduling-learning"), systemImage: "hourglass",
                       isActive: activeQuery == "is:learn") { onApply("is:learn") }
-            filterRow("Review", systemImage: "checkmark.circle",
+            filterRow(Loc.tr("browsing-sidebar-card-state-review"), systemImage: "checkmark.circle",
                       isActive: activeQuery == "is:review") { onApply("is:review") }
-            filterRow("Due", systemImage: "calendar",
+            filterRow(Loc.tr("browsing-sidebar-due-today"), systemImage: "calendar",
                       isActive: activeQuery == "is:due") { onApply("is:due") }
-            filterRow("Suspended", systemImage: "pause.circle",
+            filterRow(Loc.tr("browsing-suspended"), systemImage: "pause.circle",
                       isActive: activeQuery == "is:suspended") { onApply("is:suspended") }
-            filterRow("Buried", systemImage: "eye.slash",
+            filterRow(Loc.tr("browsing-buried"), systemImage: "eye.slash",
                       isActive: activeQuery == "is:buried") { onApply("is:buried") }
         }
     }
 
     private var todaySection: some View {
-        Section("Today") {
+        // "Added Today" / "Studied Today" have no matching catalog keys, so they
+        // stay English; only the section header localizes.
+        Section(Loc.tr("browsing-today")) {
             filterRow("Added Today", systemImage: "plus.square.on.square",
                       isActive: activeQuery == "added:1") { onApply("added:1") }
             filterRow("Studied Today", systemImage: "clock.arrow.circlepath",
@@ -2476,7 +2480,7 @@ private struct CardBrowserRowView: View {
     }
 
     private var suspendedBadge: some View {
-        Text("Suspended")
+        Text(Loc.tr("browsing-suspended"))
             .font(.caption2.weight(.semibold))
             .foregroundStyle(DS.hard)
             .padding(.horizontal, DS.Spacing.s)

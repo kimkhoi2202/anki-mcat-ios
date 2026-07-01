@@ -147,7 +147,7 @@ struct ImportExportView: View {
             presenting: pendingReplace
         ) { pending in
             Button("Replace", role: .destructive) { confirmReplace(pending) }
-            Button("Cancel", role: .cancel) { pendingReplace = nil }
+            Button(Loc.tr("actions-cancel"), role: .cancel) { pendingReplace = nil }
         } message: { pending in
             Text("This will delete your existing collection and replace it with the data of file “\(pending.displayName)”.")
         }
@@ -245,7 +245,7 @@ struct ImportExportView: View {
             }
             .accessibilityIdentifier("importCSV")
         } header: {
-            sectionHeader("Import")
+            sectionHeader(Loc.tr("actions-import"))
         } footer: {
             sectionFooter("An Anki Deck Package (.apkg) adds its notes with import options; a collection package (.colpkg) replaces your entire collection; a .csv/.tsv/.txt file maps its columns to fields.")
         }
@@ -255,7 +255,7 @@ struct ImportExportView: View {
 
     private var exportSection: some View {
         Section {
-            Toggle("Include media", isOn: $includeMedia)
+            Toggle(Loc.tr("exporting-include-media"), isOn: $includeMedia)
                 .font(DS.Typography.body)
                 .foregroundStyle(DS.textPrimary)
 
@@ -264,7 +264,7 @@ struct ImportExportView: View {
                     Text(deck.fullName).tag(Optional(deck.id))
                 }
             } label: {
-                Text("Deck")
+                Text(Loc.tr("decks-deck"))
                     .font(DS.Typography.body)
                     .foregroundStyle(DS.textPrimary)
             }
@@ -294,7 +294,7 @@ struct ImportExportView: View {
             }
             .accessibilityIdentifier("exportText")
         } header: {
-            sectionHeader("Export")
+            sectionHeader(Loc.tr("actions-export"))
         } footer: {
             sectionFooter("A deck exports as a sharable .apkg. The whole collection exports as a .colpkg backup. Notes or cards can also export as plain text (.txt).")
         }

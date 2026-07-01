@@ -65,10 +65,10 @@ struct TextExportView: View {
             .disabled(exporting)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(Loc.tr("actions-cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Export") { runExport() }
+                    Button(Loc.tr("actions-export")) { runExport() }
                         .fontWeight(.semibold)
                         .disabled(exporting)
                 }
@@ -99,14 +99,14 @@ struct TextExportView: View {
     private var typeSection: some View {
         Section {
             Picker(selection: $exportType) {
-                Text("Notes").tag(ExportType.notes)
-                Text("Cards").tag(ExportType.cards)
+                Text(Loc.tr("browsing-notes")).tag(ExportType.notes)
+                Text(Loc.tr("browsing-cards")).tag(ExportType.cards)
             } label: {
-                rowLabel("Export")
+                rowLabel(Loc.tr("actions-export"))
             }
             .pickerStyle(.segmented)
         } header: {
-            sectionHeader("Type")
+            sectionHeader(Loc.tr("notetypes-type"))
         } footer: {
             sectionFooter(exportType == .notes
                 ? "Exports each note's fields as a tab-separated row."
@@ -139,7 +139,7 @@ struct TextExportView: View {
                 .foregroundStyle(DS.textPrimary)
 
             if exportType == .notes {
-                Toggle("Include tags", isOn: $withTags)
+                Toggle(Loc.tr("exporting-include-tags"), isOn: $withTags)
                     .font(DS.Typography.body)
                     .foregroundStyle(DS.textPrimary)
                 Toggle("Include deck column", isOn: $withDeck)
