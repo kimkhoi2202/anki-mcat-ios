@@ -849,15 +849,14 @@ final class AnkiStore: ObservableObject {
         return (try? await runDetached { try backend.allTags() }) ?? []
     }
 
-    /// The full deck list (all decks incl. filtered, by full `Parent::Child`
-    /// name), off the main actor — the sidebar's Decks section. Unlike the Home
-    /// deck tree, this ignores the reviewer collapse state so every deck is
-    /// filterable. Best-effort: [] on failure.
-    func browserDeckNames() async -> [(id: Int64, name: String)] {
+    /// The full deck hierarchy (every deck incl. collapsed subdecks and filtered
+    /// decks) with its new/learn/review counts, off the main actor — the source
+    /// for the sidebar's collapsible Decks tree. Unlike the Home deck list it
+    /// ignores the reviewer collapse state, so the browser's OWN per-node
+    /// expansion controls which subdecks show. Best-effort: [] on failure.
+    func browserDeckTree() async -> [DeckTreeEntry] {
         guard let backend else { return [] }
-        return (try? await runDetached {
-            try backend.deckNames(skipEmptyDefault: false, includeFiltered: true)
-        }) ?? []
+        return (try? await runDetached { try backend.fullDeckTree() }) ?? []
     }
 
     /// The collection's saved searches (Anki's browser sidebar "Saved
@@ -2080,6 +2079,64 @@ final class AnkiStore: ObservableObject {
             refreshDecks()
         } catch {
             status = "Subdeck demo seed error: \(error)"
+        }
+    }
+
+    /// `-demoBrowserSidebarTree` seeds a nested deck tree (Languages → Spanish →
+    /// Verbs, plus French) AND hierarchical tags (`language::spanish::…`,
+    /// `grammar::verbs`) so the Card Browser sidebar's collapsible Decks/Tags
+    /// outline has real, multi-level content to screenshot. It also primes the
+    /// per-node expansion state (the same `@AppStorage` keys the sidebar rows
+    /// use) so a nested branch shows already expanded. Idempotent (skips the
+    /// re-seed once the tree exists); excluded from release builds.
+    func prepareBrowserSidebarDemoIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("-demoBrowserSidebarTree") else { return }
+        guard let backend else { return }
+        let parentName = "Languages"
+        do {
+            let existing = try backend.deckNames()
+            let alreadySeeded = existing.contains {
+                $0.name == parentName || $0.name.hasPrefix("\(parentName)::")
+            }
+            if !alreadySeeded {
+                let spanish = try backend.createDeck(name: "\(parentName)::Spanish")
+                _ = try backend.createDeck(name: "\(parentName)::French")
+                _ = try backend.createDeck(name: "\(parentName)::Spanish::Verbs")
+                let notetypes = try backend.notetypeNames()
+                if let basic = notetypes.first(where: {
+                    $0.name.hasPrefix("Basic") && !$0.name.lowercased().contains("type")
+                }) {
+                    let hola = try backend.addNote(
+                        notetypeID: basic.id, fields: ["Hola", "Hello"], deckID: spanish)
+                    let gato = try backend.addNote(
+                        notetypeID: basic.id, fields: ["Gato", "Cat"], deckID: spanish)
+                    // Hierarchical tags so the Tags outline nests too.
+                    _ = try backend.addNoteTags(noteIDs: [hola], tags: "language::spanish::greetings")
+                    _ = try backend.addNoteTags(
+                        noteIDs: [gato], tags: "language::spanish::animals grammar::verbs")
+                }
+            }
+            // Prime the sidebar's expansion state (same UserDefaults keys the
+            // deck/tag rows read via @AppStorage) so a nested branch is already
+            // open in the screenshot.
+            let names = try backend.deckNames()
+            func deckID(_ full: String) -> Int64? { names.first { $0.name == full }?.id }
+            let defaults = UserDefaults.standard
+            // `-demoBrowserSidebarCollapseDecks` collapses the deck subtree so the
+            // (also-nested) Tags outline fits on screen for its own screenshot.
+            let expandDecks = !ProcessInfo.processInfo.arguments
+                .contains("-demoBrowserSidebarCollapseDecks")
+            for full in [parentName, "\(parentName)::Spanish"] {
+                if let id = deckID(full) {
+                    defaults.set(expandDecks, forKey: "cardBrowser.sidebar.deckExpanded.\(id)")
+                }
+            }
+            for path in ["language", "language::spanish", "grammar"] {
+                defaults.set(true, forKey: "cardBrowser.sidebar.tagExpanded.\(path)")
+            }
+            refreshDecks()
+        } catch {
+            status = "Browser sidebar demo seed error: \(error)"
         }
     }
 

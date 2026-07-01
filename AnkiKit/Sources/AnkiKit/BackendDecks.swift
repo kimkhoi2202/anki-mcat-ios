@@ -52,6 +52,24 @@ public extension Backend {
         return rows
     }
 
+    /// Like `deckTree()`, but never prunes collapsed subtrees — EVERY deck is
+    /// returned (still in depth-first order, still with new/learn/review counts).
+    ///
+    /// The Card Browser sidebar uses this so its OWN per-node expand/collapse
+    /// state (persisted in the browser) drives which subdecks show, independent
+    /// of the reviewer/deck-list `collapsed` flag that `deckTree()` honours.
+    /// The `SidebarDeckNode` builder re-nests the flattened rows for the outline.
+    func fullDeckTree() throws -> [DeckTreeEntry] {
+        var req = Anki_Decks_DeckTreeRequest()
+        req.now = Int64(Date().timeIntervalSince1970)
+        let root = try run(service: 7, method: 4, req, returning: Anki_Decks_DeckTreeNode.self)
+        var rows: [DeckTreeEntry] = []
+        for child in root.children {
+            Backend.flatten(child, parentName: "", into: &rows, includeCollapsedChildren: true)
+        }
+        return rows
+    }
+
     /// DecksService.setCurrentDeck (service 7, method 22).
     ///
     /// Selects `id` as the current deck so the scheduler studies it and its
@@ -93,7 +111,8 @@ public extension Backend {
     private static func flatten(
         _ node: Anki_Decks_DeckTreeNode,
         parentName: String,
-        into rows: inout [DeckTreeEntry]
+        into rows: inout [DeckTreeEntry],
+        includeCollapsedChildren: Bool = false
     ) {
         let fullName = parentName.isEmpty ? node.name : "\(parentName)::\(node.name)"
         rows.append(
@@ -113,10 +132,13 @@ public extension Backend {
         // A collapsed deck hides its subdecks in the list — AnkiDroid's
         // DeckPicker renders no rows beneath a collapsed parent. The collapsed
         // node still carries the aggregated child counts, so the visible row
-        // stays accurate; we just stop descending into its children.
-        guard !node.collapsed else { return }
+        // stays accurate; we just stop descending into its children. The browser
+        // sidebar passes `includeCollapsedChildren` to get the full tree instead
+        // and manage expansion itself.
+        guard includeCollapsedChildren || !node.collapsed else { return }
         for child in node.children {
-            flatten(child, parentName: fullName, into: &rows)
+            flatten(child, parentName: fullName, into: &rows,
+                    includeCollapsedChildren: includeCollapsedChildren)
         }
     }
 }

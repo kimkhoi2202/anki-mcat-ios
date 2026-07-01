@@ -585,6 +585,127 @@ final class AnkiKitTests: XCTestCase {
                        "removing deletes exactly that saved search")
     }
 
+    // MARK: - Card Browser: collapsible sidebar trees (Decks + Tags)
+
+    /// Building the sidebar's Tags tree from the flat `a::b::c` tag strings:
+    /// segments become nested nodes, intermediate parents are synthesized even
+    /// when not a stored tag, every level is sorted case-insensitively, and each
+    /// node's `tag:` query is a subtree (`tag:x::*`) for a parent and an exact
+    /// (`tag:x`) for a leaf.
+    func testSidebarTagTreeBuildsHierarchyAndQueries() {
+        let tags = ["anatomy::heart", "anatomy::lung", "biology", "chem::organic::alkane"]
+        let nodes = SidebarTagNode.buildTree(from: tags)
+
+        XCTAssertEqual(nodes.map(\.name), ["anatomy", "biology", "chem"],
+                       "top level is sorted case-insensitively by leaf name")
+
+        let anatomy = try! XCTUnwrap(nodes.first { $0.name == "anatomy" })
+        XCTAssertEqual(anatomy.children.map(\.name), ["heart", "lung"],
+                       "anatomy groups its two child tags")
+        XCTAssertTrue(anatomy.hasChildren)
+        XCTAssertEqual(anatomy.searchTerm, "tag:anatomy::*",
+                       "a parent tag applies Anki's subtree query")
+        XCTAssertEqual(anatomy.children.first { $0.name == "heart" }?.searchTerm,
+                       "tag:anatomy::heart", "a leaf tag applies an exact match")
+
+        let biology = try! XCTUnwrap(nodes.first { $0.name == "biology" })
+        XCTAssertFalse(biology.hasChildren)
+        XCTAssertEqual(biology.searchTerm, "tag:biology")
+
+        // A three-level tag: `chem` (synthesized parent) → `organic` → `alkane`.
+        let chem = try! XCTUnwrap(nodes.first { $0.name == "chem" })
+        XCTAssertEqual(chem.searchTerm, "tag:chem::*")
+        let organic = try! XCTUnwrap(chem.children.first { $0.name == "organic" })
+        XCTAssertEqual(organic.path, "chem::organic")
+        XCTAssertEqual(organic.searchTerm, "tag:chem::organic::*")
+        let alkane = try! XCTUnwrap(organic.children.first { $0.name == "alkane" })
+        XCTAssertEqual(alkane.path, "chem::organic::alkane")
+        XCTAssertEqual(alkane.searchTerm, "tag:chem::organic::alkane")
+    }
+
+    /// The tag-tree builder ignores blank/whitespace tags and empty segments,
+    /// collapses duplicate paths to one node, and treats a tag that's also a
+    /// parent (both `a` and `a::b` exist) as a single subtree node.
+    func testSidebarTagTreeDedupesAndSkipsBlanks() {
+        let nodes = SidebarTagNode.buildTree(from: ["", "   ", "a::b", "a::b", "a", "a::c"])
+
+        XCTAssertEqual(nodes.count, 1, "only the real `a` subtree survives")
+        let a = nodes[0]
+        XCTAssertEqual(a.name, "a")
+        XCTAssertEqual(a.children.map(\.name), ["b", "c"], "duplicate a::b collapses to one child")
+        XCTAssertEqual(a.searchTerm, "tag:a::*",
+                       "a tag that is also a parent uses the subtree query")
+        XCTAssertEqual(a.children.first?.searchTerm, "tag:a::b")
+    }
+
+    /// Building the sidebar's Decks tree from the engine's depth-first entry list
+    /// re-nests subdecks under their parents, preserves the per-deck counts, and
+    /// generates a quoted `deck:"…"` query (so names with spaces still match).
+    func testSidebarDeckTreeNestsAndQuotesNames() {
+        let entries = [
+            DeckTreeEntry(
+                id: 10, name: "Languages", fullName: "Languages", depth: 0,
+                filtered: false, collapsed: false, hasChildren: true,
+                newCount: 2, learnCount: 0, reviewCount: 1
+            ),
+            DeckTreeEntry(
+                id: 11, name: "Spanish Verbs", fullName: "Languages::Spanish Verbs",
+                depth: 1, filtered: false, collapsed: false, hasChildren: false,
+                newCount: 5, learnCount: 1, reviewCount: 0
+            ),
+            DeckTreeEntry(
+                id: 12, name: "French", fullName: "Languages::French", depth: 1,
+                filtered: false, collapsed: false, hasChildren: false,
+                newCount: 0, learnCount: 0, reviewCount: 3
+            ),
+        ]
+        let nodes = SidebarDeckNode.buildTree(from: entries)
+
+        XCTAssertEqual(nodes.count, 1, "one top-level deck")
+        let languages = nodes[0]
+        XCTAssertEqual(languages.name, "Languages")
+        XCTAssertEqual(languages.searchTerm, "deck:\"Languages\"")
+        XCTAssertEqual(languages.newCount, 2)
+        XCTAssertEqual(languages.reviewCount, 1)
+        XCTAssertEqual(languages.children.map(\.name), ["Spanish Verbs", "French"],
+                       "children keep the engine's order and nest under the parent")
+
+        let spanish = try! XCTUnwrap(languages.children.first { $0.name == "Spanish Verbs" })
+        XCTAssertEqual(spanish.searchTerm, "deck:\"Languages::Spanish Verbs\"",
+                       "a subdeck's query is its quoted full name")
+        XCTAssertEqual(spanish.newCount, 5)
+        XCTAssertEqual(spanish.learnCount, 1)
+    }
+
+    /// `fullDeckTree()` returns every deck — including subdecks under a collapsed
+    /// parent that the reviewer-facing `deckTree()` prunes — so the browser
+    /// sidebar's outline can manage expansion itself. The rebuilt deck node keeps
+    /// the subdeck.
+    func testFullDeckTreeKeepsCollapsedSubdecksForSidebar() throws {
+        let backend = try freshCollection()
+        let parentID = try backend.createDeck(name: "Parent")
+        _ = try backend.createDeck(name: "Parent::Child")
+
+        try backend.setDeckCollapsed(deckID: parentID, collapsed: true)
+
+        let pruned = try backend.deckTree()
+        XCTAssertTrue(pruned.contains { $0.fullName == "Parent" })
+        XCTAssertFalse(pruned.contains { $0.fullName == "Parent::Child" },
+                       "deckTree() hides subdecks under a collapsed parent")
+
+        let full = try backend.fullDeckTree()
+        XCTAssertTrue(full.contains { $0.fullName == "Parent" })
+        XCTAssertTrue(full.contains { $0.fullName == "Parent::Child" },
+                      "fullDeckTree() keeps subdecks regardless of collapse")
+
+        let nodes = SidebarDeckNode.buildTree(from: full)
+        let parent = try XCTUnwrap(nodes.first { $0.fullName == "Parent" })
+        XCTAssertTrue(parent.hasChildren, "the sidebar deck node retains its subdeck")
+        XCTAssertEqual(parent.children.first?.fullName, "Parent::Child")
+        XCTAssertEqual(parent.searchTerm, "deck:\"Parent\"")
+        XCTAssertEqual(parent.children.first?.searchTerm, "deck:\"Parent::Child\"")
+    }
+
     /// Suspending then unsuspending a card flips its `suspended` state (read back
     /// through the browser row), and suspending is undoable — matching
     /// AnkiDroid's browser suspend/unsuspend toggle.

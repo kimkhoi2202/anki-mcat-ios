@@ -372,6 +372,10 @@ struct HomeView: View {
             // collapse/expand screenshots before any deck-dependent hooks read
             // the deck list.
             store.prepareSubdeckDemoIfRequested()
+            // Seed a nested deck tree + hierarchical tags for the browser
+            // sidebar tree screenshot (paired with -demoBrowserSidebar, which
+            // opens the browser and presents the Filters panel).
+            store.prepareBrowserSidebarDemoIfRequested()
             if ProcessInfo.processInfo.arguments.contains("-startInReview") {
                 goReview = true
             }

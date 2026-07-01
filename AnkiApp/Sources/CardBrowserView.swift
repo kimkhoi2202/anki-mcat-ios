@@ -243,9 +243,10 @@ struct CardBrowserView: View {
         }
         .sheet(isPresented: $showingSidebar) {
             BrowserSidebarSheet(
-                decks: model.sidebarDecks,
+                deckTree: model.sidebarDeckTree,
                 tags: model.tags,
                 savedSearches: model.savedSearches,
+                activeQuery: model.query,
                 onApply: { term in
                     model.applySearch(term)
                     showingSidebar = false
@@ -1213,16 +1214,32 @@ private struct CardPreviewSheet: View {
 /// `flag:1`, `is:suspended`, `added:1`), the default single-click behaviour.
 /// A "Save Search" action stores the current search as a named saved search.
 ///
+/// Decks and Tags render as collapsible outline trees (native `DisclosureGroup`
+/// rows): the deck hierarchy from the engine's deck tree, and a tag hierarchy
+/// rebuilt from the flat `a::b::c` tag strings. Each node's expand/collapse
+/// state persists per node (keyed by deck id / tag path in `UserDefaults` via
+/// `@AppStorage`), so reopening the browser remembers what was expanded; the
+/// node matching the current search is highlighted.
+///
 /// Takes plain data + closures (no model), so it stays a pure, previewable view.
 private struct BrowserSidebarSheet: View {
-    let decks: [(id: Int64, name: String)]
+    /// The full deck hierarchy (with counts), rebuilt into an outline tree.
+    let deckTree: [DeckTreeEntry]
     let tags: [String]
     let savedSearches: [SavedSearch]
+    /// The browser's current search string, used to highlight the active node.
+    let activeQuery: String
     /// Called with the chosen Anki search term (the caller sets it as the query).
     let onApply: (String) -> Void
     /// Called to save the current search (the caller prompts for a name).
     let onSaveCurrent: () -> Void
     let onDismiss: () -> Void
+
+    /// The deck outline, re-nested from the flat engine tree. Recomputed on
+    /// render — cheap for the deck counts a collection realistically has.
+    private var deckNodes: [SidebarDeckNode] { SidebarDeckNode.buildTree(from: deckTree) }
+    /// The tag outline, rebuilt from the flat `::`-separated tag strings.
+    private var tagNodes: [SidebarTagNode] { SidebarTagNode.buildTree(from: tags) }
 
     var body: some View {
         NavigationStack {
@@ -1263,35 +1280,42 @@ private struct BrowserSidebarSheet: View {
                     .foregroundStyle(DS.textSecondary)
             } else {
                 ForEach(savedSearches) { saved in
-                    filterRow(saved.name, systemImage: "bookmark") { onApply(saved.query) }
+                    filterRow(saved.name, systemImage: "bookmark",
+                              isActive: saved.query == activeQuery) { onApply(saved.query) }
                 }
             }
         }
     }
 
+    /// The Decks outline: top-level decks expand (by default) to reveal their
+    /// subdecks, each a `DisclosureGroup` whose expansion persists per deck id.
     @ViewBuilder
     private var decksSection: some View {
-        if !decks.isEmpty {
+        if !deckNodes.isEmpty {
             Section("Decks") {
-                ForEach(decks, id: \.id) { deck in
-                    // Indent subdecks by their `::` depth and show the leaf name,
-                    // mirroring the sidebar's deck tree.
-                    let depth = deck.name.components(separatedBy: "::").count - 1
-                    let leaf = deck.name.components(separatedBy: "::").last ?? deck.name
-                    filterRow(leaf, systemImage: "rectangle.stack", indent: depth) {
-                        onApply("deck:\"\(deck.name)\"")
-                    }
+                ForEach(deckNodes) { node in
+                    SidebarDeckRow(
+                        node: node, activeQuery: activeQuery,
+                        defaultExpanded: true, onApply: onApply
+                    )
                 }
             }
         }
     }
 
+    /// The Tags outline: a "No tags" shortcut, then the hierarchy rebuilt from
+    /// the flat `::`-separated tag strings. A parent tag applies a subtree query
+    /// (`tag:x::*`); a leaf an exact `tag:x`. Expansion persists per tag path.
     @ViewBuilder
     private var tagsSection: some View {
         Section("Tags") {
-            filterRow("No tags", systemImage: "tag.slash") { onApply("tag:none") }
-            ForEach(tags, id: \.self) { tag in
-                filterRow(tag, systemImage: "tag") { onApply("tag:\"\(tag)\"") }
+            filterRow("No tags", systemImage: "tag.slash",
+                      isActive: activeQuery == "tag:none") { onApply("tag:none") }
+            ForEach(tagNodes) { node in
+                SidebarTagRow(
+                    node: node, activeQuery: activeQuery,
+                    defaultExpanded: true, onApply: onApply
+                )
             }
         }
     }
@@ -1300,53 +1324,54 @@ private struct BrowserSidebarSheet: View {
         Section("Flags") {
             ForEach(CardFlag.allCases) { flag in
                 let term = "flag:\(flag.rawValue)"
-                Button {
-                    onApply(term)
-                } label: {
-                    HStack(spacing: DS.Spacing.m) {
-                        Image(systemName: flag == .none ? "flag.slash" : "flag.fill")
-                            .foregroundStyle(flag.color ?? DS.textSecondary)
-                            .frame(width: 24)
-                        Text(flag.label)
-                            .font(DS.Typography.body)
-                            .foregroundStyle(DS.textPrimary)
-                        Spacer(minLength: 0)
-                    }
-                    .frame(minHeight: DS.minTapTarget)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .listRowBackground(DS.surface)
+                filterRow(
+                    flag.label,
+                    systemImage: flag == .none ? "flag.slash" : "flag.fill",
+                    iconColor: flag.color ?? DS.textSecondary,
+                    isActive: term == activeQuery
+                ) { onApply(term) }
             }
         }
     }
 
     private var cardStateSection: some View {
         Section("Card State") {
-            filterRow("New", systemImage: "sparkles") { onApply("is:new") }
-            filterRow("Learning", systemImage: "hourglass") { onApply("is:learn") }
-            filterRow("Review", systemImage: "checkmark.circle") { onApply("is:review") }
-            filterRow("Due", systemImage: "calendar") { onApply("is:due") }
-            filterRow("Suspended", systemImage: "pause.circle") { onApply("is:suspended") }
-            filterRow("Buried", systemImage: "eye.slash") { onApply("is:buried") }
+            filterRow("New", systemImage: "sparkles",
+                      isActive: activeQuery == "is:new") { onApply("is:new") }
+            filterRow("Learning", systemImage: "hourglass",
+                      isActive: activeQuery == "is:learn") { onApply("is:learn") }
+            filterRow("Review", systemImage: "checkmark.circle",
+                      isActive: activeQuery == "is:review") { onApply("is:review") }
+            filterRow("Due", systemImage: "calendar",
+                      isActive: activeQuery == "is:due") { onApply("is:due") }
+            filterRow("Suspended", systemImage: "pause.circle",
+                      isActive: activeQuery == "is:suspended") { onApply("is:suspended") }
+            filterRow("Buried", systemImage: "eye.slash",
+                      isActive: activeQuery == "is:buried") { onApply("is:buried") }
         }
     }
 
     private var todaySection: some View {
         Section("Today") {
-            filterRow("Added Today", systemImage: "plus.square.on.square") { onApply("added:1") }
-            filterRow("Studied Today", systemImage: "clock.arrow.circlepath") { onApply("rated:1") }
+            filterRow("Added Today", systemImage: "plus.square.on.square",
+                      isActive: activeQuery == "added:1") { onApply("added:1") }
+            filterRow("Studied Today", systemImage: "clock.arrow.circlepath",
+                      isActive: activeQuery == "rated:1") { onApply("rated:1") }
         }
     }
 
-    /// One tappable filter row (icon + label), optionally indented for subdecks.
+    /// One tappable filter row (icon + label), with an optional active checkmark
+    /// + tinted background when it matches the current search. Used by the fixed
+    /// sections (saved searches, flags, card state, today); the deck/tag trees
+    /// use their own recursive rows.
     private func filterRow(
-        _ title: String, systemImage: String, indent: Int = 0, action: @escaping () -> Void
+        _ title: String, systemImage: String, iconColor: Color = DS.accent,
+        isActive: Bool = false, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: DS.Spacing.m) {
                 Image(systemName: systemImage)
-                    .foregroundStyle(DS.accent)
+                    .foregroundStyle(iconColor)
                     .frame(width: 24)
                 Text(title)
                     .font(DS.Typography.body)
@@ -1354,13 +1379,183 @@ private struct BrowserSidebarSheet: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
+                if isActive { SidebarActiveCheck() }
             }
-            .padding(.leading, CGFloat(indent) * DS.Spacing.m)
             .frame(minHeight: DS.minTapTarget)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .listRowBackground(DS.surface)
+        .listRowBackground(isActive ? DS.accent.opacity(0.15) : DS.surface)
+    }
+}
+
+/// A trailing checkmark marking the sidebar row whose term is the active search.
+private struct SidebarActiveCheck: View {
+    var body: some View {
+        Image(systemName: "checkmark")
+            .font(.caption.weight(.bold))
+            .foregroundStyle(DS.accent)
+            .accessibilityLabel("Active filter")
+    }
+}
+
+/// One node of the browser sidebar's Decks outline. A deck with subdecks is a
+/// `DisclosureGroup` (its chevron expands/collapses; tapping the label applies
+/// the deck filter); a leaf deck is a plain filter row. Expansion persists per
+/// deck id via `@AppStorage`, so it's remembered across browser opens. New /
+/// learning / review counts render on the right, like Anki's deck list.
+private struct SidebarDeckRow: View {
+    let node: SidebarDeckNode
+    let activeQuery: String
+    /// Default expansion when this node has never been toggled (top level opens).
+    let defaultExpanded: Bool
+    let onApply: (String) -> Void
+    @AppStorage private var expanded: Bool
+
+    init(
+        node: SidebarDeckNode, activeQuery: String,
+        defaultExpanded: Bool, onApply: @escaping (String) -> Void
+    ) {
+        self.node = node
+        self.activeQuery = activeQuery
+        self.defaultExpanded = defaultExpanded
+        self.onApply = onApply
+        _expanded = AppStorage(
+            wrappedValue: defaultExpanded,
+            "cardBrowser.sidebar.deckExpanded.\(node.id)"
+        )
+    }
+
+    private var isActive: Bool { node.searchTerm == activeQuery }
+
+    var body: some View {
+        if node.hasChildren {
+            DisclosureGroup(isExpanded: $expanded) {
+                ForEach(node.children) { child in
+                    SidebarDeckRow(
+                        node: child, activeQuery: activeQuery,
+                        defaultExpanded: false, onApply: onApply
+                    )
+                }
+            } label: {
+                label
+            }
+            .listRowBackground(isActive ? DS.accent.opacity(0.15) : DS.surface)
+        } else {
+            label
+                .listRowBackground(isActive ? DS.accent.opacity(0.15) : DS.surface)
+        }
+    }
+
+    private var label: some View {
+        Button {
+            onApply(node.searchTerm)
+        } label: {
+            HStack(spacing: DS.Spacing.m) {
+                Image(systemName: node.filtered ? "line.3.horizontal.decrease.circle" : "rectangle.stack")
+                    .foregroundStyle(node.filtered ? DS.good : DS.accent)
+                    .frame(width: 24)
+                Text(node.name)
+                    .font(DS.Typography.body)
+                    .foregroundStyle(node.filtered ? DS.good : DS.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: DS.Spacing.s)
+                counts
+                if isActive { SidebarActiveCheck() }
+            }
+            .frame(minHeight: DS.minTapTarget)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// New / learning / review counts (muted at zero), mirroring the deck list.
+    private var counts: some View {
+        HStack(spacing: DS.Spacing.s) {
+            countText(node.newCount, color: DS.accent)
+            countText(node.learnCount, color: DS.again)
+            countText(node.reviewCount, color: DS.easy)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "\(node.newCount) new, \(node.learnCount) learning, \(node.reviewCount) to review"
+        )
+    }
+
+    private func countText(_ count: Int, color: Color) -> some View {
+        Text("\(count)")
+            .font(DS.Typography.caption)
+            .monospacedDigit()
+            .foregroundStyle(count == 0 ? DS.textSecondary : color)
+    }
+}
+
+/// One node of the browser sidebar's Tags outline. A tag with children is a
+/// `DisclosureGroup` applying a subtree filter (`tag:path::*`); a leaf applies
+/// an exact `tag:path`. Expansion persists per tag path via `@AppStorage`.
+private struct SidebarTagRow: View {
+    let node: SidebarTagNode
+    let activeQuery: String
+    let defaultExpanded: Bool
+    let onApply: (String) -> Void
+    @AppStorage private var expanded: Bool
+
+    init(
+        node: SidebarTagNode, activeQuery: String,
+        defaultExpanded: Bool, onApply: @escaping (String) -> Void
+    ) {
+        self.node = node
+        self.activeQuery = activeQuery
+        self.defaultExpanded = defaultExpanded
+        self.onApply = onApply
+        _expanded = AppStorage(
+            wrappedValue: defaultExpanded,
+            "cardBrowser.sidebar.tagExpanded.\(node.path)"
+        )
+    }
+
+    private var isActive: Bool { node.searchTerm == activeQuery }
+
+    var body: some View {
+        if node.hasChildren {
+            DisclosureGroup(isExpanded: $expanded) {
+                ForEach(node.children) { child in
+                    SidebarTagRow(
+                        node: child, activeQuery: activeQuery,
+                        defaultExpanded: false, onApply: onApply
+                    )
+                }
+            } label: {
+                label
+            }
+            .listRowBackground(isActive ? DS.accent.opacity(0.15) : DS.surface)
+        } else {
+            label
+                .listRowBackground(isActive ? DS.accent.opacity(0.15) : DS.surface)
+        }
+    }
+
+    private var label: some View {
+        Button {
+            onApply(node.searchTerm)
+        } label: {
+            HStack(spacing: DS.Spacing.m) {
+                Image(systemName: node.hasChildren ? "tag.circle" : "tag")
+                    .foregroundStyle(DS.accent)
+                    .frame(width: 24)
+                Text(node.name)
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                if isActive { SidebarActiveCheck() }
+            }
+            .frame(minHeight: DS.minTapTarget)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1427,12 +1622,12 @@ final class CardBrowserModel: ObservableObject {
 
     // MARK: Filter sidebar (phone "Filters" panel)
 
-    /// All tags in the collection, for the sidebar's Tags section. Loaded lazily
+    /// All tags in the collection, for the sidebar's Tags tree. Loaded lazily
     /// when the sidebar first opens.
     @Published private(set) var tags: [String] = []
-    /// The full deck list (all decks incl. filtered, by `Parent::Child` name),
-    /// for the sidebar's Decks section. Loaded lazily.
-    @Published private(set) var sidebarDecks: [(id: Int64, name: String)] = []
+    /// The full deck hierarchy (all decks incl. collapsed subdecks + filtered,
+    /// with counts), for the sidebar's collapsible Decks tree. Loaded lazily.
+    @Published private(set) var sidebarDeckTree: [DeckTreeEntry] = []
     /// The collection's saved searches, for the sidebar's Saved Searches
     /// section. Loaded lazily and refreshed after saving a new one.
     @Published private(set) var savedSearches: [SavedSearch] = []
@@ -1678,7 +1873,7 @@ final class CardBrowserModel: ObservableObject {
     /// best-effort, so a slow/failed source just shows an empty section.
     func loadSidebarIfNeeded() {
         if tags.isEmpty { Task { tags = await store.allTags() } }
-        if sidebarDecks.isEmpty { Task { sidebarDecks = await store.browserDeckNames() } }
+        if sidebarDeckTree.isEmpty { Task { sidebarDeckTree = await store.browserDeckTree() } }
         Task { savedSearches = await store.savedSearches() }
     }
 
@@ -2013,7 +2208,7 @@ final class CardBrowserModel: ObservableObject {
     func demoLoadSidebarForScreenshot() async {
         loadSidebarIfNeeded()
         tags = await store.allTags()
-        sidebarDecks = await store.browserDeckNames()
+        sidebarDeckTree = await store.browserDeckTree()
         savedSearches = await store.savedSearches()
     }
 
