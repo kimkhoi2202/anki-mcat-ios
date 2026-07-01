@@ -13,6 +13,8 @@ targets:
     platform: iOS
     sources:
       - Sources
+      # Files shared with the widget extension (App-Group snapshot model).
+      - Shared
       # Anki's prebuilt SvelteKit web pages (graphs / card-info / deck-options),
       # bundled as a folder reference so the directory structure is preserved.
       - path: Resources/sveltekit
@@ -20,6 +22,10 @@ targets:
     dependencies:
       - package: AnkiKit
         product: AnkiKit
+      # Embeds the WidgetKit extension into the app (PlugIns/). If the App Group
+      # entitlement can't be provisioned on a signed device, comment this line
+      # out to keep the app building; the widget files/target stay in place.
+      - target: AnkiWidget
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.khoilam.ankispeedrun
@@ -32,7 +38,15 @@ targets:
         # for / install on a physical device. Simulator builds need no team.
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: ""
+        # Keeps the generated Info.plist but merges in the extra keys from this
+        # partial plist (the `ankispeedrun://` URL scheme the widget deep-links
+        # into). Generated bundle keys (executable, identifier, version) still
+        # apply; the partial only adds CFBundleURLTypes.
         GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_FILE: AnkiSpeedrun-Info.plist
+        # App Group so the app and widget share due-count data. Requires a real
+        # Apple Developer team when building for / installing on a device.
+        CODE_SIGN_ENTITLEMENTS: AnkiSpeedrun.entitlements
         INFOPLIST_KEY_CFBundleDisplayName: "Anki Speedrun"
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
         # Usage strings for the note editor's media attach actions: camera capture
@@ -44,3 +58,31 @@ targets:
         # We ship an asset catalog (the login logo) but no app icon yet; tell the
         # asset compiler not to require an "AppIcon" set.
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
+  # WidgetKit extension showing today's due counts on the home screen, faithful
+  # to AnkiDroid's DeckPicker widget. Reads a snapshot the app writes to the
+  # shared App Group; it does NOT depend on AnkiKit / the engine.
+  AnkiWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: AnkiWidget
+        # Info.plist / entitlements are referenced by build settings, not copied
+        # as resources.
+        excludes:
+          - "Info.plist"
+          - "AnkiWidget.entitlements"
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.khoilam.ankispeedrun.AnkiWidget
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_FILE: AnkiWidget/Info.plist
+        INFOPLIST_KEY_CFBundleDisplayName: "Anki Due"
+        # Same App Group as the app so both read/write the shared due snapshot.
+        CODE_SIGN_ENTITLEMENTS: AnkiWidget/AnkiWidget.entitlements

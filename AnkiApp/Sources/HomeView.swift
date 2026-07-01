@@ -83,6 +83,11 @@ struct HomeView: View {
     @State private var goFieldsEditor = false
     @State private var templateEditorTarget: NotetypeScreenTarget?
 
+    /// A deep link (from the home-screen widget's `ankispeedrun://study` tap)
+    /// awaiting handling. Stored so a link arriving before the collection has
+    /// booted is deferred until decks are loaded, then processed once.
+    @State private var pendingDeepLink: URL?
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -351,6 +356,8 @@ struct HomeView: View {
             // scene-phase handler treat later foregrounds as re-opens.
             store.autoSyncIfEnabled()
             hasLaunched = true
+            // A widget deep link received during launch waited for decks to load.
+            processPendingDeepLink()
             #if DEBUG
             // Launch-argument automation hooks for UI tests / screenshots.
             // Compiled only into debug builds; release ships none of this.
@@ -506,6 +513,9 @@ struct HomeView: View {
                 if hasLaunched { store.autoSyncIfEnabled() }
             case .background:
                 store.autoSyncIfEnabled()
+                // Keep the home-screen widget's snapshot current when the app
+                // leaves the foreground.
+                store.updateWidgetSnapshot()
             default:
                 break
             }
@@ -517,6 +527,42 @@ struct HomeView: View {
         .onChange(of: goBrowse) { presented in
             // Returning from the browser: suspend/delete may have changed counts.
             if !presented { store.refreshDecks() }
+        }
+        // Home-screen widget deep link (`ankispeedrun://study`). If it arrives
+        // before boot finishes it's stored and handled once decks are loaded.
+        .onOpenURL { url in
+            pendingDeepLink = url
+            if hasLaunched { processPendingDeepLink() }
+        }
+    }
+
+    /// Act on a stored widget deep link, if any. `ankispeedrun://study` returns
+    /// to the deck list and, when a deck has cards ready, starts studying it —
+    /// mirroring tapping AnkiDroid's due-count widget, which opens the DeckPicker
+    /// ready to study. With nothing due it simply shows the deck list.
+    private func processPendingDeepLink() {
+        guard let url = pendingDeepLink else { return }
+        pendingDeepLink = nil
+        guard url.scheme == AnkiWidgetShared.urlScheme else { return }
+        // Return to the deck-list root so the link behaves predictably no matter
+        // what was on screen.
+        goSettings = false
+        goBrowse = false
+        goStats = false
+        goImportExport = false
+        goManageNotetypes = false
+        goFieldsEditor = false
+        goOverview = false
+        goDeckBrowse = false
+        switch url.host {
+        case "study":
+            if let ready = store.decks.first(where: { $0.hasCardsReadyToStudy }),
+               store.selectDeck(id: ready.id) {
+                goReview = true
+            }
+            // Nothing due → leave the user on the deck list.
+        default:
+            break
         }
     }
 

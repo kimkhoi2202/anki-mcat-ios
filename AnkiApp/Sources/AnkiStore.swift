@@ -1,5 +1,6 @@
 import Foundation
 import AnkiKit
+import WidgetKit
 
 @MainActor
 final class AnkiStore: ObservableObject {
@@ -378,10 +379,57 @@ final class AnkiStore: ObservableObject {
             // A newer refresh started while this one was in flight — drop it.
             guard token == decksRefreshToken else { return }
             decks = tree
+            // Push the fresh due counts to the home-screen widget's shared store.
+            updateWidgetSnapshot()
         } catch {
             guard token == decksRefreshToken else { return }
             status = "Deck list error: \(error)"
         }
+    }
+
+    /// Publish today's due counts to the shared App Group so the home-screen
+    /// widget can render them, then ask WidgetKit to refresh. Called from the
+    /// single point where `decks` changes (`reloadDeckTree`), so every deck
+    /// refresh — boot, returning from review/browse, add/delete, sync — keeps
+    /// the widget current. Mirrors AnkiDroid refreshing its DeckPicker widget
+    /// whenever due counts change.
+    ///
+    /// Safe when there's no widget / App Group: `save()` no-ops without the
+    /// shared suite, and `reloadAllTimelines()` is a no-op with no widgets
+    /// installed — so this never affects the app build or behavior. Also called
+    /// from the scene-phase handler so backgrounding the app refreshes the
+    /// widget's "updated" stamp even if no deck mutation occurred.
+    func updateWidgetSnapshot() {
+        // Only top-level decks (depth 0); Anki already folds each subdeck's
+        // counts into its top-level parent, so summing these avoids double
+        // counting and matches the totals AnkiDroid's widget shows.
+        let topLevel = decks.filter { $0.depth == 0 }
+        let totalNew = topLevel.reduce(0) { $0 + $1.newCount }
+        let totalLearn = topLevel.reduce(0) { $0 + $1.learnCount }
+        let totalReview = topLevel.reduce(0) { $0 + $1.reviewCount }
+        // A few decks with something to study, most-loaded first, for the
+        // medium widget's per-deck rows.
+        let deckRows = topLevel
+            .filter { $0.hasCardsReadyToStudy }
+            .sorted {
+                ($0.newCount + $0.learnCount + $0.reviewCount)
+                    > ($1.newCount + $1.learnCount + $1.reviewCount)
+            }
+            .prefix(4)
+            .map {
+                AnkiWidgetDeckDue(
+                    name: $0.name, new: $0.newCount, learn: $0.learnCount, review: $0.reviewCount
+                )
+            }
+        let snapshot = AnkiWidgetSnapshot(
+            totalNew: totalNew,
+            totalLearn: totalLearn,
+            totalReview: totalReview,
+            decks: Array(deckRows),
+            updatedAt: Date()
+        )
+        snapshot.save()
+        WidgetCenter.shared.reloadAllTimelines()
     }
 
     /// Select `id` as the current deck (so the scheduler scopes study to it and
