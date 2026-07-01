@@ -1,39 +1,63 @@
 # Anki for iOS — native SwiftUI port of AnkiDroid
 
 A native **SwiftUI** iOS client for Anki, built on Anki's **shared Rust engine**
-(`rslib`). The UI is a faithful re-implementation of AnkiDroid's feature set;
-the scheduler (FSRS), SQLite collection, sync, search, and card rendering are
-reused as-is from the engine — not reimplemented.
+(`rslib`). The UI is a faithful re-implementation of AnkiDroid's feature set; the
+scheduler (FSRS), SQLite collection, sync, search, media, and card rendering are
+reused as-is from the engine — never reimplemented.
+
+`main` is the clean, faithful AnkiDroid clone. The optional MCAT/"Speedrun" layer
+lives on separate branches (see [Branches](#branches)).
 
 ## Architecture
 
 ```
 rslib (Rust, in ../anki-desktop/main)
-      │  C-FFI:  run_service_method(service, method, protobuf_bytes) -> bytes
-AnkiCore.xcframework   (ankicore-ffi static lib; built by AnkiCore/build-xcframework.sh)
+      │  C-FFI:  anki_run_command(service, method, protobuf_bytes) -> bytes
+AnkiCore.xcframework   (ankicore-ffi static lib; built --release by AnkiCore/build-xcframework.sh)
       │
 AnkiKit  (Swift package)   typed RPC wrappers + generated protobufs + Keychain
       │
-AnkiApp  (SwiftUI)         Decks · Reviewer · Browser · Editor · Sync · Stats · Settings · …
+AnkiApp  (SwiftUI)         Decks · Reviewer · Browser · Editor · Note Types · Sync · Stats · Settings · …
 ```
 
-Card rendering uses `WKWebView` (the same approach real Anki clients use); every
-other screen is native SwiftUI.
+- Every screen is **native SwiftUI**, talking to the engine through `AnkiKit`.
+- Anki's own shared **SvelteKit** pages are embedded in a `WKWebView` for the
+  screens that are web-based in real Anki too — **Statistics, Card Info, Deck
+  Options, and the Image-Occlusion editor** — served from the bundled
+  `AnkiApp/Resources/sveltekit/` over a custom URL scheme with a `fetch → /_anki`
+  bridge into the backend (the same pattern AnkiDroid uses). The reviewer's card
+  body is also rendered via `WKWebView` with the notetype's real CSS.
 
-## Features
+## Features (AnkiDroid parity)
 
-- **Study:** deck list with due counts, Reviewer with notetype CSS, image media,
-  interval previews, undo, a card-action menu (flag / mark / edit / bury /
-  suspend / delete / replay / card-info), and tap/swipe gestures.
-- **Content:** note add/edit, Card Browser (search), Card Info, Change Note Type.
-- **Decks:** create / rename / delete, deck options (daily limits), filtered decks.
-- **Data:** Sync (AnkiWeb or a custom server), Import/Export `.apkg`/`.colpkg`,
-  Statistics, Settings.
+- **Study:** deck list with due counts + subdeck collapse/expand + deck overview;
+  Reviewer with real card rendering, 4-button grading + interval previews,
+  type-in-the-answer, native `[sound:]` + `{{tts}}` audio (autoplay + per-segment
+  play buttons), remaining-count display, flag/mark/bury/suspend/delete/edit/undo,
+  set-due-date, opt-in auto-advance, tap/swipe gestures.
+- **Browse:** windowed Card Browser (scales to large collections) with search,
+  multi-select + bulk actions (deck/flag/mark/suspend/bury/tags/delete),
+  configurable columns, tap-to-sort, Notes/Cards mode, a filter sidebar
+  (decks/tags/flags/state/saved-searches), Find & Replace, and card preview.
+- **Create:** rich note editor (bold/italic/underline/super/sub, cloze with
+  auto-numbering, MathJax, media insert: photo/camera/audio-record/file, sticky
+  fields, add-another), Change Note Type, and a full **note-type / card-template
+  editor** (Manage note types, Fields editor, Front/Back/CSS with live preview),
+  plus the **Image-Occlusion** editor.
+- **Decks:** create/rename/delete, per-deck actions (browse/add/export/unbury/
+  create-subdeck), Deck Options (FSRS), filtered decks (two filters), and the full
+  **Custom Study** preset dialog.
+- **Data:** Sync (AnkiWeb or a custom server; collection + media; conflict
+  resolution; Keychain-stored key), Import/Export `.apkg`/`.colpkg` **and CSV/TSV
+  import wizard + notes/cards text export**, automatic **Backups** (+ create-now).
+- **App:** Statistics, Settings (engine-backed Reviewing/Editing prefs, Sync
+  options, Appearance incl. full-screen + interface size), first-launch onboarding,
+  Shared-Decks browser (AnkiWeb), and a home-screen **WidgetKit** due-count widget.
 
 ## Prerequisites
 
-- macOS with **Xcode 16+** and an iOS 17 simulator.
-- **Rust 1.92.0** + iOS targets:
+- macOS with **Xcode 16+** and an iOS 17+ simulator.
+- **Rust** + iOS targets:
   `rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin`
 - **XcodeGen:** `brew install xcodegen`
 - The desktop fork checked out at **`../anki-desktop/main`** (provides `rslib`).
@@ -41,35 +65,57 @@ other screen is native SwiftUI.
 ## Build & run
 
 ```bash
-# 1. Build the engine framework (once; and after any rslib change)
+# 1. Build the engine framework (once; and after any rslib change) — RELEASE-optimized
 cd AnkiCore && ./build-xcframework.sh
 
-# 2. Generate the Xcode project and build the app
+# 2. Generate the Xcode project and build the app (run xcodebuild from the repo root)
 cd ../AnkiApp && xcodegen generate
-xcodebuild -project AnkiSpeedrun.xcodeproj -scheme AnkiSpeedrun \
-  -destination "platform=iOS Simulator,name=iPhone 17" \
-  -derivedDataPath build -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build
+cd ..
+xcodebuild -project AnkiApp/AnkiSpeedrun.xcodeproj -scheme AnkiSpeedrun \
+  -destination "platform=iOS Simulator,name=iPhone 17" build
 
-# …or just: open AnkiSpeedrun.xcodeproj   (then Run)
+# …or: open AnkiApp/AnkiSpeedrun.xcodeproj   (then Run)
 ```
 
-**Device builds:** set `DEVELOPMENT_TEAM` to your Apple Team ID in
-`AnkiApp/project.yml` (or pass `DEVELOPMENT_TEAM=XXXX` to `xcodebuild`),
-`xcodegen generate`, then build to a connected device. Simulator builds need no team.
+**Device builds:** simulator builds need no team; a **device** build (and the
+home-screen widget's App Group) needs a real `DEVELOPMENT_TEAM` in
+`AnkiApp/project.yml`. If a machine has no team at all and the widget's App-Group
+entitlement blocks the build, comment out the app target's `- target: AnkiWidget`
+dependency in `project.yml` (documented there) — the app still builds green.
 
 ## Tests
 
 ```bash
-cd AnkiKit && swift test     # 43 engine-backed unit tests
+# Run from the canonical path (see the iCloud/.nosync note below):
+cd -P AnkiKit && swift test        # 88 engine-backed unit tests
 ```
+
+> **iCloud / `.nosync` note:** this project sits under an iCloud-synced folder via
+> an `anki -> anki.nosync` symlink (keeps iCloud from churning build artifacts).
+> Always run `swift test` with `cd -P` (the real path) — building `AnkiKit` through
+> both the symlink and the real path can double the module cache and crash the
+> compiler. If it ever happens: `rm -rf AnkiKit/.build` and rebuild from `cd -P`.
 
 ## Sync
 
 - **AnkiWeb (default):** log in with your AnkiWeb account on the Sync screen.
-- **Self-hosted (recommended, version-matched):** `deploy/syncserver/` contains a
-  Fly.io Dockerfile + `fly.toml` pinned to the engine's exact commit (a bleeding-edge
-  engine can mismatch AnkiWeb's older server on full-upload). In the app, set
-  **Custom sync server** to your server URL.
+- **Self-hosted (version-matched):** `deploy/syncserver/` is a Fly.io Dockerfile +
+  `fly.toml` pinned to the engine's exact commit (a bleeding-edge engine can
+  mismatch AnkiWeb's older server on a full upload). It's configured for
+  **scale-to-zero** (sleeps when idle, wakes on sync). In the app, choose a custom
+  sync server in **Settings → Sync server** (while logged out).
+
+## Branches
+
+| Branch | What |
+| --- | --- |
+| **`main`** | The clean, faithful AnkiDroid clone — the foundation to build on. |
+| `speedrun/mcat-full` | Full MCAT/"Speedrun" layer (coverage map, weak-topics, points-at-stake UI). |
+| `feat/mcat-scores` | MCAT layer + the three honest scores (Memory / Performance / Readiness) + dashboard. |
+
+The MCAT-specific engine change (points-at-stake review queue) lives on the desktop
+fork (`../anki-desktop/main`) branch `feat/rust-points-at-stake`. `main` here has
+**no** MCAT app code.
 
 ## Project layout
 
@@ -77,28 +123,19 @@ cd AnkiKit && swift test     # 43 engine-backed unit tests
 | --- | --- |
 | `AnkiCore/` | Rust C-FFI shim → `AnkiCore.xcframework` (+ `build-xcframework.sh`) |
 | `AnkiKit/` | Swift package wrapping the engine (RPC wrappers, generated protos, tests) |
-| `AnkiApp/` | the SwiftUI app (XcodeGen project from `project.yml`) |
+| `AnkiApp/Sources/` | the SwiftUI app screens |
+| `AnkiApp/AnkiWidget/` + `AnkiApp/Shared/` | the WidgetKit extension + shared App-Group snapshot |
+| `AnkiApp/Resources/sveltekit/` | Anki's bundled web pages (Stats / Card Info / Deck Options / Image Occlusion) |
+| `AnkiApp/project.yml` | XcodeGen project definition |
 | `deploy/syncserver/` | self-hosted, version-matched sync server (Fly.io) |
-| `docs/` | build/architecture notes |
 
-## MCAT "Speedrun" layer (optional, in progress)
+## Known gaps vs AnkiDroid
 
-This repo is also the base for an MCAT study-app challenge. Status of the graded pieces:
-
-- **Rust engine change** — points-at-stake review queue: **done** in the desktop
-  fork (`anki-mcat`) `main` (8 Rust + 3 Python tests, undo/no-corruption proven).
-- **iOS "Focus Weak Topics" + MCAT coverage map + abstain** — on `feat/ios-client`.
-- **Three honest scores** (Memory / Performance / Readiness) + dashboard — on
-  branch **`feat/mcat-scores`** (not yet merged).
-- **Benchmark + crash tests** — desktop fork.
-- **AI card-gen + evaluations** — not started (needs an LLM API key).
-
-## Known limitations
-
-- Parity gaps vs AnkiDroid: audio playback / TTS, whiteboard, full Card-Browser
-  columns + bulk ops, the Svelte deck-options page, home-screen widgets.
-- QA so far is render + action-hook level on the simulator; deep interaction and
-  on-device QA are still pending.
+Small long-tail items not yet built: the **whiteboard/drawing** overlay,
+**configurable gesture/tap-zone** remapping, **local notifications/reminders**, and
+the deepest **Advanced** settings. Auto-advance defaults its answer action to
+"Good" (Anki's default is "Bury"); its timings are app-local rather than sourced
+from deck config. The home-screen widget requires an Apple team for a device build.
 
 ## License
 
