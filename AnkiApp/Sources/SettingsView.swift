@@ -645,7 +645,9 @@ struct SettingsView: View {
         get: @escaping () -> Bool,
         set: @escaping (Bool) -> Void
     ) -> Binding<Bool> {
-        Binding(get: get, set: set)
+        // Wrap in closure literals (like the other binding helpers) so the
+        // main-actor View context satisfies Binding's @Sendable get/set.
+        Binding(get: { get() }, set: { set($0) })
     }
 
     // MARK: Scheduling / Reviewing stepper bindings
