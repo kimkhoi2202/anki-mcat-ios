@@ -92,3 +92,11 @@ enum UISize: String, CaseIterable, Identifiable {
 enum FullScreenReviewer {
     static let storageKey = "fullScreenReviewer"
 }
+
+/// Namespacing for the first-launch onboarding gate, cloning AnkiDroid's
+/// `IntroductionActivity.INTRODUCTION_SLIDES_SHOWN` preference. The intro flow is
+/// shown once (when this `@AppStorage` flag is `false`) and sets it to `true` on
+/// finish/skip so it never reappears — the exact key name AnkiDroid uses.
+enum Onboarding {
+    static let storageKey = "IntroductionSlidesShown"
+}

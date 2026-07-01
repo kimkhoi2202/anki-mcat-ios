@@ -20,6 +20,16 @@ struct HomeView: View {
     @State private var goStats = false
     @State private var goImportExport = false
     @State private var showAddNote = false
+    /// AnkiWeb shared-decks browser (AnkiDroid's "Get shared decks"), presented
+    /// from the "+" menu. Downloads a deck and hands it to the import flow.
+    @State private var showSharedDecks = false
+
+    // First-launch onboarding (AnkiDroid's IntroductionActivity). `introShown`
+    // is the persisted gate; `showOnboarding` drives the cover; and any action
+    // the user picks on the last slide is deferred until the cover dismisses.
+    @AppStorage(Onboarding.storageKey) private var introShown = false
+    @State private var showOnboarding = false
+    @State private var pendingOnboardingAction: OnboardingCompletion?
 
     // Deck management (T2.3), cloning AnkiDroid's DeckPicker create-deck dialog
     // and per-deck context menu (rename / options / delete).
@@ -98,6 +108,23 @@ struct HomeView: View {
                     store.refreshDecks()
                 }
             }
+            // AnkiWeb shared-decks browser: downloads a deck and imports it via
+            // the existing `store.importPackage` flow, then refreshes the list.
+            .sheet(isPresented: $showSharedDecks) {
+                SharedDecksView(store: store) {
+                    store.refreshDecks()
+                }
+            }
+            // First-launch onboarding (AnkiDroid's IntroductionActivity). The
+            // chosen last-slide action (if any) runs once the cover has dismissed
+            // so it doesn't collide with the transition.
+            .fullScreenCover(isPresented: $showOnboarding, onDismiss: finishOnboarding) {
+                OnboardingView { completion in
+                    introShown = true
+                    pendingOnboardingAction = completion
+                    showOnboarding = false
+                }
+            }
             // The produced per-deck export handed to the system share sheet.
             .sheet(item: $deckExportShare) { item in
                 ShareSheet(items: [item.url])
@@ -169,12 +196,23 @@ struct HomeView: View {
                     .disabled(store.isBackendBusy)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showAddNote = true
+                    // "+" speed-dial, mirroring AnkiDroid's DeckPicker FAB which
+                    // groups content-adding actions (Add note + Get shared decks).
+                    Menu {
+                        Button {
+                            showAddNote = true
+                        } label: {
+                            Label("Add note", systemImage: "square.and.pencil")
+                        }
+                        Button {
+                            showSharedDecks = true
+                        } label: {
+                            Label("Get shared decks", systemImage: "square.and.arrow.down")
+                        }
                     } label: {
                         Image(systemName: "plus")
                     }
-                    .accessibilityLabel("Add note")
+                    .accessibilityLabel("Add")
                     .disabled(store.isBackendBusy)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -300,6 +338,13 @@ struct HomeView: View {
             Text("The collections can’t be combined.\nWhich collection do you want to keep?")
         }
         .task {
+            // First launch: present the intro once (AnkiDroid's
+            // IntroductionActivity precedes the DeckPicker), gated by the
+            // persisted flag. Automation launches skip it so the existing
+            // screenshot / UI-test hooks aren't covered by the intro.
+            if !introShown && !Self.isAutomationLaunch {
+                showOnboarding = true
+            }
             await store.boot()
             // Auto-sync on app open (Anki's "Automatically sync on open/close"),
             // a no-op unless enabled and logged in. `hasLaunched` then lets the
@@ -350,6 +395,16 @@ struct HomeView: View {
             }
             if ProcessInfo.processInfo.arguments.contains("-startInAddNote") {
                 showAddNote = true
+            }
+            // Open the AnkiWeb shared-decks browser (needs simulator network to
+            // load the site; the chrome renders regardless).
+            if ProcessInfo.processInfo.arguments.contains("-startInSharedDecks") {
+                showSharedDecks = true
+            }
+            // Force-show the first-launch onboarding for its screenshot, even if
+            // the "shown" flag is already set from a previous run.
+            if ProcessInfo.processInfo.arguments.contains("-startInOnboarding") {
+                showOnboarding = true
             }
             // Open the browser; the `-demoBrowser…` variants additionally drive a
             // specific feature for its screenshot (multi-select, extra columns,
@@ -718,6 +773,34 @@ struct HomeView: View {
     private func beginCreateDeck() {
         deckNameInput = ""
         showCreateDeck = true
+    }
+
+    // MARK: - Onboarding
+
+    /// Runs after the onboarding cover dismisses: performs the follow-up action
+    /// the user picked on the final slide (mirroring AnkiDroid landing on the
+    /// deck picker and optionally chaining into an action). Deferred to dismissal
+    /// so presenting the next sheet doesn't collide with the cover transition.
+    private func finishOnboarding() {
+        guard let action = pendingOnboardingAction else { return }
+        pendingOnboardingAction = nil
+        switch action {
+        case .getStarted:
+            break
+        case .addNote:
+            showAddNote = true
+        case .getSharedDecks:
+            showSharedDecks = true
+        }
+    }
+
+    /// True when the app was launched by the screenshot / UI-test hooks (any
+    /// `-startIn…` / `-demo…` argument). Used to suppress the first-launch
+    /// onboarding so automated flows aren't covered by the intro.
+    private static var isAutomationLaunch: Bool {
+        ProcessInfo.processInfo.arguments.contains {
+            $0.hasPrefix("-startIn") || $0.hasPrefix("-demo")
+        }
     }
 
     private func beginRename(_ deck: DeckTreeEntry) {
