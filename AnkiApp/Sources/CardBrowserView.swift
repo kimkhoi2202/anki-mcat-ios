@@ -15,9 +15,11 @@ import AnkiKit
 ///
 /// Scope: search + results + tap-to-edit + suspend/flag/delete, multi-select
 /// bulk actions, configurable columns (picker + order, persisted), tap-to-sort
-/// (column + direction, persisted), and Find & Replace. Deferred to a later
-/// task: the notes/cards mode toggle, the filter sidebar (decks/tags/flags/saved
-/// searches/card-state tree), and the card preview pane.
+/// (column + direction, persisted), Find & Replace, a Cards/Notes mode toggle
+/// (persisted, one row per card or per note), a phone-appropriate filter sidebar
+/// (Saved Searches / Decks / Tags / Flags / Card State / Today, each setting an
+/// Anki search term), and a read-only card Preview (rendered front/back via the
+/// reviewer's `CardWebView`, with a flip control and no grading).
 @MainActor
 struct CardBrowserView: View {
     @ObservedObject var store: AnkiStore
@@ -33,6 +35,13 @@ struct CardBrowserView: View {
     @State private var showingColumnPicker = false
     /// Presents the Find & Replace sheet.
     @State private var showingFindReplace = false
+    /// Presents the filter sidebar ("Filters" panel: decks/tags/flags/state/saved).
+    @State private var showingSidebar = false
+    /// Drives the read-only card Preview sheet, keyed by the resolved card id.
+    @State private var previewTarget: PreviewTarget?
+    /// Drives the "Save current search" naming prompt, and holds the typed name.
+    @State private var showingSaveSearch = false
+    @State private var saveSearchName = ""
 
     // Multi-select bulk-action UI state.
     /// Presents the "Change deck" picker for the selection.
@@ -57,8 +66,18 @@ struct CardBrowserView: View {
     private struct CardTarget: Identifiable { let id: Int64 }
     /// Identifiable wrapper for a note-scoped sheet (Change Note Type), keyed by note id.
     private struct NoteTarget: Identifiable { let id: Int64 }
+    /// Identifiable wrapper for the Preview sheet, keyed by the resolved card id.
+    private struct PreviewTarget: Identifiable { let id: Int64 }
 
     var body: some View {
+        browserSecondarySheets(browserPrimarySheets(browserCore))
+    }
+
+    /// The core browser surface (results list + search field + toolbars + bulk
+    /// bar + initial task). Split from the sheet/alert modifiers so each stays a
+    /// small type-check unit — the combined body otherwise exceeds the Swift
+    /// type-checker's budget ("unable to type-check in reasonable time").
+    private var browserCore: some View {
         ZStack {
             DS.background.ignoresSafeArea()
             content
@@ -74,6 +93,7 @@ struct CardBrowserView: View {
         .textInputAutocapitalization(.never)
         .onSubmit(of: .search) { model.submitSearch() }
         .toolbar { selectionToolbar }
+        .toolbar { filtersToolbar }
         .toolbar { overflowToolbar }
         // The bottom bulk-action bar slides in while multi-select is active.
         .safeAreaInset(edge: .bottom) {
@@ -105,8 +125,32 @@ struct CardBrowserView: View {
                 await model.demoWaitForMetadataForScreenshot()
                 showingFindReplace = true
             }
+            // Switch to Notes mode (one row per note) for its screenshot.
+            if arguments.contains("-demoBrowserNotesMode") {
+                await model.demoEnterNotesModeForScreenshot()
+            }
+            // Present the filter sidebar (loads decks/tags/saved first).
+            if arguments.contains("-demoBrowserSidebar") {
+                await model.demoWaitForIDsForScreenshot()
+                await model.demoLoadSidebarForScreenshot()
+                showingSidebar = true
+            }
+            // Present the read-only Preview for the first row.
+            if arguments.contains("-demoBrowserPreview") {
+                await model.demoWaitForIDsForScreenshot()
+                if let firstRow = model.cardIDs.first,
+                   let cardID = await model.resolveCardID(forRow: firstRow) {
+                    previewTarget = PreviewTarget(id: cardID)
+                }
+            }
             #endif
         }
+    }
+
+    /// First group of browser sheets/alerts (column picker, Find & Replace, and
+    /// the bulk deck/tag/delete prompts). Applied to `browserCore` via the body.
+    private func browserPrimarySheets(_ view: some View) -> some View {
+        view
         .sheet(isPresented: $showingColumnPicker) {
             ColumnPickerSheet(
                 available: model.availableColumns,
@@ -177,6 +221,13 @@ struct CardBrowserView: View {
         } message: {
             Text("This deletes the selected notes and all their cards. You can undo it from the reviewer.")
         }
+    }
+
+    /// Second group of browser sheets/alerts (edit / card info / change-notetype
+    /// / the new filter sidebar / card preview / save-search / per-row delete /
+    /// errors). Applied over `browserPrimarySheets` via the body.
+    private func browserSecondarySheets(_ view: some View) -> some View {
+        view
         .sheet(item: $editTarget) { target in
             NoteEditorView(store: store, mode: .edit(noteID: target.id)) {
                 model.refresh()
@@ -189,6 +240,42 @@ struct CardBrowserView: View {
             ChangeNotetypeView(store: store, noteID: target.id) {
                 model.refresh()
             }
+        }
+        .sheet(isPresented: $showingSidebar) {
+            BrowserSidebarSheet(
+                decks: model.sidebarDecks,
+                tags: model.tags,
+                savedSearches: model.savedSearches,
+                onApply: { term in
+                    model.applySearch(term)
+                    showingSidebar = false
+                },
+                onSaveCurrent: {
+                    saveSearchName = ""
+                    showingSidebar = false
+                    showingSaveSearch = true
+                },
+                onDismiss: { showingSidebar = false }
+            )
+        }
+        .sheet(item: $previewTarget) { target in
+            CardPreviewSheet(store: store, cardID: target.id)
+        }
+        .alert("Save Current Search", isPresented: $showingSaveSearch) {
+            TextField("Name", text: $saveSearchName)
+                .autocorrectionDisabled()
+            Button("Cancel", role: .cancel) { saveSearchName = "" }
+            Button("Save") {
+                model.saveCurrentSearch(name: saveSearchName)
+                saveSearchName = ""
+            }
+        } message: {
+            Text("Save the current search so you can reuse it from the Filters panel.")
+        }
+        .alert("Couldn't save search", isPresented: saveSearchErrorPresented) {
+            Button("OK", role: .cancel) { model.saveSearchError = nil }
+        } message: {
+            Text(model.saveSearchError ?? "")
         }
         .confirmationDialog(
             "Delete note?",
@@ -246,7 +333,9 @@ struct CardBrowserView: View {
                         .task(id: model.loadGeneration) { model.ensureLoaded(cardID: cardID) }
                 }
             } header: {
-                Text("^[\(model.cardIDs.count) card](inflect: true)")
+                // Plain runtime string (mode-dependent noun), so pluralize
+                // manually rather than with ^[…](inflect:) markup.
+                Text(rowCountLabel)
                     .font(DS.Typography.caption)
                     .foregroundStyle(DS.textSecondary)
             }
@@ -274,7 +363,7 @@ struct CardBrowserView: View {
     private func normalRow(_ cardID: Int64) -> some View {
         if let row = model.rowsByID[cardID] {
             Button {
-                openEditor(forCard: row.id)
+                openEditor(forRow: row.id)
             } label: {
                 CardBrowserRowView(row: row, columns: model.activeColumns)
             }
@@ -352,13 +441,19 @@ struct CardBrowserView: View {
         Divider()
 
         Button {
-            infoTarget = CardTarget(id: row.id)
+            openPreview(forRow: row.id)
+        } label: {
+            Label("Preview", systemImage: "eye")
+        }
+
+        Button {
+            openCardInfo(forRow: row.id)
         } label: {
             Label("Card Info", systemImage: "info.circle")
         }
 
         Button {
-            openChangeNotetype(forCard: row.id)
+            openChangeNotetype(forRow: row.id)
         } label: {
             Label("Change Note Type", systemImage: "arrow.triangle.2.circlepath")
         }
@@ -410,12 +505,12 @@ struct CardBrowserView: View {
             Image(systemName: "rectangle.stack.badge.questionmark")
                 .font(.system(size: 44))
                 .foregroundStyle(DS.textSecondary)
-            Text("No cards found")
+            Text("No \(model.itemNoun)s found")
                 .font(DS.Typography.headline)
                 .foregroundStyle(DS.textPrimary)
             Text(model.query.isEmpty
-                ? "This collection has no cards yet."
-                : "No cards match this search.")
+                ? "This collection has no \(model.itemNoun)s yet."
+                : "No \(model.itemNoun)s match this search.")
                 .font(DS.Typography.caption)
                 .foregroundStyle(DS.textSecondary)
         }
@@ -446,7 +541,16 @@ struct CardBrowserView: View {
     /// Inline title: "Browse" normally; the live selected count while selecting.
     private var navigationTitle: String {
         guard model.isSelecting else { return "Browse" }
-        return model.selectedCount == 0 ? "Select Cards" : "\(model.selectedCount) selected"
+        return model.selectedCount == 0
+            ? "Select \(model.mode == .notes ? "Notes" : "Cards")"
+            : "\(model.selectedCount) selected"
+    }
+
+    /// The row-count header text ("N cards" / "N notes"), pluralized for the
+    /// current mode.
+    private var rowCountLabel: String {
+        let count = model.cardIDs.count
+        return "\(count) \(model.itemNoun)\(count == 1 ? "" : "s")"
     }
 
     /// Toolbar: a "Select" entry point normally; Cancel + Select-All/Deselect-All
@@ -471,14 +575,39 @@ struct CardBrowserView: View {
         }
     }
 
-    /// Overflow menu (always present): Sort ▸, Columns…, and Find & Replace… —
-    /// the three browser power features. Mirrors AnkiDroid's browser overflow,
-    /// which gathers sort / column-management / find-replace there. Find &
-    /// Replace auto-scopes to the selection when one exists.
+    /// A leading "Filters" button (hidden while multi-selecting, when the leading
+    /// slot shows Cancel) that opens the phone's filter sidebar — the mobile form
+    /// of AnkiDroid/desktop's browser sidebar.
+    @ToolbarContentBuilder
+    private var filtersToolbar: some ToolbarContent {
+        if !model.isSelecting {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    openSidebar()
+                } label: {
+                    Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
+                }
+                .accessibilityLabel("Filters")
+            }
+        }
+    }
+
+    /// Overflow menu (always present): the Cards/Notes mode toggle, then Sort ▸,
+    /// Columns…, and Find & Replace… — the browser power features. Mirrors
+    /// AnkiDroid's browser overflow, which gathers the mode switch, sort,
+    /// column-management, and find-replace there. Find & Replace auto-scopes to
+    /// the selection when one exists.
     @ToolbarContentBuilder
     private var overflowToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
+                // Cards vs Notes: a checkmarked inline picker, like desktop's
+                // browser "Cards"/"Notes" toggle.
+                Picker("View", selection: modeBinding) {
+                    Label("Cards", systemImage: "rectangle.on.rectangle").tag(BrowserMode.cards)
+                    Label("Notes", systemImage: "note.text").tag(BrowserMode.notes)
+                }
+                Divider()
                 sortMenu
                 Button {
                     showingColumnPicker = true
@@ -489,6 +618,12 @@ struct CardBrowserView: View {
                     showingFindReplace = true
                 } label: {
                     Label("Find & Replace…", systemImage: "text.magnifyingglass")
+                }
+                Divider()
+                Button {
+                    openSidebar()
+                } label: {
+                    Label("Filters…", systemImage: "line.3.horizontal.decrease.circle")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -645,20 +780,41 @@ struct CardBrowserView: View {
 
     /// Resolves the row's note id on demand (one quick backend call, made only
     /// for the single tapped row rather than for every displayed row) and opens
-    /// the note editor for it.
-    private func openEditor(forCard cardID: Int64) {
+    /// the note editor for it. Mode-aware: the row id is already the note id in
+    /// notes mode, else it's resolved from the card.
+    private func openEditor(forRow rowID: Int64) {
         Task {
-            if let noteID = await store.noteID(forCard: cardID) {
+            if let noteID = await model.resolveNoteID(forRow: rowID) {
                 editTarget = EditTarget(id: noteID)
             }
         }
     }
 
     /// Resolves the row's note id on demand, then opens Change Note Type for it.
-    private func openChangeNotetype(forCard cardID: Int64) {
+    private func openChangeNotetype(forRow rowID: Int64) {
         Task {
-            if let noteID = await store.noteID(forCard: cardID) {
+            if let noteID = await model.resolveNoteID(forRow: rowID) {
                 changeTypeTarget = NoteTarget(id: noteID)
+            }
+        }
+    }
+
+    /// Resolves the row to a concrete card id (the note's first card in notes
+    /// mode) and opens Card Info for it.
+    private func openCardInfo(forRow rowID: Int64) {
+        Task {
+            if let cardID = await model.resolveCardID(forRow: rowID) {
+                infoTarget = CardTarget(id: cardID)
+            }
+        }
+    }
+
+    /// Resolves the row to a concrete card id and opens the read-only Preview
+    /// (Anki's browser Preview — rendered front/back with a flip, no grading).
+    private func openPreview(forRow rowID: Int64) {
+        Task {
+            if let cardID = await model.resolveCardID(forRow: rowID) {
+                previewTarget = PreviewTarget(id: cardID)
             }
         }
     }
@@ -682,6 +838,21 @@ struct CardBrowserView: View {
 
     private var findReplaceResultPresented: Binding<Bool> {
         Binding(get: { model.findReplaceResult != nil }, set: { if !$0 { model.findReplaceResult = nil } })
+    }
+
+    private var saveSearchErrorPresented: Binding<Bool> {
+        Binding(get: { model.saveSearchError != nil }, set: { if !$0 { model.saveSearchError = nil } })
+    }
+
+    /// Drives the Cards/Notes toggle in the overflow menu.
+    private var modeBinding: Binding<BrowserMode> {
+        Binding(get: { model.mode }, set: { model.setMode($0) })
+    }
+
+    /// Loads the sidebar's data sources (if needed) and presents the Filters panel.
+    private func openSidebar() {
+        model.loadSidebarIfNeeded()
+        showingSidebar = true
     }
 
     /// Drives the add/remove-tag prompt; clearing it resets the typed text so a
@@ -964,6 +1135,235 @@ private struct FindReplaceSheet: View {
     }
 }
 
+/// The browser's read-only card Preview (Anki's browser Preview): the card's
+/// rendered front/back shown in the reviewer's exact styling via `CardWebView`,
+/// with a button to flip between sides. No grading and no scheduling — it reuses
+/// only the render path, never the review loop. The card is rendered off-main
+/// via the store; a spinner shows until it lands.
+private struct CardPreviewSheet: View {
+    @ObservedObject var store: AnkiStore
+    let cardID: Int64
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
+
+    /// The rendered card (question/answer/CSS/ordinal); nil until loaded.
+    @State private var preview: CardPreviewContent?
+    /// Which side is showing (false = front/question, true = back/answer).
+    @State private var showingBack = false
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                DS.background.ignoresSafeArea()
+                if let preview {
+                    VStack(spacing: 0) {
+                        CardWebView(
+                            html: showingBack ? preview.answer : preview.question,
+                            css: preview.css,
+                            ordinal: preview.ordinal,
+                            isDark: colorScheme == .dark,
+                            mediaFolder: store.mediaFolderURL
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        Divider()
+                        Button {
+                            showingBack.toggle()
+                        } label: {
+                            Text(showingBack ? "Show Front" : "Show Back")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.dsPrimary)
+                        .padding()
+                    }
+                } else {
+                    ProgressView("Loading…")
+                        .font(DS.Typography.caption)
+                        .foregroundStyle(DS.textSecondary)
+                }
+            }
+            .navigationTitle("Preview")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                // Segmented Front/Back control, mirroring desktop's Preview
+                // header — a second way to flip besides the bottom button.
+                ToolbarItem(placement: .principal) {
+                    if preview != nil {
+                        Picker("Side", selection: $showingBack) {
+                            Text("Front").tag(false)
+                            Text("Back").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 200)
+                    }
+                }
+            }
+            .task { preview = await store.cardPreview(cardID: cardID) }
+        }
+    }
+}
+
+/// The browser's filter sidebar as a phone-appropriate presented sheet — the
+/// mobile form of AnkiDroid/desktop's browser sidebar. Sections for Saved
+/// Searches, Decks, Tags, Flags, Card State, and Today; tapping an item sets the
+/// browser search to the matching Anki term (e.g. `deck:"X"`, `tag:"Y"`,
+/// `flag:1`, `is:suspended`, `added:1`), the default single-click behaviour.
+/// A "Save Search" action stores the current search as a named saved search.
+///
+/// Takes plain data + closures (no model), so it stays a pure, previewable view.
+private struct BrowserSidebarSheet: View {
+    let decks: [(id: Int64, name: String)]
+    let tags: [String]
+    let savedSearches: [SavedSearch]
+    /// Called with the chosen Anki search term (the caller sets it as the query).
+    let onApply: (String) -> Void
+    /// Called to save the current search (the caller prompts for a name).
+    let onSaveCurrent: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                DS.background.ignoresSafeArea()
+                List {
+                    savedSearchesSection
+                    decksSection
+                    tagsSection
+                    flagsSection
+                    cardStateSection
+                    todaySection
+                }
+                .listStyle(.insetGrouped)
+                .scrollContentBackground(.hidden)
+            }
+            .navigationTitle("Filters")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { onDismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save Search") { onSaveCurrent() }
+                }
+            }
+        }
+    }
+
+    // MARK: Sections
+
+    @ViewBuilder
+    private var savedSearchesSection: some View {
+        Section("Saved Searches") {
+            if savedSearches.isEmpty {
+                Text("Save the current search with “Save Search”.")
+                    .font(DS.Typography.caption)
+                    .foregroundStyle(DS.textSecondary)
+            } else {
+                ForEach(savedSearches) { saved in
+                    filterRow(saved.name, systemImage: "bookmark") { onApply(saved.query) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var decksSection: some View {
+        if !decks.isEmpty {
+            Section("Decks") {
+                ForEach(decks, id: \.id) { deck in
+                    // Indent subdecks by their `::` depth and show the leaf name,
+                    // mirroring the sidebar's deck tree.
+                    let depth = deck.name.components(separatedBy: "::").count - 1
+                    let leaf = deck.name.components(separatedBy: "::").last ?? deck.name
+                    filterRow(leaf, systemImage: "rectangle.stack", indent: depth) {
+                        onApply("deck:\"\(deck.name)\"")
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var tagsSection: some View {
+        Section("Tags") {
+            filterRow("No tags", systemImage: "tag.slash") { onApply("tag:none") }
+            ForEach(tags, id: \.self) { tag in
+                filterRow(tag, systemImage: "tag") { onApply("tag:\"\(tag)\"") }
+            }
+        }
+    }
+
+    private var flagsSection: some View {
+        Section("Flags") {
+            ForEach(CardFlag.allCases) { flag in
+                let term = "flag:\(flag.rawValue)"
+                Button {
+                    onApply(term)
+                } label: {
+                    HStack(spacing: DS.Spacing.m) {
+                        Image(systemName: flag == .none ? "flag.slash" : "flag.fill")
+                            .foregroundStyle(flag.color ?? DS.textSecondary)
+                            .frame(width: 24)
+                        Text(flag.label)
+                            .font(DS.Typography.body)
+                            .foregroundStyle(DS.textPrimary)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(minHeight: DS.minTapTarget)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .listRowBackground(DS.surface)
+            }
+        }
+    }
+
+    private var cardStateSection: some View {
+        Section("Card State") {
+            filterRow("New", systemImage: "sparkles") { onApply("is:new") }
+            filterRow("Learning", systemImage: "hourglass") { onApply("is:learn") }
+            filterRow("Review", systemImage: "checkmark.circle") { onApply("is:review") }
+            filterRow("Due", systemImage: "calendar") { onApply("is:due") }
+            filterRow("Suspended", systemImage: "pause.circle") { onApply("is:suspended") }
+            filterRow("Buried", systemImage: "eye.slash") { onApply("is:buried") }
+        }
+    }
+
+    private var todaySection: some View {
+        Section("Today") {
+            filterRow("Added Today", systemImage: "plus.square.on.square") { onApply("added:1") }
+            filterRow("Studied Today", systemImage: "clock.arrow.circlepath") { onApply("rated:1") }
+        }
+    }
+
+    /// One tappable filter row (icon + label), optionally indented for subdecks.
+    private func filterRow(
+        _ title: String, systemImage: String, indent: Int = 0, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: DS.Spacing.m) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(DS.accent)
+                    .frame(width: 24)
+                Text(title)
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, CGFloat(indent) * DS.Spacing.m)
+            .frame(minHeight: DS.minTapTarget)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(DS.surface)
+    }
+}
+
 /// Owns the Card Browser's windowed data and search state, off the View so the
 /// paging/caching logic stays contained and testable.
 ///
@@ -981,8 +1381,9 @@ final class CardBrowserModel: ObservableObject {
         case failed(String)
     }
 
-    /// Full, ordered list of matching card ids — cheap to hold (just ids) even
-    /// for tens of thousands of cards.
+    /// Full, ordered list of matching *row* ids — card ids in cards mode, note
+    /// ids in notes mode (see `mode`). Cheap to hold (just ids) even for tens of
+    /// thousands of rows.
     @Published private(set) var cardIDs: [Int64] = []
     /// Display rows for the pages visited so far, keyed by card id. Bounded by
     /// `maxCachedRows` so long scrolls don't grow memory without limit.
@@ -1018,6 +1419,26 @@ final class CardBrowserModel: ObservableObject {
     /// scope note); drives a short confirmation alert.
     @Published var findReplaceResult: String?
 
+    /// Whether the browser lists one row per card (Anki's default) or one row
+    /// per note — the Cards/Notes toggle. Persisted; changing it re-resolves the
+    /// id list (cards vs notes) and clears the selection, which is keyed to the
+    /// displayed id space. `cardIDs` then holds card ids or note ids accordingly.
+    @Published private(set) var mode: BrowserMode
+
+    // MARK: Filter sidebar (phone "Filters" panel)
+
+    /// All tags in the collection, for the sidebar's Tags section. Loaded lazily
+    /// when the sidebar first opens.
+    @Published private(set) var tags: [String] = []
+    /// The full deck list (all decks incl. filtered, by `Parent::Child` name),
+    /// for the sidebar's Decks section. Loaded lazily.
+    @Published private(set) var sidebarDecks: [(id: Int64, name: String)] = []
+    /// The collection's saved searches, for the sidebar's Saved Searches
+    /// section. Loaded lazily and refreshed after saving a new one.
+    @Published private(set) var savedSearches: [SavedSearch] = []
+    /// A transient error shown if saving the current search fails.
+    @Published var saveSearchError: String?
+
     /// Whether the browser is in multi-select mode (AnkiDroid's CardBrowser
     /// multiselect). Entered from the toolbar "Select" button or a row's "Select"
     /// context action; while on, a row tap toggles selection instead of opening
@@ -1049,10 +1470,11 @@ final class CardBrowserModel: ObservableObject {
     /// Debounce window for live typing.
     private static let debounceNanos: UInt64 = 300_000_000
 
-    // UserDefaults keys for the persisted column set + sort choice.
+    // UserDefaults keys for the persisted column set + sort choice + list mode.
     private static let columnsDefaultsKey = "cardBrowser.activeColumns"
     private static let sortColumnDefaultsKey = "cardBrowser.sortColumn"
     private static let sortReverseDefaultsKey = "cardBrowser.sortReverse"
+    private static let modeDefaultsKey = "cardBrowser.mode"
 
     init(store: AnkiStore, initialQuery: String) {
         self.store = store
@@ -1073,6 +1495,10 @@ final class CardBrowserModel: ObservableObject {
         } else {
             self.sort = .default
         }
+        // Restore the persisted Cards/Notes mode (defaults to cards, Anki's
+        // default). The engine's own notes-mode config is written to match on
+        // the first row fetch, so the two never diverge.
+        self.mode = BrowserMode(rawValue: defaults.string(forKey: Self.modeDefaultsKey) ?? "") ?? .cards
     }
 
     // MARK: Search
@@ -1195,6 +1621,93 @@ final class CardBrowserModel: ObservableObject {
         UserDefaults.standard.set(sort.reverse, forKey: Self.sortReverseDefaultsKey)
     }
 
+    // MARK: Notes / Cards mode
+
+    /// Switches the browser between Cards and Notes mode (AnkiDroid/desktop's
+    /// browser toggle). The id space changes (cards ↔ notes), so this drops the
+    /// selection and cached rows and re-runs the search to re-resolve the id
+    /// list in the new mode; the engine's notes-mode config is written to match
+    /// on the next row fetch. No-op when already in `newMode`.
+    func setMode(_ newMode: BrowserMode) {
+        guard newMode != mode else { return }
+        mode = newMode
+        UserDefaults.standard.set(newMode.rawValue, forKey: Self.modeDefaultsKey)
+        // The selection is keyed to the old id space; clear it (and any select
+        // mode) rather than carry stale ids across the switch.
+        selection.removeAll()
+        rowsByID = [:]
+        runSearch()
+    }
+
+    /// The singular noun for the current mode ("card"/"note"), used in the
+    /// row-count header and empty/selection copy so they read correctly in both
+    /// modes.
+    var itemNoun: String { mode == .notes ? "note" : "card" }
+
+    // MARK: Mode-aware id resolution
+    //
+    // A row's `id` is a card id in cards mode and a note id in notes mode. The
+    // helpers below map a row id (or the selection) to the id kind a given
+    // backend op needs, so the per-row and bulk actions work identically in both
+    // modes: card-level ops (suspend/flag/deck/bury) resolve to card ids;
+    // note-level targets (editor / change-notetype) resolve to a note id.
+
+    /// The note id for a row — the row id itself in notes mode, else resolved
+    /// from the card. Used to open the editor / Change Note Type.
+    func resolveNoteID(forRow rowID: Int64) async -> Int64? {
+        mode == .notes ? rowID : await store.noteID(forCard: rowID)
+    }
+
+    /// A concrete card id for a row — the row id itself in cards mode, else the
+    /// note's first card. Used for Preview and Card Info.
+    func resolveCardID(forRow rowID: Int64) async -> Int64? {
+        mode == .cards ? rowID : await store.firstCardID(ofNote: rowID)
+    }
+
+    /// The card ids for a set of row ids — the ids themselves in cards mode, else
+    /// every card of the selected notes. Used by the card-level bulk/per-row ops.
+    /// (Named `resolveCardIDs` to avoid colliding with the `cardIDs` property.)
+    private func resolveCardIDs(forRows rowIDs: [Int64]) async -> [Int64] {
+        mode == .cards ? rowIDs : await store.cardIDs(forNotes: rowIDs)
+    }
+
+    // MARK: Filter sidebar
+
+    /// Loads the sidebar's data sources (tags, decks, saved searches) the first
+    /// time the Filters panel is opened, then keeps them for the session. Each is
+    /// best-effort, so a slow/failed source just shows an empty section.
+    func loadSidebarIfNeeded() {
+        if tags.isEmpty { Task { tags = await store.allTags() } }
+        if sidebarDecks.isEmpty { Task { sidebarDecks = await store.browserDeckNames() } }
+        Task { savedSearches = await store.savedSearches() }
+    }
+
+    /// Applies a sidebar search term (e.g. `deck:"Biology"`, `tag:"hard"`,
+    /// `flag:1`, `is:suspended`) by replacing the query and searching — matching
+    /// Anki's default sidebar click, which sets the search to the clicked item.
+    func applySearch(_ term: String) {
+        debounceTask?.cancel()
+        query = term
+        runSearch()
+    }
+
+    /// Saves the current search under `name` (Anki's "Save Current Search"),
+    /// then refreshes the saved-search list. Surfaces a failure via
+    /// `saveSearchError`.
+    func saveCurrentSearch(name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let currentQuery = query
+        Task {
+            do {
+                try await store.saveSearch(name: trimmed, query: currentQuery)
+                savedSearches = await store.savedSearches()
+            } catch {
+                saveSearchError = describeBrowserError(error)
+            }
+        }
+    }
+
     /// Turns a camelCase column key into a readable label ("cardDue" → "Card
     /// Due") as a fallback before the engine's localized labels load.
     private static func humanize(_ key: String) -> String {
@@ -1227,11 +1740,16 @@ final class CardBrowserModel: ObservableObject {
         guard !find.isEmpty else { return }
         let currentQuery = query
         let selectionIDs = Array(selection)
+        let currentMode = mode
         Task {
             do {
                 let noteIDs: [Int64]
                 if onlySelected, !selectionIDs.isEmpty {
-                    noteIDs = await store.noteIDs(forCards: selectionIDs)
+                    // Selection rows are note ids in notes mode, card ids in cards
+                    // mode; resolve to the note ids Find & Replace operates on.
+                    noteIDs = currentMode == .notes
+                        ? selectionIDs
+                        : await store.noteIDs(forCards: selectionIDs)
                 } else {
                     noteIDs = try await store.searchNotes(query: currentQuery)
                 }
@@ -1296,11 +1814,12 @@ final class CardBrowserModel: ObservableObject {
         let seq = searchSeq
         let currentQuery = query
         let currentSort = sort
+        let currentMode = mode
         loadingIDs.removeAll()
         if cardIDs.isEmpty { phase = .loading }
         Task {
             do {
-                let ids = try await store.browserCardIDs(query: currentQuery, sort: currentSort)
+                let ids = try await store.browserItemIDs(query: currentQuery, sort: currentSort, mode: currentMode)
                 guard seq == searchSeq else { return }
                 setIDs(ids)
                 phase = .loaded
@@ -1331,8 +1850,9 @@ final class CardBrowserModel: ObservableObject {
         pageIDs.forEach { loadingIDs.insert($0) }
         let seq = searchSeq
         let columns = activeColumnKeys
+        let currentMode = mode
         Task {
-            let fetched = await store.browserRows(forCardIDs: pageIDs, columns: columns)
+            let fetched = await store.browserRows(forIDs: pageIDs, columns: columns, mode: currentMode)
             // Discard a page that belongs to a superseded search; its loadingIDs
             // were already cleared by the newer `runSearch`.
             guard seq == searchSeq else { return }
@@ -1357,37 +1877,52 @@ final class CardBrowserModel: ObservableObject {
 
     // MARK: Per-row mutations (incremental — no full re-search)
 
-    /// Suspends/unsuspends a card, then reloads just that one row in place.
+    /// Suspends/unsuspends a row's card(s), then reloads just that one row in
+    /// place. In notes mode this toggles every card of the note (matching
+    /// desktop, whose notes-mode row action applies to all the note's cards).
     func toggleSuspend(_ row: CardBrowserRow) {
+        let rowID = row.id
+        let suspended = row.suspended
         Task {
             do {
-                try await store.setCardsSuspended([row.id], suspended: !row.suspended)
-                reloadRow(cardID: row.id)
+                let cardIDs = await resolveCardIDs(forRows: [rowID])
+                try await store.setCardsSuspended(cardIDs, suspended: !suspended)
+                reloadRow(cardID: rowID)
             } catch {
                 actionError = describeBrowserError(error)
             }
         }
     }
 
-    /// Sets/clears a card's flag, then reloads just that one row in place.
-    func setFlag(_ cardID: Int64, flag: Int) {
+    /// Sets/clears the flag on a row's card(s), then reloads just that one row in
+    /// place. In notes mode this flags every card of the note.
+    func setFlag(_ rowID: Int64, flag: Int) {
         Task {
             do {
-                try await store.setFlag([cardID], flag: flag)
-                reloadRow(cardID: cardID)
+                let cardIDs = await resolveCardIDs(forRows: [rowID])
+                try await store.setFlag(cardIDs, flag: flag)
+                reloadRow(cardID: rowID)
             } catch {
                 actionError = describeBrowserError(error)
             }
         }
     }
 
-    /// Deletes the note behind a row and removes exactly the affected rows (the
-    /// note's cards, including siblings) from the list in place — no re-search.
+    /// Deletes the note(s) behind a row and removes the affected rows in place —
+    /// no re-search. In cards mode it removes the deleted note's cards (incl.
+    /// siblings); in notes mode it removes exactly the deleted note row.
     func delete(_ row: CardBrowserRow) {
+        let rowID = row.id
+        let currentMode = mode
         Task {
             do {
-                let removed = try await store.deleteNotes(forCards: [row.id])
-                removeCards(removed.isEmpty ? [row.id] : removed)
+                if currentMode == .notes {
+                    _ = try await store.deleteNotes(noteIDs: [rowID])
+                    removeCards([rowID])
+                } else {
+                    let removed = try await store.deleteNotes(forCards: [rowID])
+                    removeCards(removed.isEmpty ? [rowID] : removed)
+                }
             } catch {
                 actionError = describeBrowserError(error)
             }
@@ -1399,8 +1934,9 @@ final class CardBrowserModel: ObservableObject {
     private func reloadRow(cardID: Int64) {
         let seq = searchSeq
         let columns = activeColumnKeys
+        let currentMode = mode
         Task {
-            let fetched = await store.browserRows(forCardIDs: [cardID], columns: columns)
+            let fetched = await store.browserRows(forIDs: [cardID], columns: columns, mode: currentMode)
             guard seq == searchSeq else { return }
             if let row = fetched.first {
                 rowsByID[cardID] = row
@@ -1447,16 +1983,38 @@ final class CardBrowserModel: ObservableObject {
     func deselectAll() { selection.removeAll() }
 
     #if DEBUG
-    /// Screenshot/automation hook: wait for the initial id list to load, then
-    /// enter multi-select with the first few rows selected so a screenshot
-    /// captures the selection UI and the bottom action bar. Debug-only.
-    func demoEnterSelectionForScreenshot() async {
+    /// Screenshot/automation hook: wait until the initial id list has loaded (so
+    /// a screenshot of a mode/preview/sidebar demo has real rows behind it).
+    func demoWaitForIDsForScreenshot() async {
         for _ in 0..<60 {
             if !cardIDs.isEmpty { break }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
+    }
+
+    /// Screenshot/automation hook: wait for the initial id list to load, then
+    /// enter multi-select with the first few rows selected so a screenshot
+    /// captures the selection UI and the bottom action bar. Debug-only.
+    func demoEnterSelectionForScreenshot() async {
+        await demoWaitForIDsForScreenshot()
         isSelecting = true
         selection = Set(cardIDs.prefix(3))
+    }
+
+    /// Screenshot/automation hook: switch to Notes mode once rows have loaded.
+    func demoEnterNotesModeForScreenshot() async {
+        await demoWaitForIDsForScreenshot()
+        setMode(.notes)
+        await demoWaitForIDsForScreenshot()
+    }
+
+    /// Screenshot/automation hook: load the sidebar's data sources and wait
+    /// briefly so the presented Filters panel shows real decks/tags/saved.
+    func demoLoadSidebarForScreenshot() async {
+        loadSidebarIfNeeded()
+        tags = await store.allTags()
+        sidebarDecks = await store.browserDeckNames()
+        savedSearches = await store.savedSearches()
     }
 
     /// Screenshot/automation hook: wait until the engine's column list (and the
@@ -1541,10 +2099,17 @@ final class CardBrowserModel: ObservableObject {
     func bulkDelete() {
         let ids = Array(selection)
         guard !ids.isEmpty else { return }
+        let currentMode = mode
         Task {
             do {
-                let removed = try await store.deleteNotes(forCards: ids)
-                removeCards(removed.isEmpty ? ids : removed)
+                if currentMode == .notes {
+                    // Rows are note ids: delete them and drop exactly those rows.
+                    _ = try await store.deleteNotes(noteIDs: ids)
+                    removeCards(ids)
+                } else {
+                    let removed = try await store.deleteNotes(forCards: ids)
+                    removeCards(removed.isEmpty ? ids : removed)
+                }
                 exitSelection()
             } catch {
                 actionError = describeBrowserError(error)
@@ -1552,16 +2117,20 @@ final class CardBrowserModel: ObservableObject {
         }
     }
 
-    /// Shared driver for the non-destructive bulk ops: run `op` over the current
-    /// selection, then reload the affected rows in place so their badges update,
-    /// keeping the selection and select mode.
+    /// Shared driver for the non-destructive bulk ops: resolve the selection to
+    /// the card ids each op needs (in notes mode the selected note rows expand to
+    /// their cards), run `op`, then reload the affected *rows* in place so their
+    /// badges update, keeping the selection and select mode. Note-level ops
+    /// (tags/marked) take card ids too and re-collapse to notes internally, so a
+    /// single card-id resolution covers every bulk op.
     private func runBulk(_ op: @escaping ([Int64]) async throws -> Void) {
-        let ids = Array(selection)
-        guard !ids.isEmpty else { return }
+        let rowIDs = Array(selection)
+        guard !rowIDs.isEmpty else { return }
         Task {
             do {
-                try await op(ids)
-                reloadRows(Set(ids))
+                let cardIDs = await resolveCardIDs(forRows: rowIDs)
+                try await op(cardIDs)
+                reloadRows(Set(rowIDs))
             } catch {
                 actionError = describeBrowserError(error)
             }

@@ -8,6 +8,26 @@ public enum CardAudio: Sendable, Equatable {
     case tts(text: String, lang: String)
 }
 
+/// A fully rendered card for the browser's read-only Preview (Anki's browser
+/// Preview window): the question/answer HTML, the notetype CSS, and the card's
+/// template ordinal (for the `card cardN` body class). Assembled from the same
+/// `renderExistingCard` path the reviewer uses, so a previewed card looks
+/// exactly like it does under review — without grading or touching the review
+/// loop.
+public struct CardPreviewContent: Sendable, Equatable {
+    public let question: String
+    public let answer: String
+    public let css: String
+    public let ordinal: Int
+
+    public init(question: String, answer: String, css: String, ordinal: Int) {
+        self.question = question
+        self.answer = answer
+        self.css = css
+        self.ordinal = ordinal
+    }
+}
+
 /// Review-loop convenience methods. Service/method indices come from the
 /// generated `_backend_generated.py` reference.
 public extension Backend {
@@ -52,6 +72,20 @@ public extension Backend {
         req.partialRender = false
         let resp = try run(service: 27, method: 6, req, returning: Anki_CardRendering_RenderCardResponse.self)
         return (Backend.joinNodes(resp.questionNodes), Backend.joinNodes(resp.answerNodes), resp.css)
+    }
+
+    /// Renders a card for the browser's read-only Preview: the question/answer
+    /// HTML and CSS from `renderCard` plus the card's template ordinal (read from
+    /// the card record for the `cardN` body class). Reuses the reviewer's render
+    /// path without any scheduling side effects, so it's safe to call from the
+    /// browser. Throws if the card can't be rendered (e.g. concurrently deleted).
+    func cardPreview(cardID: Int64) throws -> CardPreviewContent {
+        let rendered = try renderCard(cardID: cardID)
+        let ordinal = Int((try? getCard(cardID: cardID).templateIdx) ?? 0)
+        return CardPreviewContent(
+            question: rendered.question, answer: rendered.answer,
+            css: rendered.css, ordinal: ordinal
+        )
     }
 
     /// CardRenderingService.extractAvTags (27, 3). Splits a rendered card side

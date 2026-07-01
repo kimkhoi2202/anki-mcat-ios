@@ -358,7 +358,10 @@ struct HomeView: View {
                 || ProcessInfo.processInfo.arguments.contains("-demoBrowserSelect")
                 || ProcessInfo.processInfo.arguments.contains("-demoBrowserColumnsApplied")
                 || ProcessInfo.processInfo.arguments.contains("-demoBrowserColumns")
-                || ProcessInfo.processInfo.arguments.contains("-demoBrowserFindReplace") {
+                || ProcessInfo.processInfo.arguments.contains("-demoBrowserFindReplace")
+                || ProcessInfo.processInfo.arguments.contains("-demoBrowserNotesMode")
+                || ProcessInfo.processInfo.arguments.contains("-demoBrowserSidebar")
+                || ProcessInfo.processInfo.arguments.contains("-demoBrowserPreview") {
                 goBrowse = true
             }
             // Answer a few cards first so the stats screen has real review

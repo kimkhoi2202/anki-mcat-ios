@@ -457,6 +457,134 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(Set(names).count, names.count, "field names should be de-duplicated")
     }
 
+    // MARK: - Card Browser: notes / cards mode
+
+    /// The `browserTableShowNotesMode` config (which drives whether
+    /// `browser_row_for_id` treats an id as a card or a note) defaults to cards
+    /// mode and round-trips through `setBrowserNotesMode`.
+    func testBrowserNotesModeConfigRoundTrips() throws {
+        let backend = try freshCollection()
+        XCTAssertFalse(try backend.getConfigBool(.browserTableShowNotesMode),
+                       "a fresh collection defaults to cards mode")
+        try backend.setBrowserNotesMode(true)
+        XCTAssertTrue(try backend.getConfigBool(.browserTableShowNotesMode),
+                      "notes mode should persist")
+        try backend.setBrowserNotesMode(false)
+        XCTAssertFalse(try backend.getConfigBool(.browserTableShowNotesMode),
+                       "switching back to cards mode should persist")
+    }
+
+    /// Notes mode collapses a note's sibling cards into a single row: a reversed
+    /// note (two cards) plus a basic note (one card) yields three *card* rows but
+    /// two *note* rows, and `browserRows(…mode: .notes)` builds one row per note
+    /// id — so notes mode returns fewer/equal rows than cards mode.
+    func testBrowserNotesModeReturnsFewerRowsThanCards() throws {
+        let backend = try freshCollection()
+        let reversed = try XCTUnwrap(
+            try backend.notetypeNames().first { $0.name == "Basic (and reversed card)" },
+            "fresh collection ships the reversed Basic note type"
+        )
+        _ = try backend.addNote(notetypeID: reversed.id, fields: ["Q", "A"], deckID: 1)
+        _ = try backend.addNote(notetypeID: try basicNotetypeID(backend),
+                                fields: ["Front", "Back"], deckID: 1)
+
+        let cardIDs = try backend.browserRowIDs(query: "", sort: .default, mode: .cards)
+        let noteIDs = try backend.browserRowIDs(query: "", sort: .default, mode: .notes)
+        XCTAssertEqual(cardIDs.count, 3, "reversed note (2 cards) + basic note (1 card) = 3 cards")
+        XCTAssertEqual(noteIDs.count, 2, "the same content collapses to 2 notes")
+        XCTAssertLessThanOrEqual(noteIDs.count, cardIDs.count,
+                                 "notes mode never returns more rows than cards mode")
+
+        // Notes-mode rows build one row per note id (the engine renders the
+        // note's first card + note-level cells).
+        let rows = try backend.browserRows(
+            ids: noteIDs, columns: Backend.defaultBrowserColumns, mode: .notes)
+        XCTAssertEqual(rows.count, 2, "one browser row per note in notes mode")
+        XCTAssertTrue(rows.allSatisfy { !$0.cells.isEmpty }, "each notes-mode row has cells")
+    }
+
+    /// Notes-mode bulk/preview id resolution: a reversed note expands to its two
+    /// cards (`cardIDs(forNoteIDs:)`, used by notes-mode card actions), and
+    /// `firstCardID(ofNote:)` returns one of them (used by notes-mode Preview /
+    /// Card Info).
+    func testNotesModeCardResolution() throws {
+        let backend = try freshCollection()
+        let reversed = try XCTUnwrap(
+            try backend.notetypeNames().first { $0.name == "Basic (and reversed card)" }
+        )
+        let nid = try backend.addNote(notetypeID: reversed.id, fields: ["Q", "A"], deckID: 1)
+
+        let cards = try backend.cardIDs(forNoteIDs: [nid])
+        XCTAssertEqual(cards.count, 2, "the reversed note expands to its two cards")
+        let first = try XCTUnwrap(try backend.firstCardID(ofNote: nid))
+        XCTAssertTrue(cards.contains(first), "the note's first card is one of its cards")
+    }
+
+    // MARK: - Card Browser: preview
+
+    /// `cardPreview` renders a card's question and answer (reusing the reviewer's
+    /// render path) and carries the notetype CSS and template ordinal — the data
+    /// the browser Preview sheet shows read-only.
+    func testCardPreviewRendersFrontBackAndCSS() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID,
+                                fields: ["Capital of France", "Paris"], deckID: 1)
+        let cardID = try XCTUnwrap(try backend.searchCards(query: "").first)
+
+        let preview = try backend.cardPreview(cardID: cardID)
+        XCTAssertTrue(preview.question.contains("Capital of France"),
+                      "the preview front should render the question")
+        XCTAssertTrue(preview.answer.contains("Paris"),
+                      "the preview back should render the answer")
+        XCTAssertTrue(preview.css.contains(".card"),
+                      "the preview should carry the notetype CSS")
+        XCTAssertEqual(preview.ordinal, 0, "a Basic card is template ordinal 0")
+    }
+
+    // MARK: - Card Browser: filter sidebar (tags + saved searches)
+
+    /// `allTags` lists every tag used in the collection — the sidebar's Tags
+    /// section. Tags added to a note show up.
+    func testAllTagsListsCollectionTags() throws {
+        let backend = try freshCollection()
+        let nid = try backend.addNote(notetypeID: try basicNotetypeID(backend),
+                                      fields: ["Q", "A"], deckID: 1)
+        _ = try backend.addNoteTags(noteIDs: [nid], tags: "geography capital")
+
+        let tags = try backend.allTags()
+        XCTAssertTrue(tags.contains("geography"), "an added tag should be listed")
+        XCTAssertTrue(tags.contains("capital"), "all added tags should be listed")
+    }
+
+    /// Saved searches round-trip through the `savedFilters` config: a fresh
+    /// collection has none, saving adds them (sorted case-insensitively by name),
+    /// saving an existing name overwrites it, and removing deletes it — the
+    /// browser sidebar's Saved Searches store.
+    func testSavedSearchesRoundTrip() throws {
+        let backend = try freshCollection()
+        XCTAssertTrue(backend.savedSearches().isEmpty,
+                      "a fresh collection has no saved searches")
+
+        try backend.saveSearch(name: "Suspended", query: "is:suspended")
+        try backend.saveSearch(name: "Hard", query: "tag:hard")
+        let saved = backend.savedSearches()
+        XCTAssertEqual(saved.map(\.name), ["Hard", "Suspended"],
+                       "saved searches come back sorted case-insensitively by name")
+        XCTAssertEqual(saved.first { $0.name == "Hard" }?.query, "tag:hard",
+                       "the saved query round-trips")
+
+        // Saving an existing name overwrites its query, not adds a duplicate.
+        try backend.saveSearch(name: "Hard", query: "tag:difficult")
+        XCTAssertEqual(backend.savedSearches().count, 2, "overwrite keeps the count at two")
+        XCTAssertEqual(backend.savedSearches().first { $0.name == "Hard" }?.query, "tag:difficult",
+                       "the overwritten query is stored")
+
+        try backend.removeSavedSearch(name: "Hard")
+        XCTAssertEqual(backend.savedSearches().map(\.name), ["Suspended"],
+                       "removing deletes exactly that saved search")
+    }
+
     /// Suspending then unsuspending a card flips its `suspended` state (read back
     /// through the browser row), and suspending is undoable — matching
     /// AnkiDroid's browser suspend/unsuspend toggle.

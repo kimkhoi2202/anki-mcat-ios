@@ -25,4 +25,56 @@ public extension Backend {
     func setPreferences(_ preferences: Anki_Config_Preferences) throws -> Anki_Collection_OpChanges {
         try run(service: 9, method: 10, preferences, returning: Anki_Collection_OpChanges.self)
     }
+
+    // MARK: - Typed & JSON config keys
+    //
+    // The collection config store also holds a handful of known booleans (a
+    // `ConfigKey.Bool` enum) and arbitrary JSON values keyed by string. The
+    // Card Browser reads/writes two of these: the notes-vs-cards table mode (a
+    // known bool) and the browser sidebar's saved searches (a JSON object). The
+    // helpers below wrap the ConfigService RPCs the same way `getPreferences`
+    // does.
+
+    /// ConfigService.getConfigBool (service 9, method 5).
+    ///
+    /// Reads a known boolean collection config; the core returns the key's
+    /// default when it has never been set, so this never throws for a valid key.
+    func getConfigBool(_ key: Anki_Config_ConfigKey.BoolEnum) throws -> Bool {
+        var req = Anki_Config_GetConfigBoolRequest()
+        req.key = key
+        return try run(service: 9, method: 5, req, returning: Anki_Generic_Bool.self).val
+    }
+
+    /// ConfigService.setConfigBool (service 9, method 6). Persists a known
+    /// boolean config. `undoable` false (the default) keeps it off the undo
+    /// stack — these are view-state toggles, not user-content edits.
+    func setConfigBool(_ key: Anki_Config_ConfigKey.BoolEnum, value: Bool, undoable: Bool = false) throws {
+        var req = Anki_Config_SetConfigBoolRequest()
+        req.key = key
+        req.value = value
+        req.undoable = undoable
+        _ = try run(service: 9, method: 6, input: try req.serializedData())
+    }
+
+    /// ConfigService.getConfigJson (service 9, method 0).
+    ///
+    /// Returns the raw JSON bytes stored under `key`. A key that was never set
+    /// comes back as the JSON literal `null` (not an error), so callers decode
+    /// defensively (an unparsable / null payload means "absent").
+    func getConfigJson(key: String) throws -> Data {
+        var req = Anki_Generic_String()
+        req.val = key
+        return try run(service: 9, method: 0, req, returning: Anki_Generic_Json.self).json
+    }
+
+    /// ConfigService.setConfigJson (service 9, method 1). Stores raw JSON bytes
+    /// under `key`. `undoable` false (the default) mirrors pylib's
+    /// `Collection.set_config`, which does not record an undo step by default.
+    func setConfigJson(key: String, valueJSON: Data, undoable: Bool = false) throws {
+        var req = Anki_Config_SetConfigJsonRequest()
+        req.key = key
+        req.valueJson = valueJSON
+        req.undoable = undoable
+        _ = try run(service: 9, method: 1, input: try req.serializedData())
+    }
 }

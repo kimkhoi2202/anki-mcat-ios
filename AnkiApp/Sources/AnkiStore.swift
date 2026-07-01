@@ -595,14 +595,17 @@ final class AnkiStore: ObservableObject {
 
     // MARK: - Card Browser
 
-    /// Resolves a Card Browser search to its matching card ids in the given sort
-    /// order, off the main actor. Cheap even on a huge collection — it returns
-    /// ids only; the browser then fetches row DATA lazily, a page at a time, via
-    /// `browserRows(forCardIDs:columns:)`. Throws so the browser can show an
+    /// Resolves a Card Browser search to its matching *row* ids (card ids in
+    /// cards mode, note ids in notes mode) in the given sort order, off the main
+    /// actor. Cheap even on a huge collection — it returns ids only; the browser
+    /// then fetches row DATA lazily, a page at a time, via
+    /// `browserRows(forIDs:columns:mode:)`. Throws so the browser can show an
     /// invalid-search / not-ready message; an empty result is a normal empty list.
-    func browserCardIDs(query: String, sort: BrowserSort = .default) async throws -> [Int64] {
+    func browserItemIDs(
+        query: String, sort: BrowserSort = .default, mode: BrowserMode = .cards
+    ) async throws -> [Int64] {
         guard let backend else { throw NoteEditorError.collectionNotReady }
-        return try await runDetached { try backend.browserCardIDs(query: query, sort: sort) }
+        return try await runDetached { try backend.browserRowIDs(query: query, sort: sort, mode: mode) }
     }
 
     /// The full set of selectable browser columns (labels + sort behavior) for
@@ -614,26 +617,101 @@ final class AnkiStore: ObservableObject {
         return (try? await runDetached { try backend.allBrowserColumns() }) ?? []
     }
 
-    /// Builds the display rows for one page of card ids (the cards currently on
-    /// screen) for the given active `columns`, off the main actor — one backend
-    /// call per row. Concurrently deleted cards are skipped, so the result may be
+    /// Builds the display rows for one page of row ids (the rows currently on
+    /// screen) for the given active `columns` and `mode`, off the main actor —
+    /// one backend call per row. The ids are card ids in cards mode and note ids
+    /// in notes mode. Concurrently deleted rows are skipped, so the result may be
     /// shorter than the input. A page-level failure (e.g. the collection isn't
     /// ready) yields an empty page rather than throwing, so the browser simply
     /// leaves those rows as placeholders to retry later instead of erroring the
     /// whole list.
     func browserRows(
-        forCardIDs cardIDs: [Int64], columns: [String] = Backend.defaultBrowserColumns
+        forIDs ids: [Int64], columns: [String] = Backend.defaultBrowserColumns,
+        mode: BrowserMode = .cards
     ) async -> [CardBrowserRow] {
         guard let backend else { return [] }
-        return (try? await runDetached { try backend.cardBrowserRows(cardIDs: cardIDs, columns: columns) }) ?? []
+        return (try? await runDetached { try backend.browserRows(ids: ids, columns: columns, mode: mode) }) ?? []
     }
 
     /// Resolves the note id behind a card on demand — for opening the editor or
-    /// Change Note Type from a single tapped browser row — off the main actor.
-    /// Returns nil if the card was concurrently deleted.
+    /// Change Note Type from a single tapped browser row (cards mode) — off the
+    /// main actor. Returns nil if the card was concurrently deleted.
     func noteID(forCard cardID: Int64) async -> Int64? {
         guard let backend else { return nil }
         return (try? await runDetached { try backend.getCard(cardID: cardID) })?.noteID
+    }
+
+    /// Resolves note ids to every card id belonging to those notes, off the main
+    /// actor — the notes-mode bridge for the card-level browser actions (suspend
+    /// / flag / deck / bury), whose selection is note ids. Best-effort: [] on
+    /// failure.
+    func cardIDs(forNotes noteIDs: [Int64]) async -> [Int64] {
+        guard let backend else { return [] }
+        return (try? await runDetached { try backend.cardIDs(forNoteIDs: noteIDs) }) ?? []
+    }
+
+    /// Resolves a note to its first (lowest-ordinal) card, off the main actor —
+    /// used by notes-mode Preview / Card Info, which act on a concrete card.
+    /// Returns nil if the note was concurrently deleted.
+    func firstCardID(ofNote noteID: Int64) async -> Int64? {
+        guard let backend else { return nil }
+        return (try? await runDetached { try backend.firstCardID(ofNote: noteID) }) ?? nil
+    }
+
+    /// Renders a card for the read-only browser Preview (question/answer HTML,
+    /// notetype CSS, and template ordinal), off the main actor — reusing the
+    /// reviewer's render path without any scheduling side effects. Best-effort:
+    /// nil if the card can't be rendered.
+    func cardPreview(cardID: Int64) async -> CardPreviewContent? {
+        guard let backend else { return nil }
+        return try? await runDetached { try backend.cardPreview(cardID: cardID) }
+    }
+
+    /// Deletes the given notes (and all of their cards) off the main actor — the
+    /// notes-mode delete, where the browser selection is note ids. Returns the
+    /// note ids removed so the browser can drop exactly those rows in place.
+    @discardableResult
+    func deleteNotes(noteIDs: [Int64]) async throws -> [Int64] {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        _ = try await runDetached { try backend.removeNotes(noteIDs: noteIDs) }
+        refreshDecks()
+        refreshUndo()
+        return noteIDs
+    }
+
+    // MARK: - Card Browser filter sidebar
+
+    /// All tags in the collection (engine-sorted), off the main actor — the
+    /// sidebar's Tags section. Best-effort: [] on failure.
+    func allTags() async -> [String] {
+        guard let backend else { return [] }
+        return (try? await runDetached { try backend.allTags() }) ?? []
+    }
+
+    /// The full deck list (all decks incl. filtered, by full `Parent::Child`
+    /// name), off the main actor — the sidebar's Decks section. Unlike the Home
+    /// deck tree, this ignores the reviewer collapse state so every deck is
+    /// filterable. Best-effort: [] on failure.
+    func browserDeckNames() async -> [(id: Int64, name: String)] {
+        guard let backend else { return [] }
+        return (try? await runDetached {
+            try backend.deckNames(skipEmptyDefault: false, includeFiltered: true)
+        }) ?? []
+    }
+
+    /// The collection's saved searches (Anki's browser sidebar "Saved
+    /// Searches"), off the main actor. Best-effort: [] on failure.
+    func savedSearches() async -> [SavedSearch] {
+        guard let backend else { return [] }
+        return (try? await runDetached { backend.savedSearches() }) ?? []
+    }
+
+    /// Saves (or overwrites) a named saved search, off the main actor, then
+    /// refreshes undo state. Throws so the UI can surface a save failure.
+    func saveSearch(name: String, query: String) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.saveSearch(name: name, query: query) }
+        refreshUndo()
     }
 
     /// Suspends or unsuspends the given cards off the main actor, then refreshes

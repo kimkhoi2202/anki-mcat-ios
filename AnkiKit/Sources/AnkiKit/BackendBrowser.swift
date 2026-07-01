@@ -92,6 +92,18 @@ public struct BrowserSort: Sendable, Equatable {
     public static let `default` = BrowserSort(column: "noteFld", reverse: false)
 }
 
+/// Whether the Card Browser lists one row per card or one row per note — Anki's
+/// browser "Cards"/"Notes" toggle. In cards mode a search resolves to card ids
+/// (`search_cards`) and each row is a card; in notes mode it resolves to note
+/// ids (`search_notes`) and each row is a note (the engine renders the note's
+/// first card plus note-level cells). The mode is stored in the collection as
+/// the `browserTableShowNotesMode` bool config, which `browser_row_for_id` reads
+/// to decide whether the id it's given is a card id or a note id.
+public enum BrowserMode: String, Sendable, Equatable {
+    case cards
+    case notes
+}
+
 /// Card Browser convenience methods. Service/method indices come from the
 /// generated `_backend_generated.py` reference; message shapes from the
 /// `search.proto` / `cards.proto` / `notes.proto` / `scheduler.proto` definitions.
@@ -181,6 +193,34 @@ public extension Backend {
         try browserCardIDs(query: query, sort: .default)
     }
 
+    /// Resolves a Card Browser search to its matching *row* ids in the given
+    /// sort order, for the requested mode — card ids in cards mode
+    /// (`search_cards`, 29/1) or note ids in notes mode (`search_notes`, 29/2).
+    /// Returns ids only, so it stays cheap even on very large collections; the
+    /// row DATA is fetched lazily a page at a time via `browserRows(ids:…)`.
+    /// This is the mode-aware generalization of `browserCardIDs`; an invalid
+    /// query throws a backend error, which the UI surfaces.
+    func browserRowIDs(query: String, sort: BrowserSort, mode: BrowserMode) throws -> [Int64] {
+        var req = Anki_Search_SearchRequest()
+        req.search = query
+        req.order = Backend.sortOrder(from: sort)
+        // Both SearchService RPCs take the same request/response shape and both
+        // honour the sort order; only the id space (cards vs notes) differs.
+        let method: UInt32 = mode == .notes ? 2 : 1
+        return try run(service: 29, method: method, req, returning: Anki_Search_SearchResponse.self).ids
+    }
+
+    /// SearchService config bridge: makes `browser_row_for_id` interpret the id
+    /// it's given as a note id (notes mode) or a card id (cards mode) by writing
+    /// the `browserTableShowNotesMode` bool — exactly the config desktop toggles
+    /// for its Cards/Notes switch. Only writes when the value actually changes,
+    /// so a cards-mode page fetch on a fresh collection stays a pure read (no
+    /// config churn / sync mtime bump).
+    func setBrowserNotesMode(_ enabled: Bool) throws {
+        if (try? getConfigBool(.browserTableShowNotesMode)) == enabled { return }
+        try setConfigBool(.browserTableShowNotesMode, value: enabled)
+    }
+
     /// SearchService.setActiveBrowserColumns (29, 8).
     ///
     /// Stores the active browser columns in the collection's in-memory state.
@@ -242,22 +282,36 @@ public extension Backend {
     }
 
     /// Builds the display rows for an explicit, already-resolved page of card ids
-    /// — the Card Browser's windowed page fetch — for the given active `columns`.
-    /// Sets the active columns once, then makes exactly ONE backend call per card
-    /// (`browser_row_for_id`), deriving each row's cells from the active columns
-    /// and its flag/suspended state from that row's `color` rather than a second
-    /// `getCard`. Only the cards currently on screen are passed in, so this stays
-    /// bounded regardless of how large the full result set is.
-    ///
-    /// A card that fails to build (e.g. concurrently deleted) is skipped rather
-    /// than failing the whole page, so the result may be shorter than `cardIDs`.
+    /// — the Card Browser's windowed page fetch (cards mode) — for the given
+    /// active `columns`. Thin wrapper over the mode-aware `browserRows`.
     func cardBrowserRows(
         cardIDs: [Int64], columns: [String] = Backend.defaultBrowserColumns
     ) throws -> [CardBrowserRow] {
+        try browserRows(ids: cardIDs, columns: columns, mode: .cards)
+    }
+
+    /// Builds the display rows for an explicit, already-resolved page of row ids
+    /// — the Card Browser's windowed page fetch, in either mode — for the given
+    /// active `columns`. Sets the notes-mode config to match `mode` and the
+    /// active columns once, then makes exactly ONE backend call per id
+    /// (`browser_row_for_id`), deriving each row's cells from the active columns
+    /// and its flag/suspended state from that row's `color`. The ids are card
+    /// ids in cards mode and note ids in notes mode; `browser_row_for_id` reads
+    /// the notes-mode config (set here first) to interpret them. Only the ids
+    /// currently on screen are passed in, so this stays bounded regardless of
+    /// how large the full result set is.
+    ///
+    /// A row that fails to build (e.g. concurrently deleted) is skipped rather
+    /// than failing the whole page, so the result may be shorter than `ids`.
+    func browserRows(
+        ids: [Int64], columns: [String] = Backend.defaultBrowserColumns,
+        mode: BrowserMode = .cards
+    ) throws -> [CardBrowserRow] {
+        try setBrowserNotesMode(mode == .notes)
         try setActiveBrowserColumns(columns)
         var rows: [CardBrowserRow] = []
-        rows.reserveCapacity(cardIDs.count)
-        for id in cardIDs {
+        rows.reserveCapacity(ids.count)
+        for id in ids {
             if let row = try? buildBrowserRow(cardID: id) {
                 rows.append(row)
             }
@@ -383,6 +437,26 @@ public extension Backend {
             if seen.insert(noteID).inserted { noteIDs.append(noteID) }
         }
         return noteIDs
+    }
+
+    /// Resolves note ids to every card id belonging to those notes, via a single
+    /// `nid:` search. Used by the browser's *notes-mode* bulk/per-row card
+    /// actions (suspend / flag / deck / bury), where the selection is note ids
+    /// but the underlying scheduler ops act on cards — mirroring desktop, whose
+    /// notes-mode bulk actions apply to all of the selected notes' cards. An
+    /// empty input returns []; the result order is the engine's card order.
+    func cardIDs(forNoteIDs noteIDs: [Int64]) throws -> [Int64] {
+        guard !noteIDs.isEmpty else { return [] }
+        // `nid:1,2,3` is Anki's multi-note search term, so this is one query.
+        let query = "nid:" + noteIDs.map(String.init).joined(separator: ",")
+        return try searchCards(query: query)
+    }
+
+    /// The first card of a note (its lowest-ordinal card), or nil if the note
+    /// has none. Used by notes-mode Preview / Card Info, which act on a concrete
+    /// card — `search_cards` returns a note's cards in ordinal order.
+    func firstCardID(ofNote noteID: Int64) throws -> Int64? {
+        try searchCards(query: "nid:\(noteID)").first
     }
 
     /// Adds the given space-separated tag(s) to the notes behind the cards,
