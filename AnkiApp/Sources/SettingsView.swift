@@ -249,42 +249,24 @@ struct SettingsView: View {
         .foregroundStyle(DS.textPrimary)
     }
 
-    // MARK: - Auto Advance (app-local)
+    // MARK: - Auto Advance (session enable; timing lives in Deck Options)
 
-    /// Anki's "Auto Advance". These settings live in the deck config in Anki (not
-    /// the global Reviewing preferences message), so they're stored on this device
-    /// via the store's `UserDefaults`-backed properties rather than the engine.
+    /// Anki's "Auto Advance". Only the session *enable* toggle is a client
+    /// setting; the per-side seconds and the question/answer actions come from the
+    /// current card's DECK CONFIG (edited in Deck Options ▸ Auto Advance), so the
+    /// reviewer reads them per card from the engine — not from this screen.
     private var autoAdvanceSection: some View {
         Section {
             Toggle("Auto advance", isOn: $store.autoAdvanceEnabled)
-            if store.autoAdvanceEnabled {
-                Stepper(value: $store.autoAdvanceSecondsQuestion, in: 0...120) {
-                    secondsLabel("Seconds to show question", store.autoAdvanceSecondsQuestion)
-                }
-                Stepper(value: $store.autoAdvanceSecondsAnswer, in: 0...120) {
-                    secondsLabel("Seconds to show answer", store.autoAdvanceSecondsAnswer)
-                }
-            }
         } header: {
             sectionHeader("Auto Advance")
         } footer: {
             sectionFooter(
-                "Reveals the answer after the question shows for its seconds, then answers “Good” after the answer shows for its seconds. Set a side to 0 to disable it. Stored on this device."
+                "When on, cards advance on their own using the timing and actions from each deck's options (Deck Options ▸ Auto Advance). Set a side's seconds to 0 there to disable it. The toggle is stored on this device."
             )
         }
         .font(DS.Typography.body)
         .foregroundStyle(DS.textPrimary)
-    }
-
-    /// A "Title …… Ns" row used by the auto-advance steppers.
-    private func secondsLabel(_ title: String, _ seconds: Int) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            Text("\(seconds)s")
-                .foregroundStyle(DS.textSecondary)
-                .monospacedDigit()
-        }
     }
 
     // MARK: - Controls / Gestures

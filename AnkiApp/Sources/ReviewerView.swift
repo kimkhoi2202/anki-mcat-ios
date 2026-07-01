@@ -377,6 +377,12 @@ struct ReviewerView: View {
     /// Drives the "Add note" editor sheet (the `addNote` gesture command).
     @State private var showAddNote = false
 
+    /// Owns the whiteboard's tool/color/width state and undo history. Persists
+    /// across cards so the pen selection is kept; its strokes are cleared per card
+    /// (see the `currentCardID` change handler). Only rendered when the store's
+    /// `whiteboardVisible` is on.
+    @StateObject private var whiteboard = WhiteboardController()
+
     /// Whether any menu, sheet, or prompt is presented over the reviewer. Drives
     /// pausing auto-advance so a timer never reveals or grades behind a dialog.
     private var anyOverlayPresented: Bool {
@@ -416,6 +422,14 @@ struct ReviewerView: View {
         .onChange(of: anyOverlayPresented) { presented in
             store.setAutoAdvancePaused(presented)
         }
+        // Fresh whiteboard canvas per card (default behavior: strokes don't carry
+        // over when advancing to the next card).
+        .onChange(of: store.currentCardID) { _ in
+            whiteboard.resetForNewCard()
+        }
+        // Animate the transient auto-advance reminder in/out (respecting Reduce
+        // Motion).
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: store.autoAdvanceReminder)
         .toolbar { reviewerToolbar }
         // The card-action menu is a self-presented overlay (rather than a
         // SwiftUI `Menu`) so it can show flag swatches + card/note variants like
@@ -512,6 +526,15 @@ struct ReviewerView: View {
                store.currentNoteID != nil {
                 dispatch(store.gestureConfig.command(for: .longPress))
             }
+            // Whiteboard demo: show the overlay and seed sample strokes (once the
+            // canvas has mounted and the card's per-card reset has run) so the
+            // reviewer screenshot shows the whiteboard rendering ink.
+            if ProcessInfo.processInfo.arguments.contains("-demoWhiteboard") {
+                store.whiteboardVisible = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    whiteboard.seedDemoStrokes()
+                }
+            }
             #endif
         }
     }
@@ -533,9 +556,47 @@ struct ReviewerView: View {
             reloadToken: store.replayToken
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Whiteboard drawing surface over the card, mounted only while enabled so
+        // the card's own gestures/scrolling are untouched when it's off. When on,
+        // it captures drawing touches; the answer/grade buttons and toolbar (which
+        // sit outside the card) stay usable.
+        .overlay {
+            if store.whiteboardVisible {
+                WhiteboardCanvas(controller: whiteboard)
+            }
+        }
         // Flag/auto-advance/marked indicators + remaining counts, overlaid on the
         // card like AnkiDroid's on-card flag ribbon, marked star, and count.
-        .overlay(alignment: .top) { topBar }
+        // Purely informational, so it never intercepts drawing/tap touches.
+        .overlay(alignment: .top) { topBar.allowsHitTesting(false) }
+        // A transient "time elapsed" notice for the deck's "show reminder"
+        // auto-advance action (non-grading); auto-dismisses.
+        .overlay(alignment: .top) { autoAdvanceReminderToast }
+        // The whiteboard's compact toolbar floats at the bottom of the card
+        // (hide the whiteboard with the reviewer's on-screen toggle).
+        .overlay(alignment: .bottom) {
+            if store.whiteboardVisible {
+                WhiteboardToolbar(controller: whiteboard)
+                    .padding(.bottom, DS.Spacing.m)
+            }
+        }
+    }
+
+    /// The transient auto-advance reminder toast (the deck's "show reminder"
+    /// action), sitting just below the on-card status bar.
+    @ViewBuilder
+    private var autoAdvanceReminderToast: some View {
+        if let message = store.autoAdvanceReminder {
+            Text(message)
+                .font(DS.Typography.caption.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, DS.Spacing.m)
+                .padding(.vertical, DS.Spacing.s)
+                .background(Capsule(style: .continuous).fill(Color.black.opacity(0.82)))
+                .padding(.top, DS.Spacing.xl + DS.Spacing.m)
+                .transition(.opacity)
+                .accessibilityLabel(message)
+        }
     }
 
     /// Top-of-card status bar: the flag and an auto-advance indicator (leading),
@@ -685,6 +746,23 @@ struct ReviewerView: View {
 
     @ToolbarContentBuilder
     private var reviewerToolbar: some ToolbarContent {
+        // On-screen whiteboard toggle, so the whiteboard can be shown/hidden
+        // without binding a gesture (the `toggleWhiteboard` gesture command drives
+        // the same store hook). Tinted when active.
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                store.toggleWhiteboard()
+            } label: {
+                Label(
+                    "Whiteboard",
+                    systemImage: store.whiteboardVisible ? "scribble.variable" : "scribble"
+                )
+            }
+            .tint(store.whiteboardVisible ? DS.accent : DS.textPrimary)
+            .disabled(store.reviewDone)
+            .accessibilityLabel(store.whiteboardVisible ? "Hide whiteboard" : "Show whiteboard")
+            .accessibilityAddTraits(store.whiteboardVisible ? [.isButton, .isSelected] : .isButton)
+        }
         ToolbarItem(placement: .topBarTrailing) {
             Button {
                 showCardMenu = true
@@ -785,8 +863,8 @@ struct ReviewerView: View {
         case .cardInfo:
             infoCardID = store.currentCardID
         case .toggleWhiteboard:
-            // Whiteboard drawing UI lands in a later task; flip the store hook so
-            // the binding is real and can be filled in then.
+            // Show/hide the whiteboard drawing overlay (same hook as the on-screen
+            // toggle button).
             store.toggleWhiteboard()
         case .exitReviewer:
             dismiss()

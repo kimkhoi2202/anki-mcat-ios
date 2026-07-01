@@ -2095,4 +2095,126 @@ final class AnkiKitTests: XCTestCase {
             [.answerAgain, .answerHard, .answerGood, .answerEasy]
         )
     }
+
+    // MARK: - Auto advance (deck-config sourced)
+
+    /// The question-side deck-config action maps to the reviewer's intent: reveal
+    /// the answer, or (non-grading) show a reminder. A question timer never grades.
+    func testAutoAdvanceMapsQuestionActions() {
+        XCTAssertEqual(AutoAdvanceAction.forQuestion(.showAnswer), .showAnswer)
+        XCTAssertEqual(AutoAdvanceAction.forQuestion(.showReminder), .showReminder)
+    }
+
+    /// The answer-side deck-config action maps to bury / a specific rating / a
+    /// reminder. Guards the tricky detail that the proto enum's raw order
+    /// (again=1, good=2, hard=3) differs from the rating order (again=1, hard=2,
+    /// good=3), so the mapping must be by case — `answerHard` → `.hard`, not the
+    /// rating whose raw value is 3.
+    func testAutoAdvanceMapsAnswerActions() {
+        XCTAssertEqual(AutoAdvanceAction.forAnswer(.buryCard), .bury)
+        XCTAssertEqual(AutoAdvanceAction.forAnswer(.answerAgain), .answer(.again))
+        XCTAssertEqual(AutoAdvanceAction.forAnswer(.answerGood), .answer(.good))
+        XCTAssertEqual(AutoAdvanceAction.forAnswer(.answerHard), .answer(.hard))
+        XCTAssertEqual(AutoAdvanceAction.forAnswer(.showReminder), .showReminder)
+    }
+
+    /// `plan(showingAnswer:)` picks the shown side's seconds + action, and returns
+    /// nil when that side's timer is 0 (disabled) — matching Anki's per-side
+    /// enable-by-nonzero-seconds behavior.
+    func testAutoAdvancePlanPerSideAndZeroDisables() {
+        let questionOnly = AutoAdvanceConfig(
+            secondsToShowQuestion: 5, secondsToShowAnswer: 0,
+            questionAction: .showAnswer, answerAction: .buryCard
+        )
+        XCTAssertEqual(questionOnly.plan(showingAnswer: false),
+                       AutoAdvancePlan(seconds: 5, action: .showAnswer))
+        XCTAssertNil(questionOnly.plan(showingAnswer: true),
+                     "0 seconds disables the answer side")
+
+        let answerOnly = AutoAdvanceConfig(
+            secondsToShowQuestion: 0, secondsToShowAnswer: 9,
+            questionAction: .showReminder, answerAction: .answerHard
+        )
+        XCTAssertNil(answerOnly.plan(showingAnswer: false),
+                     "0 seconds disables the question side")
+        XCTAssertEqual(answerOnly.plan(showingAnswer: true),
+                       AutoAdvancePlan(seconds: 9, action: .answer(.hard)))
+    }
+
+    /// `AutoAdvanceConfig(config:)` reads the four fields off a deck config's
+    /// `Config` message.
+    func testAutoAdvanceConfigInitFromConfigMessage() {
+        var config = Anki_DeckConfig_DeckConfig.Config()
+        config.secondsToShowQuestion = 4
+        config.secondsToShowAnswer = 7
+        config.questionAction = .showReminder
+        config.answerAction = .answerAgain
+        let settings = AutoAdvanceConfig(config: config)
+        XCTAssertEqual(settings.secondsToShowQuestion, 4)
+        XCTAssertEqual(settings.secondsToShowAnswer, 7)
+        XCTAssertEqual(settings.questionAction, .showReminder)
+        XCTAssertEqual(settings.answerAction, .answerAgain)
+    }
+
+    /// A card's governing deck is its home deck when it's in a filtered deck
+    /// (`originalDeckID` set), else its own deck — Anki's `current_deck_id()`.
+    func testAutoAdvanceEffectiveDeckIDPrefersOriginal() {
+        XCTAssertEqual(AutoAdvanceConfig.effectiveDeckID(deckID: 42, originalDeckID: 0), 42)
+        XCTAssertEqual(AutoAdvanceConfig.effectiveDeckID(deckID: 99, originalDeckID: 42), 42)
+    }
+
+    /// End-to-end: a fresh deck's preset reports auto-advance disabled with Anki's
+    /// default actions; editing the preset's auto-advance fields through the
+    /// deck-options RPC is then read back by `autoAdvanceConfig(forDeckID:)` — the
+    /// path the reviewer uses to source per-card timing/actions from the engine.
+    func testAutoAdvanceConfigReadsEditedDeckConfig() throws {
+        let backend = try freshCollection()
+        let deckID = try backend.createDeck(name: "AutoAdvance")
+
+        let defaults = try backend.autoAdvanceConfig(forDeckID: deckID)
+        XCTAssertEqual(defaults.secondsToShowQuestion, 0)
+        XCTAssertEqual(defaults.secondsToShowAnswer, 0)
+        XCTAssertEqual(defaults.questionAction, .showAnswer)
+        XCTAssertEqual(defaults.answerAction, .buryCard)
+
+        // Edit the deck's assigned preset via the same RPC the deck-options screen
+        // uses (update_deck_configs, 11/7), mirroring `setDeckLimits`.
+        let forUpdate = try backend.deckConfigsForUpdate(deckID: deckID)
+        let configID = forUpdate.currentDeck.configID
+        var selected = try XCTUnwrap(
+            forUpdate.allConfig.first { $0.config.id == configID }?.config,
+            "the deck's assigned preset should be among the configs"
+        )
+        selected.config.secondsToShowQuestion = 6
+        selected.config.secondsToShowAnswer = 12
+        selected.config.questionAction = .showReminder
+        selected.config.answerAction = .answerGood
+
+        var req = Anki_DeckConfig_UpdateDeckConfigsRequest()
+        req.targetDeckID = deckID
+        req.configs = [selected]
+        req.mode = .normal
+        req.cardStateCustomizer = forUpdate.cardStateCustomizer
+        req.limits = forUpdate.currentDeck.limits
+        req.newCardsIgnoreReviewLimit = forUpdate.newCardsIgnoreReviewLimit
+        req.fsrs = forUpdate.fsrs
+        req.applyAllParentLimits = forUpdate.applyAllParentLimits
+        req.fsrsReschedule = false
+        req.fsrsHealthCheck = forUpdate.fsrsHealthCheck
+        _ = try backend.run(
+            service: 11, method: 7, req, returning: Anki_Collection_OpChangesWithId.self
+        )
+
+        let edited = try backend.autoAdvanceConfig(forDeckID: deckID)
+        XCTAssertEqual(edited.secondsToShowQuestion, 6, "reads the edited question seconds")
+        XCTAssertEqual(edited.secondsToShowAnswer, 12, "reads the edited answer seconds")
+        XCTAssertEqual(edited.questionAction, .showReminder)
+        XCTAssertEqual(edited.answerAction, .answerGood)
+
+        // …and the resolved per-side plans reflect the edited timing/actions.
+        XCTAssertEqual(edited.plan(showingAnswer: false),
+                       AutoAdvancePlan(seconds: 6, action: .showReminder))
+        XCTAssertEqual(edited.plan(showingAnswer: true),
+                       AutoAdvancePlan(seconds: 12, action: .answer(.good)))
+    }
 }

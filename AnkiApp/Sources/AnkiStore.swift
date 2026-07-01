@@ -161,45 +161,38 @@ final class AnkiStore: ObservableObject {
     private static let autoSyncKey = "autoSyncEnabled"
     private static let fetchMediaKey = "fetchMediaOnSync"
 
-    // MARK: - Auto-advance state (app-local)
+    // MARK: - Auto-advance state (app-local enable + engine-sourced timing)
     //
-    // Anki's "Auto Advance": after the question shows for N seconds auto-reveal,
-    // and after the answer shows for M seconds auto-answer "Good". In Anki these
-    // settings (`seconds_to_show_question`/`seconds_to_show_answer`) live in the
-    // *deck config*, not the global `Reviewing` preferences message — which has no
-    // auto-advance fields — so they're persisted app-locally in `UserDefaults`
-    // (via the keys below) rather than through the engine prefs path. Default off,
-    // so review never auto-grades unless the user explicitly enables it.
+    // Anki's "Auto Advance": after the question shows for N seconds do the deck's
+    // question action (default: reveal the answer), and after the answer shows for
+    // M seconds do the deck's answer action (default: bury the card). The *timing*
+    // (`seconds_to_show_question`/`seconds_to_show_answer`) and the *actions*
+    // (`questionAction`/`answerAction`) live in the DECK CONFIG, not the global
+    // `Reviewing` preferences — so they're read per card from the engine (see
+    // `autoAdvanceConfigForCurrentCard`), edited by the user in Deck Options.
+    //
+    // Only the *session enable* toggle is client behaviour, so it (alone) is
+    // persisted app-locally. Default off, so review never auto-advances unless the
+    // user explicitly enables it.
 
     /// Whether auto-advance is enabled (the reviewer/Settings toggle). Persisted;
-    /// toggling it cancels or (re)schedules the timer for the current side.
+    /// toggling it cancels or (re)schedules the timer for the current side. The
+    /// per-side seconds and actions come from the current card's deck config, not
+    /// from here.
     @Published var autoAdvanceEnabled = false {
         didSet {
             UserDefaults.standard.set(autoAdvanceEnabled, forKey: Self.autoAdvanceEnabledKey)
             if autoAdvanceEnabled { scheduleAutoAdvanceForCurrentSide() } else { cancelAutoAdvance() }
         }
     }
-    /// Seconds to show the question before auto-revealing (0 disables the
-    /// question-side timer, as in AnkiDroid). Persisted; the Settings stepper
-    /// drives it. (Uses the explicit type name in the initializer — `Self` isn't
-    /// allowed in a stored-property default.)
-    @Published var autoAdvanceSecondsQuestion = AnkiStore.defaultAutoAdvanceSeconds {
-        didSet { UserDefaults.standard.set(autoAdvanceSecondsQuestion, forKey: Self.autoAdvanceQuestionKey) }
-    }
-    /// Seconds to show the answer before auto-answering "Good" (0 disables the
-    /// answer-side timer). Persisted; the Settings stepper drives it.
-    @Published var autoAdvanceSecondsAnswer = AnkiStore.defaultAutoAdvanceSeconds {
-        didSet { UserDefaults.standard.set(autoAdvanceSecondsAnswer, forKey: Self.autoAdvanceAnswerKey) }
-    }
+
+    /// A brief, non-grading notice shown when a side's timer elapses and the deck
+    /// config's action for that side is "show reminder" (Anki shows a tooltip).
+    /// The reviewer renders it as a transient toast; it clears itself after a
+    /// short delay (and on card change / leaving the reviewer).
+    @Published var autoAdvanceReminder: String?
 
     private static let autoAdvanceEnabledKey = "autoAdvanceEnabled"
-    private static let autoAdvanceQuestionKey = "autoAdvanceSecondsQuestion"
-    private static let autoAdvanceAnswerKey = "autoAdvanceSecondsAnswer"
-    /// Default seconds for each side when the user first enables auto-advance.
-    /// Anki's *per-deck* default is 0 (disabled); since this is a single global
-    /// app toggle, a non-zero default makes turning it on immediately useful
-    /// (still adjustable, and 0 disables a side).
-    static let defaultAutoAdvanceSeconds = 10
 
     // MARK: - Gesture configuration (app-local)
     //
@@ -241,29 +234,51 @@ final class AnkiStore: ObservableObject {
         gestureConfig = GestureConfig.from(jsonData: data)
     }
 
-    // MARK: - Whiteboard (hook for a later task)
+    // MARK: - Whiteboard (drawing overlay in the reviewer)
 
-    /// Whiteboard visibility. The whiteboard *drawing* UI lands in a later task;
-    /// the `toggleWhiteboard` gesture command flips this now so the binding is
-    /// real and the reviewer can later render an overlay from it. No engine call.
-    @Published var whiteboardVisible = false
+    /// Whether the reviewer's whiteboard drawing overlay is shown. When on, the
+    /// PencilKit canvas captures drawing over the card (the on-screen reviewer
+    /// controls stay usable); when off, the card behaves normally. Persisted so
+    /// the toggle is remembered across reviewer sessions, matching AnkiDroid.
+    @Published var whiteboardVisible = false {
+        didSet {
+            guard whiteboardVisible != oldValue else { return }
+            UserDefaults.standard.set(whiteboardVisible, forKey: Self.whiteboardVisibleKey)
+        }
+    }
+    private static let whiteboardVisibleKey = "whiteboardVisible"
 
-    /// Toggles the whiteboard (see `whiteboardVisible`) — the reviewer hook for
-    /// the `toggleWhiteboard` gesture command. A near no-op until the whiteboard
-    /// UI exists.
+    /// Toggles the whiteboard overlay — the reviewer hook for the
+    /// `toggleWhiteboard` gesture command and the on-screen toggle button.
     func toggleWhiteboard() {
         whiteboardVisible.toggle()
     }
 
-    /// Pending auto-advance timer (reveal or auto-"Good"); cancelled on any manual
-    /// interaction, side/card change, overlay, or leaving the reviewer.
+    /// Loads the persisted whiteboard visibility at boot (default off).
+    private func loadWhiteboardPrefs() {
+        whiteboardVisible = UserDefaults.standard.bool(forKey: Self.whiteboardVisibleKey)
+    }
+
+    /// Pending auto-advance timer (the deck's question/answer action); cancelled
+    /// on any manual interaction, side/card change, overlay, or leaving the
+    /// reviewer.
     private var autoAdvanceTask: Task<Void, Never>?
+    /// Auto-dismiss timer for `autoAdvanceReminder` (the "time elapsed" notice).
+    private var autoAdvanceReminderTask: Task<Void, Never>?
     /// True only while the reviewer screen is on top, so a timer never fires after
     /// the user has navigated away (set by the reviewer's appear/disappear).
     private var reviewerActive = false
     /// True while a menu/sheet/prompt is over the reviewer, so auto-advance pauses
     /// instead of grading behind a dialog (driven by the reviewer view).
     private var autoAdvancePaused = false
+    /// Auto-advance settings resolved from the current card's deck config; `nil`
+    /// until a card is presented or when the config can't be read. Recomputed per
+    /// card so timing/actions always reflect the deck the card belongs to.
+    private var currentAutoAdvanceConfig: AutoAdvanceConfig?
+    /// Per-deck cache of resolved auto-advance settings, so a session doesn't
+    /// refetch the deck config for every card. Cleared when a reviewer session
+    /// ends so re-entering picks up any Deck Options edits made in between.
+    private var autoAdvanceConfigByDeck: [Int64: AutoAdvanceConfig] = [:]
 
     /// Auth + media USN captured when a full-sync conflict is raised, reused once
     /// the user picks a resolution.
@@ -372,6 +387,7 @@ final class AnkiStore: ObservableObject {
         loadLoginState()
         loadPreferences()
         loadAutoAdvancePrefs()
+        loadWhiteboardPrefs()
         loadGesturePrefs()
         loadSyncPrefs()
         status = "Engine OK"
@@ -387,15 +403,11 @@ final class AnkiStore: ObservableObject {
         fetchMediaOnSync = (defaults.object(forKey: Self.fetchMediaKey) as? Bool) ?? true
     }
 
-    /// Loads the persisted auto-advance settings (enabled + per-side seconds) from
-    /// `UserDefaults`. Read once at boot; the published setters keep them in sync.
+    /// Loads the persisted auto-advance *enable* toggle from `UserDefaults` (the
+    /// only client-side auto-advance setting; timing/actions come from the deck
+    /// config). Read once at boot; the published setter keeps it in sync.
     private func loadAutoAdvancePrefs() {
-        let defaults = UserDefaults.standard
-        autoAdvanceEnabled = defaults.bool(forKey: Self.autoAdvanceEnabledKey)
-        autoAdvanceSecondsQuestion = defaults.object(forKey: Self.autoAdvanceQuestionKey) as? Int
-            ?? Self.defaultAutoAdvanceSeconds
-        autoAdvanceSecondsAnswer = defaults.object(forKey: Self.autoAdvanceAnswerKey) as? Int
-            ?? Self.defaultAutoAdvanceSeconds
+        autoAdvanceEnabled = UserDefaults.standard.bool(forKey: Self.autoAdvanceEnabledKey)
     }
 
     /// Opens (or reopens) the collection at the app's standard Documents paths.
@@ -1309,18 +1321,24 @@ final class AnkiStore: ObservableObject {
         if currentQuestion.isEmpty && !reviewDone {
             loadNext()
         } else {
-            // Returning to an already-loaded card (e.g. back from a push): resume
+            // Returning to an already-loaded card (e.g. back from a push): re-resolve
+            // the deck config (Deck Options may have changed while away) and resume
             // auto-advance for whichever side is currently shown.
+            currentAutoAdvanceConfig = nil
             scheduleAutoAdvanceForCurrentSide()
         }
     }
 
     /// The reviewer left the screen: stop auto-advance so a pending timer can't
     /// reveal or grade a card after the user has navigated away. Audio is stopped
-    /// separately by `stopReviewAudio()`.
+    /// separately by `stopReviewAudio()`. The per-deck config cache is dropped so
+    /// a later session re-reads settings edited in Deck Options in the meantime.
     func endAutoAdvanceSession() {
         reviewerActive = false
         cancelAutoAdvance()
+        clearAutoAdvanceReminder()
+        autoAdvanceConfigByDeck.removeAll()
+        currentAutoAdvanceConfig = nil
     }
 
     func loadNext() {
@@ -1376,6 +1394,10 @@ final class AnkiStore: ObservableObject {
         currentFlag = Int(queued.card.flags)
         isMarked = (try? backend.isNoteMarked(noteID: queued.card.noteID)) ?? false
         cardShownAt = Date()
+        // A new card: drop the previous card's resolved auto-advance settings (the
+        // next schedule re-resolves from this card's deck) and any stale reminder.
+        currentAutoAdvanceConfig = nil
+        clearAutoAdvanceReminder()
         refreshUndo()
         // Autoplay the question side's audio, as Anki does on showing a card.
         cardAudioPlayer.play(currentQuestionAudio, mediaFolder: mediaFolderURL)
@@ -1399,8 +1421,11 @@ final class AnkiStore: ObservableObject {
         currentQuestionAudio = []
         currentAnswerAudio = []
         cardAudioPlayer.stop()
-        // No card to advance from, so stop any pending auto-advance timer.
+        // No card to advance from, so stop any pending auto-advance timer and
+        // clear its per-card settings / reminder.
         cancelAutoAdvance()
+        currentAutoAdvanceConfig = nil
+        clearAutoAdvanceReminder()
         typeAnswer = nil
         typedAnswer = ""
         refreshUndo()
@@ -1712,33 +1737,95 @@ final class AnkiStore: ObservableObject {
 
     /// (Re)schedules the auto-advance action for the side currently shown, if
     /// auto-advance is on, the reviewer is active and not paused, a card is shown,
-    /// and that side's timer is non-zero. After the question shows for
-    /// `autoAdvanceSecondsQuestion` it auto-reveals; after the answer shows for
-    /// `autoAdvanceSecondsAnswer` it auto-answers "Good" — an undoable review, and
-    /// only ever when the user has explicitly enabled auto-advance, so a card is
-    /// never silently graded otherwise. Mirrors Anki's `AutoAdvance.onShowQuestion`
-    /// / `onShowAnswer` (question action = show answer; answer action = answer Good).
+    /// and that side's timer (from the deck config) is non-zero.
+    ///
+    /// The timing and actions come from the CURRENT CARD's deck config (Anki's
+    /// `AutoAdvance._load_conf` via `config_dict_for_deck_id`): after the question
+    /// shows for `secondsToShowQuestion` it performs `questionAction` (default:
+    /// reveal); after the answer shows for `secondsToShowAnswer` it performs
+    /// `answerAction` (default: bury). Grading only ever happens on the answer
+    /// side, and only when the user has explicitly enabled auto-advance, so a card
+    /// is never silently graded otherwise.
     func scheduleAutoAdvanceForCurrentSide() {
         cancelAutoAdvance()
         guard autoAdvanceEnabled, reviewerActive, !autoAdvancePaused,
               !reviewDone, currentCard != nil else { return }
+        guard let plan = autoAdvanceConfigForCurrentCard()?.plan(showingAnswer: showingAnswer)
+        else { return }
         let onAnswer = showingAnswer
-        let seconds = onAnswer ? autoAdvanceSecondsAnswer : autoAdvanceSecondsQuestion
-        guard seconds > 0 else { return }
+        let nanos = UInt64(max(0, plan.seconds) * 1_000_000_000)
         autoAdvanceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
             guard let self, !Task.isCancelled else { return }
             // The side/card must be unchanged since scheduling, and auto-advance
             // still active — otherwise a state change raced the timer.
             guard self.autoAdvanceEnabled, self.reviewerActive, !self.autoAdvancePaused,
                   !self.reviewDone, self.showingAnswer == onAnswer, self.currentCard != nil
             else { return }
-            if onAnswer {
-                self.rate(.good)
-            } else {
-                self.reveal()
-            }
+            self.performAutoAdvance(plan.action, onAnswer: onAnswer)
         }
+    }
+
+    /// Performs a resolved auto-advance action for a side. Grading and burying can
+    /// only run from the answer side (`onAnswer`), preserving the safety rule that
+    /// a question-side timer never grades — the question action is only ever
+    /// reveal or a reminder, but the guard is kept as defence in depth.
+    private func performAutoAdvance(_ action: AutoAdvanceAction, onAnswer: Bool) {
+        switch action {
+        case .showAnswer:
+            reveal()
+        case .bury:
+            guard onAnswer else { return }
+            buryCard()
+        case .answer(let rating):
+            guard onAnswer, showingAnswer else { return }
+            rate(rating)
+        case .showReminder:
+            showAutoAdvanceReminder(onAnswer
+                ? "Answer time elapsed"
+                : "Question time elapsed")
+        }
+    }
+
+    /// The current card's auto-advance settings, resolved from the deck the card
+    /// belongs to (its home deck when it's in a filtered deck). Memoised for the
+    /// current card and cached per deck, so a session doesn't refetch the deck
+    /// config for every card. Returns `nil` if there's no card or the config
+    /// can't be read (in which case no timer is scheduled).
+    private func autoAdvanceConfigForCurrentCard() -> AutoAdvanceConfig? {
+        if let config = currentAutoAdvanceConfig { return config }
+        guard let backend, let card = currentCard?.card else { return nil }
+        let deckID = AutoAdvanceConfig.effectiveDeckID(
+            deckID: card.deckID, originalDeckID: card.originalDeckID
+        )
+        if let cached = autoAdvanceConfigByDeck[deckID] {
+            currentAutoAdvanceConfig = cached
+            return cached
+        }
+        guard let config = try? backend.autoAdvanceConfig(forDeckID: deckID) else { return nil }
+        autoAdvanceConfigByDeck[deckID] = config
+        currentAutoAdvanceConfig = config
+        return config
+    }
+
+    /// Shows a transient "time elapsed" reminder (the deck's "show reminder"
+    /// auto-advance action), auto-clearing after a short delay. Non-grading: the
+    /// card is left as-is for the user to act on, matching Anki's tooltip.
+    private func showAutoAdvanceReminder(_ message: String) {
+        autoAdvanceReminder = message
+        autoAdvanceReminderTask?.cancel()
+        autoAdvanceReminderTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.autoAdvanceReminder = nil
+        }
+    }
+
+    /// Clears any shown auto-advance reminder and its dismiss timer.
+    private func clearAutoAdvanceReminder() {
+        autoAdvanceReminderTask?.cancel()
+        autoAdvanceReminderTask = nil
+        if autoAdvanceReminder != nil { autoAdvanceReminder = nil }
     }
 
     /// Shared tail for bury/suspend/delete: the current card has left the queue,
