@@ -1003,6 +1003,126 @@ final class AnkiKitTests: XCTestCase {
         }
     }
 
+    // MARK: - .apkg import options (mapping + builders)
+
+    /// The UI-neutral `ApkgImportUpdateCondition` maps 1:1 to the generated proto
+    /// enum in both directions (the import options sheet binds to the former and
+    /// the request carries the latter), and the unrecognised proto case falls
+    /// back to the engine default `.ifNewer` so a preset from an unknown future
+    /// engine can't produce an invalid selection.
+    func testApkgImportUpdateConditionMapsToProto() {
+        XCTAssertEqual(ApkgImportUpdateCondition.ifNewer.proto, .ifNewer)
+        XCTAssertEqual(ApkgImportUpdateCondition.always.proto, .always)
+        XCTAssertEqual(ApkgImportUpdateCondition.never.proto, .never)
+
+        // Round-trip proto → UI enum for every recognised case.
+        for condition in ApkgImportUpdateCondition.allCases {
+            XCTAssertEqual(ApkgImportUpdateCondition(condition.proto), condition)
+        }
+
+        // The unrecognised proto case maps to the engine default.
+        XCTAssertEqual(ApkgImportUpdateCondition(.UNRECOGNIZED(99)), .ifNewer)
+
+        // The three menu choices are offered in Anki's order.
+        XCTAssertEqual(ApkgImportUpdateCondition.allCases, [.ifNewer, .always, .never])
+    }
+
+    /// `Backend.importAnkiPackageOptions` turns the sheet's individual selections
+    /// into an `ImportAnkiPackageOptions` proto with every field set as chosen —
+    /// including the non-default values (so a wrong default couldn't pass).
+    func testImportAnkiPackageOptionsBuilderSetsEveryField() {
+        let options = Backend.importAnkiPackageOptions(
+            updateNotes: .always,
+            updateNotetypes: .never,
+            mergeNotetypes: true,
+            withScheduling: true,
+            withDeckConfigs: true
+        )
+        XCTAssertEqual(options.updateNotes, .always)
+        XCTAssertEqual(options.updateNotetypes, .never)
+        XCTAssertTrue(options.mergeNotetypes)
+        XCTAssertTrue(options.withScheduling)
+        XCTAssertTrue(options.withDeckConfigs)
+
+        // The defaults path (a plain shared-deck import) keeps the engine defaults.
+        let defaults = Backend.importAnkiPackageOptions(
+            updateNotes: .ifNewer, updateNotetypes: .ifNewer,
+            mergeNotetypes: false, withScheduling: false, withDeckConfigs: false
+        )
+        XCTAssertEqual(defaults.updateNotes, .ifNewer)
+        XCTAssertEqual(defaults.updateNotetypes, .ifNewer)
+        XCTAssertFalse(defaults.mergeNotetypes)
+        XCTAssertFalse(defaults.withScheduling)
+        XCTAssertFalse(defaults.withDeckConfigs)
+    }
+
+    /// `Backend.importAnkiPackageRequest` sets the package path and attaches the
+    /// options only when provided (an unset options message lets the backend use
+    /// its own defaults, matching `importAnkiPackage(path:)` with `nil` options).
+    func testImportAnkiPackageRequestBuilderAttachesOptions() {
+        let options = Backend.importAnkiPackageOptions(
+            updateNotes: .never, updateNotetypes: .always,
+            mergeNotetypes: true, withScheduling: true, withDeckConfigs: false
+        )
+        let withOptions = Backend.importAnkiPackageRequest(path: "/tmp/deck.apkg", options: options)
+        XCTAssertEqual(withOptions.packagePath, "/tmp/deck.apkg")
+        XCTAssertTrue(withOptions.hasOptions, "explicit options should be attached")
+        XCTAssertEqual(withOptions.options.updateNotes, .never)
+        XCTAssertEqual(withOptions.options.updateNotetypes, .always)
+        XCTAssertTrue(withOptions.options.mergeNotetypes)
+        XCTAssertTrue(withOptions.options.withScheduling)
+        XCTAssertFalse(withOptions.options.withDeckConfigs)
+
+        let withoutOptions = Backend.importAnkiPackageRequest(path: "/tmp/deck.apkg")
+        XCTAssertEqual(withoutOptions.packagePath, "/tmp/deck.apkg")
+        XCTAssertFalse(withoutOptions.hasOptions, "nil options should leave the message unset")
+    }
+
+    /// End-to-end: export a deck to a `.apkg`, then re-import it into a fresh
+    /// collection using an explicit `ImportAnkiPackageOptions` (built via the same
+    /// builder the options sheet uses). Proves the options path drives a real
+    /// import — the notes survive and their field text is searchable.
+    func testImportAnkiPackageWithOptionsRoundTrip() throws {
+        let source = try freshCollection()
+        let notetypeID = try basicNotetypeID(source)
+        _ = try source.addNote(notetypeID: notetypeID, fields: ["OptionsQ", "OptionsA"], deckID: 1)
+        _ = try source.addNote(notetypeID: notetypeID, fields: ["OptionsQ2", "OptionsA2"], deckID: 1)
+
+        let apkg = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).apkg")
+        defer { try? FileManager.default.removeItem(at: apkg) }
+        _ = try source.exportAnkiPackage(
+            outPath: apkg.path,
+            limit: Backend.wholeCollectionExportLimit(),
+            withScheduling: true, withMedia: true, legacy: false
+        )
+
+        let dest = try freshCollection()
+        let options = Backend.importAnkiPackageOptions(
+            updateNotes: .always,
+            updateNotetypes: .ifNewer,
+            mergeNotetypes: true,
+            withScheduling: true,
+            withDeckConfigs: true
+        )
+        let result = try dest.importAnkiPackage(path: apkg.path, options: options)
+        XCTAssertEqual(result.found, 2, "the import log should report two notes found")
+        XCTAssertEqual(try dest.searchCards(query: "").count, 2, "both notes should be imported with options")
+        XCTAssertEqual(try dest.searchCards(query: "OptionsQ2").count, 1,
+                       "the imported note's field text should be searchable")
+    }
+
+    /// The saved import presets read from a fresh collection are the engine
+    /// defaults the options sheet seeds itself from (update conditions default to
+    /// *If newer*), proving `getImportAnkiPackagePresets` (39, 3) is wired and
+    /// returns a usable options proto.
+    func testImportAnkiPackagePresetsReturnsDefaults() throws {
+        let backend = try freshCollection()
+        let presets = try backend.importAnkiPackagePresets()
+        XCTAssertEqual(presets.updateNotes, .ifNewer)
+        XCTAssertEqual(presets.updateNotetypes, .ifNewer)
+    }
+
     /// Round-trips the whole collection through a `.colpkg`: export it (service
     /// 39, method 1) — which leaves the collection closed, so we reopen — then
     /// import it into a second collection (service 39, method 0), which requires

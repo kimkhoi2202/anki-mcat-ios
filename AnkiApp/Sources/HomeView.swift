@@ -427,10 +427,12 @@ struct HomeView: View {
                 goImportExport = true
             }
             // Open Import & Export and present the CSV import wizard / text export
-            // options (used for the CSV-mapping and text-export screenshots).
-            // ImportExportView reads the same arguments to drive the sheets.
+            // options / .apkg import options (used for the CSV-mapping,
+            // text-export, and apkg-options screenshots). ImportExportView reads
+            // the same arguments to drive the sheets.
             if ProcessInfo.processInfo.arguments.contains("-startInCSVImport")
-                || ProcessInfo.processInfo.arguments.contains("-startInTextExport") {
+                || ProcessInfo.processInfo.arguments.contains("-startInTextExport")
+                || ProcessInfo.processInfo.arguments.contains("-startInApkgImportOptions") {
                 goImportExport = true
             }
             if ProcessInfo.processInfo.arguments.contains("-startInAddNote")

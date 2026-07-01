@@ -1,6 +1,42 @@
 import Foundation
 import SwiftProtobuf
 
+/// When importing a `.apkg`, how to treat notes / note types that already exist
+/// in the collection — a UI-neutral mirror of the engine's
+/// `ImportAnkiPackageUpdateCondition` (Anki's "Update" dropdown in the import
+/// options: *If newer* / *Always* / *Never*). Kept in `AnkiKit` (rather than the
+/// app) so the proto mapping is unit-testable without the UI layer.
+public enum ApkgImportUpdateCondition: Sendable, CaseIterable, Hashable {
+    /// Overwrite the existing note/note type only when the imported one is newer
+    /// (the engine default).
+    case ifNewer
+    /// Always overwrite with the imported version.
+    case always
+    /// Never overwrite; keep the existing version.
+    case never
+
+    /// The generated proto enum this maps to for the import request.
+    public var proto: Anki_ImportExport_ImportAnkiPackageUpdateCondition {
+        switch self {
+        case .ifNewer: return .ifNewer
+        case .always: return .always
+        case .never: return .never
+        }
+    }
+
+    /// Maps a proto update-condition back to the UI enum, falling back to
+    /// `.ifNewer` (the engine default) for the unrecognised case so presets read
+    /// from an unknown future engine can't produce an invalid selection.
+    public init(_ proto: Anki_ImportExport_ImportAnkiPackageUpdateCondition) {
+        switch proto {
+        case .ifNewer: self = .ifNewer
+        case .always: self = .always
+        case .never: self = .never
+        case .UNRECOGNIZED: self = .ifNewer
+        }
+    }
+}
+
 /// Import/export of Anki packages (`.apkg` decks and `.colpkg` whole
 /// collections), cloning AnkiDroid's `BackendImportExport.kt` plus the
 /// `CollectionManager.importColpkg` / `BackendExporting.exportCollectionPackage`
@@ -54,6 +90,40 @@ public extension Backend {
         )
     }
 
+    /// Builds an `ImportAnkiPackageOptions` from the individual toggles shown in
+    /// the import options UI. Pure/`static` so it's unit-testable without a live
+    /// collection: it's what turns the sheet's selections into the proto the
+    /// import request carries (Anki's `ImportAnkiPackageOptions`: whether to
+    /// update existing notes / note types, merge note types, and keep scheduling
+    /// / deck presets).
+    static func importAnkiPackageOptions(
+        updateNotes: ApkgImportUpdateCondition,
+        updateNotetypes: ApkgImportUpdateCondition,
+        mergeNotetypes: Bool,
+        withScheduling: Bool,
+        withDeckConfigs: Bool
+    ) -> Anki_ImportExport_ImportAnkiPackageOptions {
+        var options = Anki_ImportExport_ImportAnkiPackageOptions()
+        options.updateNotes = updateNotes.proto
+        options.updateNotetypes = updateNotetypes.proto
+        options.mergeNotetypes = mergeNotetypes
+        options.withScheduling = withScheduling
+        options.withDeckConfigs = withDeckConfigs
+        return options
+    }
+
+    /// Builds the `ImportAnkiPackageRequest` for a package at `path`, attaching
+    /// `options` only when provided (leaving it unset uses the backend defaults).
+    /// Pure/`static` so the request assembly is unit-testable.
+    static func importAnkiPackageRequest(
+        path: String, options: Anki_ImportExport_ImportAnkiPackageOptions? = nil
+    ) -> Anki_ImportExport_ImportAnkiPackageRequest {
+        var req = Anki_ImportExport_ImportAnkiPackageRequest()
+        req.packagePath = path
+        if let options { req.options = options }
+        return req
+    }
+
     /// ImportExportService.importAnkiPackage (39, 2). Imports the notes/cards (and
     /// any bundled media) from a `.apkg` into the open collection.
     ///
@@ -64,9 +134,7 @@ public extension Backend {
     func importAnkiPackage(
         path: String, options: Anki_ImportExport_ImportAnkiPackageOptions? = nil
     ) throws -> ImportResult {
-        var req = Anki_ImportExport_ImportAnkiPackageRequest()
-        req.packagePath = path
-        if let options { req.options = options }
+        let req = Self.importAnkiPackageRequest(path: path, options: options)
         let resp = try run(
             service: Self.importExportService, method: ImportExportMethod.importAnkiPackage,
             req, returning: Anki_ImportExport_ImportResponse.self

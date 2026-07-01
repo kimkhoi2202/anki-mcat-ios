@@ -5,16 +5,22 @@ import AnkiKit
 /// Import & Export screen, cloning AnkiDroid's import (`ImportFileSelection`) and
 /// export (`ExportDialogFragment`) flows natively:
 ///
-/// - **Import** — a `.fileImporter` accepting `.apkg`/`.colpkg`. A `.colpkg`
-///   (or the conventional `collection.apkg`) replaces the whole collection; any
-///   other `.apkg` imports its notes. The result is summarised in an alert.
+/// - **Import** — separate pickers for an Anki Deck Package (`.apkg`) and a
+///   collection package (`.colpkg`), routed by extension. A `.apkg` opens a
+///   native **import options** sheet (update conditions, merge note types,
+///   scheduling, deck presets) before importing its notes; a `.colpkg` (or the
+///   conventional `collection.apkg`) replaces the whole collection after a
+///   destructive confirmation. Either result is summarised in an alert.
 /// - **Export** — pick a deck for a `.apkg`, or export the whole collection as a
 ///   `.colpkg`, with an include-media toggle. The produced file is handed to a
 ///   share sheet (`UIActivityViewController`).
 struct ImportExportView: View {
     @ObservedObject var store: AnkiStore
 
-    @State private var showImporter = false
+    /// Drives the Anki Deck Package (`.apkg`) picker.
+    @State private var showApkgImporter = false
+    /// Drives the collection package (`.colpkg`) restore picker.
+    @State private var showColpkgImporter = false
     @State private var includeMedia = true
     @State private var selectedDeckID: Int64?
     /// Non-nil while a blocking import/export runs (drives the busy overlay).
@@ -26,6 +32,12 @@ struct ImportExportView: View {
     /// confirmation. Non-nil drives the confirm alert (clone of AnkiDroid's
     /// `DIALOG_IMPORT_REPLACE_CONFIRM`).
     @State private var pendingReplace: PendingReplace?
+
+    // .apkg import: the prepared options session (picked file + saved presets)
+    // driving the options sheet, plus its summary deferred across the sheet's
+    // dismissal so the result alert presents cleanly after the sheet is gone.
+    @State private var apkgSession: ApkgImportSession?
+    @State private var pendingApkgResult: ImportResult?
 
     // CSV / text import: a second picker (for .csv/.tsv/.txt), the prepared
     // wizard session, and the temp file backing it (removed on dismiss).
@@ -42,9 +54,14 @@ struct ImportExportView: View {
     @State private var pendingShareURL: URL?
 
     /// `.apkg`/`.colpkg` are custom extensions Anki doesn't register a system
-    /// UTI for, so resolve them to (dynamic) `UTType`s by filename extension.
-    private static let packageTypes: [UTType] =
+    /// UTI for, so resolve them to (dynamic) `UTType`s by filename extension. The
+    /// Anki Deck Package picker also accepts `.colpkg` (and vice versa) so a
+    /// mis-picked file is still routed correctly by extension rather than being
+    /// unselectable.
+    private static let apkgTypes: [UTType] =
         ["apkg", "colpkg"].compactMap { UTType(filenameExtension: $0) }
+    private static let colpkgTypes: [UTType] =
+        ["colpkg", "apkg"].compactMap { UTType(filenameExtension: $0) }
 
     /// Accepted types for the CSV/text import picker: the system CSV/TSV/plain-text
     /// UTIs plus the matching dynamic extensions, so `.csv`/`.tsv`/`.txt` files are
@@ -64,12 +81,19 @@ struct ImportExportView: View {
         .navigationTitle("Import & Export")
         .navigationBarTitleDisplayMode(.inline)
         .disabled(busyMessage != nil)
+        // Anki Deck Package (.apkg) picker → import-options flow.
         .fileImporter(
-            isPresented: $showImporter,
-            allowedContentTypes: Self.packageTypes,
+            isPresented: $showApkgImporter,
+            allowedContentTypes: Self.apkgTypes,
             allowsMultipleSelection: false
         ) { handleImporterResult($0) }
-        // Second picker for CSV/text import (.csv/.tsv/.txt).
+        // Collection package (.colpkg) restore picker → destructive-replace flow.
+        .fileImporter(
+            isPresented: $showColpkgImporter,
+            allowedContentTypes: Self.colpkgTypes,
+            allowsMultipleSelection: false
+        ) { handleImporterResult($0) }
+        // Third picker for CSV/text import (.csv/.tsv/.txt).
         .fileImporter(
             isPresented: $showCSVImporter,
             allowedContentTypes: Self.textTypes,
@@ -77,6 +101,15 @@ struct ImportExportView: View {
         ) { handleCSVImporterResult($0) }
         .sheet(item: $share) { item in
             ShareSheet(items: [item.url])
+        }
+        // .apkg import options. On dismiss, if an import succeeded, its summary is
+        // shown (deferred so the alert presents after the sheet is gone).
+        .sheet(item: $apkgSession, onDismiss: finishApkgSession) { session in
+            ApkgImportOptionsView(
+                store: store, fileURL: session.url, presets: session.options
+            ) { result in
+                pendingApkgResult = result
+            }
         }
         // CSV import wizard. On dismiss the temp file is removed and, if an
         // import succeeded, its summary is shown (deferred so the alert presents
@@ -127,6 +160,11 @@ struct ImportExportView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInImportReplaceConfirm") {
                 pendingReplace = PendingReplace(url: URL(fileURLWithPath: "/tmp/collection.colpkg"))
             }
+            // Present the .apkg import-options sheet on a sample package (so the
+            // options UI can be captured without driving the system file picker).
+            if ProcessInfo.processInfo.arguments.contains("-startInApkgImportOptions") {
+                await presentSampleApkgImportOptions()
+            }
             // Present the text-export options sheet for its screenshot.
             if ProcessInfo.processInfo.arguments.contains("-startInTextExport") {
                 showTextExport = true
@@ -141,6 +179,21 @@ struct ImportExportView: View {
     }
 
     #if DEBUG
+    /// Screenshot/automation hook: asks the engine for the saved import presets
+    /// and opens the `.apkg` import-options sheet on a sample package path — so
+    /// the options UI can be captured without the system file picker. (The path
+    /// need not exist; the screenshot only inspects the form, not the import.)
+    private func presentSampleApkgImportOptions() async {
+        do {
+            let presets = try await store.importAnkiPackagePresets()
+            apkgSession = ApkgImportSession(
+                url: URL(fileURLWithPath: "/tmp/SampleDeck.apkg"), options: presets
+            )
+        } catch {
+            errorMessage = describe(error)
+        }
+    }
+
     /// Screenshot/automation hook: writes a small sample CSV to a temp file, asks
     /// the engine for its metadata, and opens the mapping wizard — so the
     /// column-mapping UI can be captured without the system file picker.
@@ -169,12 +222,20 @@ struct ImportExportView: View {
     private var importSection: some View {
         Section {
             Button {
-                showImporter = true
+                showApkgImporter = true
             } label: {
-                Label("Import from file…", systemImage: "square.and.arrow.down")
+                Label("Import Anki Package (.apkg)…", systemImage: "square.and.arrow.down")
                     .foregroundStyle(DS.accent)
             }
-            .accessibilityIdentifier("importFromFile")
+            .accessibilityIdentifier("importApkg")
+
+            Button {
+                showColpkgImporter = true
+            } label: {
+                Label("Restore from collection package (.colpkg)…", systemImage: "arrow.clockwise.circle")
+                    .foregroundStyle(DS.accent)
+            }
+            .accessibilityIdentifier("importColpkg")
 
             Button {
                 showCSVImporter = true
@@ -186,7 +247,7 @@ struct ImportExportView: View {
         } header: {
             sectionHeader("Import")
         } footer: {
-            sectionFooter("Choose an .apkg deck to add its notes, a .colpkg to replace your entire collection, or a .csv/.tsv/.txt file to map its columns to fields.")
+            sectionFooter("An Anki Deck Package (.apkg) adds its notes with import options; a collection package (.colpkg) replaces your entire collection; a .csv/.tsv/.txt file maps its columns to fields.")
         }
     }
 
@@ -261,21 +322,52 @@ struct ImportExportView: View {
 
     // MARK: - Actions
 
+    /// Routes a picked package by extension (shared by both package pickers, so a
+    /// file picked from the "wrong" picker is still handled correctly):
+    ///
+    /// - A `.colpkg` (or the conventional `collection.apkg`) replaces the WHOLE
+    ///   collection — destructive and irreversible — so it requires an explicit
+    ///   confirmation first, cloning AnkiDroid's `DIALOG_IMPORT_REPLACE_CONFIRM`.
+    /// - Any other `.apkg` only adds its notes, so it opens the import-options
+    ///   sheet (seeded from the saved presets).
     private func handleImporterResult(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
             guard let url = urls.first else { return }
-            // A .colpkg (or the conventional collection.apkg) replaces the WHOLE
-            // collection — destructive and irreversible — so require an explicit
-            // confirmation first, cloning AnkiDroid's DIALOG_IMPORT_REPLACE_CONFIRM.
-            // Any other .apkg only adds its notes, so it imports straight away.
             if AnkiStore.isCollectionPackage(url.lastPathComponent) {
                 pendingReplace = PendingReplace(url: url)
             } else {
-                runImport(url)
+                beginApkgImport(url)
             }
         case .failure(let error):
             errorMessage = describe(error)
+        }
+    }
+
+    /// Fetches the saved import presets, then opens the `.apkg` import-options
+    /// sheet seeded from them. Reading presets touches the backend, so it shows
+    /// the busy overlay while it runs (it's quick — a config read).
+    private func beginApkgImport(_ url: URL) {
+        busyMessage = "Reading import options…"
+        Task { @MainActor in
+            defer { busyMessage = nil }
+            do {
+                let presets = try await store.importAnkiPackagePresets()
+                apkgSession = ApkgImportSession(url: url, options: presets)
+            } catch {
+                errorMessage = describe(error)
+            }
+        }
+    }
+
+    /// Runs when the .apkg options sheet is dismissed: if an import succeeded,
+    /// shows its summary and re-defaults the export picker (the deck list may have
+    /// changed). Deferred so the alert presents after the sheet is gone.
+    private func finishApkgSession() {
+        if let result = pendingApkgResult {
+            pendingApkgResult = nil
+            resultMessage = Self.message(for: .deckPackage(result))
+            selectedDeckID = defaultExportDeckID
         }
     }
 
@@ -285,8 +377,11 @@ struct ImportExportView: View {
         runImport(pending.url)
     }
 
+    /// Runs a confirmed whole-collection `.colpkg` restore (close → import →
+    /// reopen), summarising the result. `.apkg` imports go through the options
+    /// sheet instead (`beginApkgImport`).
     private func runImport(_ url: URL) {
-        busyMessage = "Importing…"
+        busyMessage = "Restoring collection…"
         Task { @MainActor in
             defer { busyMessage = nil }
             do {
@@ -406,6 +501,9 @@ struct ImportExportView: View {
             if result.duplicate > 0 {
                 parts.append("\(result.duplicate) duplicate\(result.duplicate == 1 ? "" : "s")")
             }
+            if result.conflicting > 0 {
+                parts.append("\(result.conflicting) conflicting")
+            }
             return parts.joined(separator: ", ") + "."
         }
     }
@@ -458,6 +556,14 @@ private struct CSVSession: Identifiable {
     let id = UUID()
     let url: URL
     let metadata: Anki_ImportExport_CsvMetadata
+}
+
+/// A prepared `.apkg` import: the picked file plus the saved presets the options
+/// sheet seeds itself from, driving the options sheet via `.sheet(item:)`.
+private struct ApkgImportSession: Identifiable {
+    let id = UUID()
+    let url: URL
+    let options: Anki_ImportExport_ImportAnkiPackageOptions
 }
 
 /// A pending whole-collection replace awaiting confirmation: the picked package

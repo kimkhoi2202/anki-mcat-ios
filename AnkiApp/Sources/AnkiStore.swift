@@ -2699,7 +2699,10 @@ final class AnkiStore: ObservableObject {
     /// not be able to read directly, so we copy it into our temp directory first
     /// (mirroring AnkiDroid copying the import into its cache). Derived UI state
     /// is refreshed on success.
-    func importPackage(from url: URL) async throws -> ImportOutcome {
+    func importPackage(
+        from url: URL,
+        apkgOptions: Anki_ImportExport_ImportAnkiPackageOptions? = nil
+    ) async throws -> ImportOutcome {
         guard let backend else { throw NoteEditorError.collectionNotReady }
         let isColpkg = Self.isCollectionPackage(url.lastPathComponent)
         let localURL = try copyIntoTemp(url)
@@ -2740,12 +2743,27 @@ final class AnkiStore: ObservableObject {
                 currentDeckID = 1
                 outcome = .collectionReplaced
             } else {
-                let result = try await runDetached { try backend.importAnkiPackage(path: packagePath) }
+                // `apkgOptions == nil` uses the backend defaults (a plain
+                // shared-deck import); the import options sheet passes an explicit
+                // options proto built from the user's selections.
+                let result = try await runDetached {
+                    try backend.importAnkiPackage(path: packagePath, options: apkgOptions)
+                }
                 outcome = .deckPackage(result)
             }
             refreshAfterImport()
             return outcome
         }
+    }
+
+    /// ImportExportService.getImportAnkiPackagePresets (39, 3). Reads the saved
+    /// `.apkg` import options (update conditions, merge note types, with
+    /// scheduling / deck presets) from the open collection's config — the values
+    /// the import options sheet seeds itself from. Read-only, so it runs off the
+    /// main actor without the exclusive-op gate (matching `prepareCsvImport`).
+    func importAnkiPackagePresets() async throws -> Anki_ImportExport_ImportAnkiPackageOptions {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        return try await runDetached { try backend.importAnkiPackagePresets() }
     }
 
     /// Exports a deck (and its subdecks) to a temporary `.apkg`, returning the
