@@ -12,7 +12,8 @@ primary_region = "iad"
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 0
+  # Keep one machine always running so there's no cold-start wake-up lag on sync.
+  min_machines_running = 1
 
 [mounts]
   source = "anki_data"

@@ -23,8 +23,21 @@ enum AnkiWidgetShared {
     /// The shared defaults suite, or nil if the App Group is unavailable (e.g.
     /// the entitlement is missing because the build has no provisioning). Callers
     /// treat nil as "no shared storage" and degrade gracefully rather than crash.
+    ///
+    /// We gate on the App Group *container* actually existing rather than blindly
+    /// constructing `UserDefaults(suiteName:)`. On a physical device whose
+    /// provisioning profile doesn't include the App Group entitlement (common
+    /// with manual/free signing that never registered the group), the container
+    /// is absent; touching the suite anyway makes `cfprefsd` log "Using
+    /// kCFPreferencesAnyUser with a container is only allowed for System
+    /// Containers, detaching from cfprefsd" and can destabilize the app's *other*
+    /// UserDefaults reads (e.g. the sync-server preference read moments later at
+    /// boot). Returning nil keeps the app off that broken suite entirely.
     static var sharedDefaults: UserDefaults? {
-        UserDefaults(suiteName: appGroupID)
+        guard FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: appGroupID) != nil
+        else { return nil }
+        return UserDefaults(suiteName: appGroupID)
     }
 }
 

@@ -77,11 +77,14 @@ xcodebuild -project AnkiApp/AnkiSpeedrun.xcodeproj -scheme AnkiSpeedrun \
 # …or: open AnkiApp/AnkiSpeedrun.xcodeproj   (then Run)
 ```
 
-**Device builds:** simulator builds need no team; a **device** build (and the
-home-screen widget's App Group) needs a real `DEVELOPMENT_TEAM` in
-`AnkiApp/project.yml`. If a machine has no team at all and the widget's App-Group
-entitlement blocks the build, comment out the app target's `- target: AnkiWidget`
-dependency in `project.yml` (documented there) — the app still builds green.
+**Device builds:** simulator builds need no team; a **device** build needs a real
+`DEVELOPMENT_TEAM` (set it in `AnkiApp/project.yml`, or pick your team in Xcode's
+Signing & Capabilities tab after `xcodegen generate`). The entitlements files
+intentionally ship **empty** — carrying an unprovisioned App Group entitlement
+makes `cfprefsd` detach on device, corrupting normal `UserDefaults` reads (this
+broke sync-server resolution). The home-screen widget therefore shows placeholder
+counts until you register `group.com.khoilam.ankispeedrun` for your own team and
+restore it in both `.entitlements` files.
 
 ## Tests
 
@@ -98,12 +101,18 @@ cd -P AnkiKit && swift test        # 88 engine-backed unit tests
 
 ## Sync
 
-- **AnkiWeb (default):** log in with your AnkiWeb account on the Sync screen.
-- **Self-hosted (version-matched):** `deploy/syncserver/` is a Fly.io Dockerfile +
-  `fly.toml` pinned to the engine's exact commit (a bleeding-edge engine can
-  mismatch AnkiWeb's older server on a full upload). It's configured for
-  **scale-to-zero** (sleeps when idle, wakes on sync). In the app, choose a custom
-  sync server in **Settings → Sync server** (while logged out).
+- **Self-hosted (default):** the app defaults to the project's hosted sync server
+  (`https://anki-mcat-sync.fly.dev/`, always-on). `deploy/syncserver/` is the
+  Fly.io Dockerfile + `fly.toml` pinned to the engine's exact commit (a
+  bleeding-edge engine can mismatch AnkiWeb's older server on a full upload).
+- **AnkiWeb / other:** switch servers anytime in **Settings → Sync server**
+  (while logged out).
+- **TLS on iOS:** the engine is built with the `rustls` feature
+  (pure-Rust TLS + bundled webpki roots). This is required — reqwest's default
+  `native-tls` backend provides no working HTTPS transport on physical iOS
+  devices, so every HTTPS sync would fail with a misleading
+  `error sending request for url ()`. Don't build the xcframework without it
+  (`AnkiCore/Cargo.toml` already enables it).
 
 ## Branches
 
