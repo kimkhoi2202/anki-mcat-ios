@@ -33,6 +33,43 @@ final class AnkiKitTests: XCTestCase {
         return basic.id
     }
 
+    /// Opens a fresh temporary collection in the given languages, to prove the
+    /// engine localizes strings by index for the configured language.
+    private func openCollection(in dir: URL, langs: [String]) throws -> Backend {
+        let backend = try Backend(preferredLangs: langs)
+        let mediaFolder = dir.appendingPathComponent("collection.media")
+        try FileManager.default.createDirectory(at: mediaFolder, withIntermediateDirectories: true)
+        try backend.openCollection(
+            path: dir.appendingPathComponent("collection.anki2").path,
+            mediaFolder: mediaFolder.path,
+            mediaDB: dir.appendingPathComponent("collection.media.db2").path
+        )
+        return backend
+    }
+
+    /// The engine translates native strings by (module, message) index from
+    /// Anki's shared catalog, honoring the collection's configured language.
+    /// `studying-again` is module 33 (STUDYING), message 0 — the "Again" grade
+    /// button. This proves both that our index scheme is correct (English resolves
+    /// to "Again") and that a non-English open localizes it (Japanese differs) —
+    /// the foundation the native UI's `tr()` builds on.
+    func testEngineTranslatesByIndexPerLanguage() throws {
+        let base = FileManager.default.temporaryDirectory
+        let en = try openCollection(in: base.appendingPathComponent(UUID().uuidString), langs: ["en"])
+        let ja = try openCollection(in: base.appendingPathComponent(UUID().uuidString), langs: ["ja"])
+
+        let english = try en.translateString(module: 33, message: 0)
+        let japanese = try ja.translateString(module: 33, message: 0)
+
+        XCTAssertEqual(english, "Again",
+                       "module 33 / message 0 should resolve to studying-again (\"Again\")")
+        XCTAssertFalse(japanese.isEmpty)
+        XCTAssertNotEqual(japanese, "studying-again",
+                          "the index must resolve to a real translation, not the raw key")
+        XCTAssertNotEqual(japanese, english,
+                          "opening the collection in Japanese should localize the string")
+    }
+
     func testBuildHash() {
         let hash = Backend.buildHash()
         print("buildHash:", hash)
