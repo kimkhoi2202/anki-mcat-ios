@@ -111,6 +111,14 @@ final class AnkiStore: ObservableObject {
     @Published private(set) var activeSyncServer: String?
 
     private static let preferredServerKey = "preferredSyncServerEndpoint"
+    /// The app's own self-hosted sync server, offered as a first-class Settings
+    /// preset and used as the default for first-time users (they can still pick
+    /// AnkiWeb or another server).
+    nonisolated static let hostedSyncServer = "https://anki-mcat-sync.fly.dev/"
+    /// True once the user has explicitly picked a sync server, so an explicit
+    /// AnkiWeb choice (endpoint nil) is distinguished from a fresh install (which
+    /// defaults to `hostedSyncServer`).
+    private static let syncServerChosenKey = "syncServerChosen"
     /// Wall-clock cap on the media-sync poll loop, so a stuck server-side media
     /// sync can't spin the banner (and keep the Sync button disabled) forever.
     /// Generous enough for a large first media download; on timeout media is
@@ -2045,6 +2053,9 @@ final class AnkiStore: ObservableObject {
         let value = (trimmed?.isEmpty == false) ? trimmed : nil
         preferredSyncServer = value
         let defaults = UserDefaults.standard
+        // Record that the user has made an explicit choice, so a later launch
+        // won't re-apply the first-run default over an intentional AnkiWeb (nil).
+        defaults.set(true, forKey: Self.syncServerChosenKey)
         if let value {
             defaults.set(value, forKey: Self.preferredServerKey)
         } else {
@@ -2052,9 +2063,42 @@ final class AnkiStore: ObservableObject {
         }
     }
 
-    /// Loads the persisted sync server preference at launch.
+    /// Loads the persisted sync server preference at launch. First-time users
+    /// (who have never picked a server) default to the app's self-hosted server;
+    /// once a choice has been made, that choice — including an explicit AnkiWeb
+    /// (nil endpoint) — is honored.
     private func loadPreferredSyncServer() {
-        preferredSyncServer = UserDefaults.standard.string(forKey: Self.preferredServerKey)
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: Self.syncServerChosenKey) {
+            preferredSyncServer = defaults.string(forKey: Self.preferredServerKey)
+        } else {
+            preferredSyncServer = Self.hostedSyncServer
+        }
+    }
+
+    /// Resolves the concrete sync-server endpoint `login` authenticates against.
+    ///
+    /// Order of preference: an explicitly passed endpoint (e.g. the debug
+    /// auto-login hook), then the stored Settings preference, then the app's
+    /// bundled self-hosted server. The final fallback is deliberately
+    /// unconditional: this FFI build has **no built-in AnkiWeb default**, so
+    /// handing the engine an empty/nil endpoint fails with "error sending request
+    /// for url ()". The app is hosted-first, so any time no concrete endpoint
+    /// resolves — a user who never picked one, an explicit AnkiWeb choice (which
+    /// this build can't service), or a stored preference that couldn't be read at
+    /// boot (the App Group / cfprefsd hiccup seen on under-provisioned devices) —
+    /// we target `hostedSyncServer` rather than send an empty URL. It never
+    /// returns nil, so login can't silently fall through to the broken path.
+    private func resolvedLoginEndpoint(_ explicit: String?) -> String {
+        if let explicit = explicit?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !explicit.isEmpty {
+            return explicit
+        }
+        if let pref = preferredSyncServer?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !pref.isEmpty {
+            return pref
+        }
+        return Self.hostedSyncServer
     }
 
     /// Exchanges username/password (+ optional custom server) for a host key and
@@ -2065,33 +2109,46 @@ final class AnkiStore: ObservableObject {
         loginErrorMessage = nil
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
         // Endpoint comes from the Settings server preference unless one is passed
-        // explicitly (e.g. the debug auto-login hook). Mirrors getEndpoint().
-        let chosen = (endpoint ?? preferredSyncServer)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let serverOrNil = (chosen?.isEmpty == false) ? chosen : nil
-        do {
-            let auth = try await runDetached {
-                try backend.syncLogin(username: user, password: password, endpoint: serverOrNil)
+        // explicitly (e.g. the debug auto-login hook). Mirrors getEndpoint(), but
+        // falls back to the hosted server rather than an empty URL — see
+        // `resolvedLoginEndpoint`.
+        let server = resolvedLoginEndpoint(endpoint)
+        var attempt = 0
+        while true {
+            do {
+                let auth = try await runDetached {
+                    try backend.syncLogin(username: user, password: password, endpoint: server)
+                }
+                let resolvedEndpoint = auth.hasEndpoint ? auth.endpoint : server
+                try SyncKeychain.save(
+                    SyncCredentials(username: user, hkey: auth.hkey, endpoint: resolvedEndpoint)
+                )
+                isLoggedIn = true
+                syncUsername = user
+                // Remember the *chosen* server for next time (not the shard AnkiWeb
+                // may resolve to); the resolved endpoint is the one now in use.
+                setPreferredSyncServer(server)
+                activeSyncServer = resolvedEndpoint
+                return true
+            } catch {
+                // Tolerate a cold-starting self-hosted server: retry a transient
+                // network error a few times (2.5s, then 5s) before surfacing it,
+                // so the first login after the server has scaled to zero succeeds
+                // instead of failing instantly. Auth/server errors are not retried.
+                if SyncError(error)?.kind == .network, attempt < Self.syncNetworkRetries {
+                    attempt += 1
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_500_000_000)
+                    continue
+                }
+                if let syncError = SyncError(error) {
+                    loginErrorMessage = syncError.message.isEmpty
+                        ? defaultMessage(for: syncError.kind)
+                        : syncError.message
+                } else {
+                    loginErrorMessage = "Login failed: \(error)"
+                }
+                return false
             }
-            let resolvedEndpoint = auth.hasEndpoint ? auth.endpoint : serverOrNil
-            try SyncKeychain.save(
-                SyncCredentials(username: user, hkey: auth.hkey, endpoint: resolvedEndpoint)
-            )
-            isLoggedIn = true
-            syncUsername = user
-            // Remember the *chosen* server for next time (not the shard AnkiWeb
-            // may resolve to); the resolved endpoint is the one now in use.
-            setPreferredSyncServer(serverOrNil)
-            activeSyncServer = resolvedEndpoint
-            return true
-        } catch {
-            if let syncError = SyncError(error) {
-                loginErrorMessage = syncError.message.isEmpty
-                    ? defaultMessage(for: syncError.kind)
-                    : syncError.message
-            } else {
-                loginErrorMessage = "Login failed: \(error)"
-            }
-            return false
         }
     }
 
@@ -2421,11 +2478,11 @@ final class AnkiStore: ObservableObject {
     /// `handleNormalSync`: a normal collection sync, then branching on the
     /// server's `required` verdict into a forced upload/download or a conflict
     /// prompt, and finally a background media sync that we poll to completion.
-    /// Extra attempts a *background* auto-sync makes when the only problem is a
-    /// transient network error. A self-hosted server that scales to zero (e.g.
-    /// Fly.io `min_machines_running = 0`) drops the first request while the
+    /// Extra attempts made when the only problem is a transient network error,
+    /// used by both login and auto-sync. A self-hosted server that scales to zero
+    /// (e.g. Fly.io `min_machines_running = 0`) drops the first request while the
     /// machine cold-starts; retrying lets the wake finish transparently.
-    private static let autoSyncNetworkRetries = 2
+    private static let syncNetworkRetries = 2
 
     /// Runs a full collection + media sync.
     ///
@@ -2492,7 +2549,7 @@ final class AnkiStore: ObservableObject {
                 let isNetwork = SyncError(error)?.kind == .network
                 // Background sync only: ride out a cold-starting server with a
                 // short backoff (2.5s, then 5s) before giving up.
-                if auto, isNetwork, attempt < Self.autoSyncNetworkRetries {
+                if auto, isNetwork, attempt < Self.syncNetworkRetries {
                     attempt += 1
                     syncPhase = .syncing("Waking server…")
                     try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_500_000_000)
