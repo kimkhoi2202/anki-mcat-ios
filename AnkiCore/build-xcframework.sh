@@ -5,6 +5,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# rslib's i18n build script gathers Anki's translation catalogs from the
+# desktop fork's `ftl/core-repo` + `ftl/qt-repo` submodules. On a fresh clone
+# those are empty and the build panics with a NotFound in rslib/i18n/gather.rs,
+# so initialize them (shallow) if they're missing.
+RSLIB_CHECKOUT="../../anki-desktop/main"
+if [ ! -e "$RSLIB_CHECKOUT/ftl/core-repo/core" ]; then
+  echo "==> initializing translation submodules in $RSLIB_CHECKOUT"
+  git -C "$RSLIB_CHECKOUT" submodule update --init --depth 1 ftl/core-repo ftl/qt-repo
+fi
+
 # Pin the minimum OS to match the app so the linker doesn't warn that the Rust
 # objects were built for a newer OS than the app links against (AnkiApp targets
 # iOS 16; AnkiKit targets macOS 13). Without these, cargo/rustc default to the

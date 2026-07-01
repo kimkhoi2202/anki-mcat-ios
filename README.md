@@ -61,6 +61,9 @@ AnkiApp  (SwiftUI)         Decks · Reviewer · Browser · Editor · Note Types 
   `rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin`
 - **XcodeGen:** `brew install xcodegen`
 - The desktop fork checked out at **`../anki-desktop/main`** (provides `rslib`).
+  Its `ftl/core-repo` + `ftl/qt-repo` translation submodules are required to
+  build the engine; `build-xcframework.sh` initializes them automatically on
+  first run.
 
 ## Build & run
 
