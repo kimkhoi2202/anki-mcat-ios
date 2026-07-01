@@ -2421,57 +2421,92 @@ final class AnkiStore: ObservableObject {
     /// `handleNormalSync`: a normal collection sync, then branching on the
     /// server's `required` verdict into a forced upload/download or a conflict
     /// prompt, and finally a background media sync that we poll to completion.
-    func sync() async {
+    /// Extra attempts a *background* auto-sync makes when the only problem is a
+    /// transient network error. A self-hosted server that scales to zero (e.g.
+    /// Fly.io `min_machines_running = 0`) drops the first request while the
+    /// machine cold-starts; retrying lets the wake finish transparently.
+    private static let autoSyncNetworkRetries = 2
+
+    /// Runs a full collection + media sync.
+    ///
+    /// Pass `auto: true` for background syncs (app open/close). A background sync
+    /// tolerates a cold-starting server: it retries a transient network failure a
+    /// few times and, if the server stays unreachable, fails silently rather than
+    /// parking a persistent error banner the user never asked for. A manual sync
+    /// (`auto: false`) surfaces every failure immediately, as before.
+    func sync(auto: Bool = false) async {
         // Reentrancy guard: programmatic callers (post-login auto-sync, the debug
         // hook) can fire while a sync is already running; a second run would stomp
         // `syncPhase` and double-write the keychain. Bail if one is in flight.
         guard !syncPhase.isActive else { return }
         guard let backend else { return }
         guard let creds = SyncKeychain.load() else {
-            showLogin = true
+            // A background auto-sync never pops the login sheet.
+            if !auto { showLogin = true }
             return
         }
         var auth = Backend.syncAuth(hkey: creds.hkey, endpoint: creds.endpoint)
         syncPhase = .syncing("Checking…")
-        do {
-            let authForCollection = auth
-            let response = try await runDetached {
-                try backend.syncCollection(auth: authForCollection, syncMedia: false)
-            }
-            // The server may hand us a new endpoint (shard) to use going forward.
-            // Record it as the in-use endpoint (creds + activeSyncServer), but not
-            // as the user's chosen server — an AnkiWeb shard isn't a custom server.
-            if response.hasNewEndpoint, !response.newEndpoint.isEmpty {
-                auth = Backend.syncAuth(hkey: creds.hkey, endpoint: response.newEndpoint)
-                activeSyncServer = response.newEndpoint
-                try? SyncKeychain.save(
-                    SyncCredentials(username: creds.username, hkey: creds.hkey, endpoint: response.newEndpoint)
-                )
-            }
-            let mediaUsn = response.serverMediaUsn
 
-            switch response.required {
-            case .noChanges:
-                await mediaPhase(auth: auth, startNew: true)
-                syncPhase = .success(
-                    successMessage(response.serverMessage.isEmpty ? "Up to date" : response.serverMessage)
-                )
-            case .fullDownload:
-                try await runFullSync(auth: auth, upload: false, mediaUsn: mediaUsn)
-            case .fullUpload:
-                try await runFullSync(auth: auth, upload: true, mediaUsn: mediaUsn)
-            case .fullSync:
-                // Collections diverged: ask the user which side to keep.
-                pendingConflictAuth = auth
-                pendingConflictMediaUsn = mediaUsn
-                pendingConflict = true
-                syncPhase = .idle
-            case .normalSync, .UNRECOGNIZED:
-                // sync_collection never returns these as a final state.
-                syncPhase = .failed(.init(kind: .other, message: "Unexpected sync state"))
+        var attempt = 0
+        syncLoop: while true {
+            do {
+                let authForCollection = auth
+                let response = try await runDetached {
+                    try backend.syncCollection(auth: authForCollection, syncMedia: false)
+                }
+                // The server may hand us a new endpoint (shard) to use going forward.
+                // Record it as the in-use endpoint (creds + activeSyncServer), but not
+                // as the user's chosen server — an AnkiWeb shard isn't a custom server.
+                if response.hasNewEndpoint, !response.newEndpoint.isEmpty {
+                    auth = Backend.syncAuth(hkey: creds.hkey, endpoint: response.newEndpoint)
+                    activeSyncServer = response.newEndpoint
+                    try? SyncKeychain.save(
+                        SyncCredentials(username: creds.username, hkey: creds.hkey, endpoint: response.newEndpoint)
+                    )
+                }
+                let mediaUsn = response.serverMediaUsn
+
+                switch response.required {
+                case .noChanges:
+                    await mediaPhase(auth: auth, startNew: true)
+                    syncPhase = .success(
+                        successMessage(response.serverMessage.isEmpty ? "Up to date" : response.serverMessage)
+                    )
+                case .fullDownload:
+                    try await runFullSync(auth: auth, upload: false, mediaUsn: mediaUsn)
+                case .fullUpload:
+                    try await runFullSync(auth: auth, upload: true, mediaUsn: mediaUsn)
+                case .fullSync:
+                    // Collections diverged: ask the user which side to keep.
+                    pendingConflictAuth = auth
+                    pendingConflictMediaUsn = mediaUsn
+                    pendingConflict = true
+                    syncPhase = .idle
+                case .normalSync, .UNRECOGNIZED:
+                    // sync_collection never returns these as a final state.
+                    syncPhase = .failed(.init(kind: .other, message: "Unexpected sync state"))
+                }
+                break syncLoop
+            } catch {
+                let isNetwork = SyncError(error)?.kind == .network
+                // Background sync only: ride out a cold-starting server with a
+                // short backoff (2.5s, then 5s) before giving up.
+                if auto, isNetwork, attempt < Self.autoSyncNetworkRetries {
+                    attempt += 1
+                    syncPhase = .syncing("Waking server…")
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_500_000_000)
+                    continue syncLoop
+                }
+                if auto, isNetwork {
+                    // Server stayed unreachable for a background sync: fail quietly.
+                    // The next sync (or next launch, once warm) will succeed.
+                    syncPhase = .idle
+                } else {
+                    handleSyncError(error)
+                }
+                break syncLoop
             }
-        } catch {
-            handleSyncError(error)
         }
         refreshAfterSync()
     }
@@ -2922,7 +2957,7 @@ final class AnkiStore: ObservableObject {
     /// launch stays quiet. Honours the sync reentrancy guard inside `sync()`.
     func autoSyncIfEnabled() {
         guard autoSyncEnabled, isLoggedIn else { return }
-        Task { await sync() }
+        Task { await sync(auto: true) }
     }
 
     // MARK: - Import / Export
