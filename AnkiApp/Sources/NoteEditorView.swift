@@ -951,6 +951,7 @@ struct NoteEditorView: View {
                     tags: tags,
                     deckID: selectedDeckID
                 )
+                Haptics.success()
                 onSaved()
                 // Keep the editor open for rapid successive entry (AnkiDroid keeps
                 // NoteEditor open on add): retain pinned fields + tags + notetype +
@@ -958,11 +959,13 @@ struct NoteEditorView: View {
                 prepareForNextNote()
             case .edit(let noteID):
                 try store.updateNote(noteID: noteID, fields: fieldValues, tags: tags)
+                Haptics.success()
                 onSaved()
                 dismiss()
             }
         } catch {
             errorMessage = describe(error)
+            Haptics.error()
         }
     }
 

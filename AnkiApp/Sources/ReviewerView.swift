@@ -663,6 +663,9 @@ struct ReviewerView: View {
             Text("Show this card again after a number of days (e.g. 3), a random day in a range (7-14), or 0 for today.")
         }
         .onAppear {
+            // Warm the haptic engine so the first grade tick fires without the
+            // initial spin-up latency.
+            Haptics.prepare()
             store.startReview()
             #if DEBUG
             // Screenshot/automation hook: flag + mark the current card and open

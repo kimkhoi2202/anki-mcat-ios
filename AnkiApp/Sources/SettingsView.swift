@@ -21,6 +21,8 @@ struct SettingsView: View {
     @AppStorage(AppTheme.storageKey) private var appThemeRaw = AppTheme.system.rawValue
     @AppStorage(UISize.storageKey) private var uiSizeRaw = UISize.system.rawValue
     @AppStorage(FullScreenReviewer.storageKey) private var fullScreenReviewer = false
+    /// In-app haptic feedback toggle (default on); read by `Haptics`.
+    @AppStorage(Haptics.enabledKey) private var hapticsEnabled = true
     @State private var serverChoice: ServerChoice = .ankiweb
     @State private var customServerURL = ""
     /// Inline validation error for the custom ("Other") server URL, if any.
@@ -277,11 +279,27 @@ struct SettingsView: View {
             Toggle("Full-screen reviewer", isOn: $fullScreenReviewer)
                 .font(DS.Typography.body)
                 .foregroundStyle(DS.textPrimary)
+
+            Toggle("Haptic feedback", isOn: hapticsToggleBinding)
+                .font(DS.Typography.body)
+                .foregroundStyle(DS.textPrimary)
         } header: {
             sectionHeader("Appearance")
         } footer: {
-            sectionFooter("“System” follows your device's light/dark appearance. Interface size scales the app's text. Full-screen review hides the status bar for a distraction-free session.")
+            sectionFooter("“System” follows your device's light/dark appearance. Interface size scales the app's text. Full-screen review hides the status bar for a distraction-free session. Haptics add subtle vibrations when grading, flipping, and confirming actions.")
         }
+    }
+
+    /// Drives the haptics toggle, firing a sample selection tick when enabling so
+    /// the change is immediately felt.
+    private var hapticsToggleBinding: Binding<Bool> {
+        Binding(
+            get: { hapticsEnabled },
+            set: { newValue in
+                hapticsEnabled = newValue
+                if newValue { Haptics.selection() }
+            }
+        )
     }
 
     // MARK: - Scheduling (engine-backed)

@@ -1489,6 +1489,8 @@ final class AnkiStore: ObservableObject {
     }
 
     func reveal() {
+        // A gentle, diffuse "flip" tap as the answer is revealed.
+        Haptics.flip()
         showingAnswer = true
         // Recompute the shown answer from the pristine copy every time, so a
         // flip-back → edit-typed-answer → reveal recomputes the diff instead of
@@ -1566,6 +1568,7 @@ final class AnkiStore: ObservableObject {
     /// gesture toggling A → Q). Cheap local state flip; no engine call. Resumes
     /// the auto-advance question timer for the now-shown question.
     func flipBack() {
+        Haptics.flip()
         showingAnswer = false
         scheduleAutoAdvanceForCurrentSide()
     }
@@ -1584,12 +1587,17 @@ final class AnkiStore: ObservableObject {
             try backend.answer(card: card, rating: rating, millisecondsTaken: ms)
             // Only advance once the answer is actually recorded.
             loadNext()
+            // Haptic confirmation: the subtle review-loop grade tick, upgraded to
+            // a success flourish when this answer clears the deck (the rewarding
+            // "finished" moment).
+            if currentCard == nil { Haptics.success() } else { Haptics.grade() }
         } catch {
             // A failed answer (DB/scheduler error, stale state) must not be
             // silently dropped while the UI advances as if the review counted.
             // Surface it and keep the current card/answer shown so the user can
             // retry instead of losing study data.
             status = "Answer error: \(error)"
+            Haptics.error()
         }
     }
 
@@ -1610,9 +1618,11 @@ final class AnkiStore: ObservableObject {
         do {
             _ = try backend.setFlag(cardIDs: [cardID], flag: flag)
             currentFlag = flag
+            Haptics.selection()
             refreshUndo()
         } catch {
             status = "Flag error: \(error)"
+            Haptics.error()
         }
     }
 
@@ -1628,9 +1638,11 @@ final class AnkiStore: ObservableObject {
         guard let backend, let noteID = currentNoteID else { return }
         do {
             isMarked = try backend.toggleMark(noteID: noteID)
+            Haptics.selection()
             refreshUndo()
         } catch {
             status = "Mark error: \(error)"
+            Haptics.error()
         }
     }
 
@@ -1639,9 +1651,11 @@ final class AnkiStore: ObservableObject {
         guard let backend, let cardID = currentCardID else { return }
         do {
             _ = try backend.buryCards(cardIDs: [cardID])
+            Haptics.tap()
             afterCardRemovedFromQueue()
         } catch {
             status = "Bury error: \(error)"
+            Haptics.error()
         }
     }
 
@@ -1651,9 +1665,11 @@ final class AnkiStore: ObservableObject {
         guard let backend, let noteID = currentNoteID else { return }
         do {
             _ = try backend.buryNotes(noteIDs: [noteID])
+            Haptics.tap()
             afterCardRemovedFromQueue()
         } catch {
             status = "Bury error: \(error)"
+            Haptics.error()
         }
     }
 
@@ -1662,9 +1678,11 @@ final class AnkiStore: ObservableObject {
         guard let backend, let cardID = currentCardID else { return }
         do {
             _ = try backend.suspendCards(cardIDs: [cardID])
+            Haptics.tap()
             afterCardRemovedFromQueue()
         } catch {
             status = "Suspend error: \(error)"
+            Haptics.error()
         }
     }
 
@@ -1674,9 +1692,11 @@ final class AnkiStore: ObservableObject {
         guard let backend, let noteID = currentNoteID else { return }
         do {
             _ = try backend.suspendNotes(noteIDs: [noteID])
+            Haptics.tap()
             afterCardRemovedFromQueue()
         } catch {
             status = "Suspend error: \(error)"
+            Haptics.error()
         }
     }
 
@@ -1686,9 +1706,11 @@ final class AnkiStore: ObservableObject {
         guard let backend, let noteID = currentNoteID else { return }
         do {
             _ = try backend.removeNotes(noteIDs: [noteID])
+            Haptics.warning()
             afterCardRemovedFromQueue()
         } catch {
             status = "Delete error: \(error)"
+            Haptics.error()
         }
     }
 
@@ -1899,8 +1921,10 @@ final class AnkiStore: ObservableObject {
         do {
             _ = try backend.undo()
             loadNext()
+            Haptics.tap()
         } catch {
             status = "Undo error: \(error)"
+            Haptics.error()
         }
     }
 

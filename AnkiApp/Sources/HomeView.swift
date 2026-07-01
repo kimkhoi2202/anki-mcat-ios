@@ -1094,7 +1094,16 @@ private struct SyncToolbarButton: View {
     var body: some View {
         Button {
             if store.isLoggedIn {
-                Task { await store.sync() }
+                // Manual (user-initiated) sync confirms its result with a haptic;
+                // auto-sync on open/close stays silent so launching never buzzes.
+                Task {
+                    await store.sync()
+                    switch store.syncPhase {
+                    case .success: Haptics.success()
+                    case .failed: Haptics.error()
+                    default: break
+                    }
+                }
             } else {
                 store.showLogin = true
             }
