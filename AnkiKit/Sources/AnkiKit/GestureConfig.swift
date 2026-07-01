@@ -175,15 +175,20 @@ public enum ViewerCommand: String, Codable, CaseIterable, Identifiable, Sendable
 
 // MARK: - ReviewerGesture
 
-/// A touch gesture the reviewer recognizes over the card. Tap zones follow a
-/// sensible 5-zone split (center + four edges) — AnkiDroid uses a 3×3 grid, but
-/// a large central target plus four edge regions is the touch-appropriate
-/// adaptation. Raw values are the stable persisted keys.
+/// A touch gesture the reviewer recognizes over the card. Tap zones are
+/// AnkiDroid's 3×3 grid — nine cells (the four corners, four mid-edges, and
+/// center), with each axis split into equal thirds. Raw values are the stable
+/// persisted keys: the original five zones keep their keys, and the four corners
+/// were added for full grid parity (tolerant decoding fills them in for configs
+/// written by an older build that only knew five zones).
 ///
 /// Named `ReviewerGesture` rather than `Gesture` so it doesn't collide with
 /// SwiftUI's `Gesture` protocol in the app's views.
 public enum ReviewerGesture: String, Codable, CaseIterable, Identifiable, Hashable, Sendable {
-    case tapTop, tapBottom, tapLeft, tapRight, tapCenter
+    // Nine tap zones — AnkiDroid's 3×3 grid, in reading order.
+    case tapTopLeft, tapTop, tapTopRight
+    case tapLeft, tapCenter, tapRight
+    case tapBottomLeft, tapBottom, tapBottomRight
     case swipeUp, swipeDown, swipeLeft, swipeRight
     case longPress
     case doubleTap
@@ -193,11 +198,15 @@ public enum ReviewerGesture: String, Codable, CaseIterable, Identifiable, Hashab
     /// Human-readable label for the settings row.
     public var title: String {
         switch self {
+        case .tapTopLeft: return "Tap top-left"
         case .tapTop: return "Tap top"
-        case .tapBottom: return "Tap bottom"
+        case .tapTopRight: return "Tap top-right"
         case .tapLeft: return "Tap left"
-        case .tapRight: return "Tap right"
         case .tapCenter: return "Tap center"
+        case .tapRight: return "Tap right"
+        case .tapBottomLeft: return "Tap bottom-left"
+        case .tapBottom: return "Tap bottom"
+        case .tapBottomRight: return "Tap bottom-right"
         case .swipeUp: return "Swipe up"
         case .swipeDown: return "Swipe down"
         case .swipeLeft: return "Swipe left"
@@ -207,11 +216,13 @@ public enum ReviewerGesture: String, Codable, CaseIterable, Identifiable, Hashab
         }
     }
 
-    /// Whether this gesture is one of the five tap zones (used to group the
+    /// Whether this gesture is one of the nine tap zones (used to group the
     /// settings screen).
     public var isTapZone: Bool {
         switch self {
-        case .tapTop, .tapBottom, .tapLeft, .tapRight, .tapCenter: return true
+        case .tapTopLeft, .tapTop, .tapTopRight,
+             .tapLeft, .tapCenter, .tapRight,
+             .tapBottomLeft, .tapBottom, .tapBottomRight: return true
         default: return false
         }
     }
@@ -227,44 +238,49 @@ public enum ReviewerGesture: String, Codable, CaseIterable, Identifiable, Hashab
 
 // MARK: - TapZone
 
-/// The five tap regions of the card. Kept separate from ``ReviewerGesture`` so
-/// the point → zone partition is a pure, testable function the reviewer calls
-/// with a normalized tap location.
+/// The nine tap regions of the card — AnkiDroid's 3×3 grid. Kept separate from
+/// ``ReviewerGesture`` so the point → zone partition is a pure, testable
+/// function the reviewer calls with a normalized tap location.
 public enum TapZone: String, CaseIterable, Sendable {
-    case top, bottom, left, right, center
+    case topLeft, top, topRight
+    case left, center, right
+    case bottomLeft, bottom, bottomRight
 
     /// The gesture this zone maps to.
     public var gesture: ReviewerGesture {
         switch self {
+        case .topLeft: return .tapTopLeft
         case .top: return .tapTop
-        case .bottom: return .tapBottom
+        case .topRight: return .tapTopRight
         case .left: return .tapLeft
-        case .right: return .tapRight
         case .center: return .tapCenter
+        case .right: return .tapRight
+        case .bottomLeft: return .tapBottomLeft
+        case .bottom: return .tapBottom
+        case .bottomRight: return .tapBottomRight
         }
     }
 
-    /// Half-width/height of the square central zone in normalized units. `0.25`
-    /// makes the center span x,y ∈ [0.25, 0.75] — a comfortable "tap to reveal"
-    /// target — with the surrounding ring split into the four edges. A larger,
-    /// touch-friendly center than AnkiDroid's 1/9 grid cell.
-    public static let centerHalfExtent = 0.25
-
     /// Classifies a tap at a location normalized to 0…1 in the card's bounds
-    /// (origin top-left) into a zone. The central square is the center; outside
-    /// it, whichever axis the point is more extreme on picks the edge (ties, i.e.
-    /// exact diagonals/corners, resolve to the vertical top/bottom edge). Pure,
-    /// so it's unit-tested directly.
+    /// (origin top-left) into one of AnkiDroid's nine 3×3 grid cells. Each axis
+    /// is split into equal thirds — `[0, ⅓)`, `[⅓, ⅔)`, `[⅔, 1]` — and the cell
+    /// is the resulting (row, column) pair. Pure, so it's unit-tested directly.
     public static func from(x: Double, y: Double) -> TapZone {
-        let dx = x - 0.5
-        let dy = y - 0.5
-        if abs(dx) <= centerHalfExtent && abs(dy) <= centerHalfExtent {
-            return .center
+        func third(_ v: Double) -> Int {
+            if v < 1.0 / 3.0 { return 0 }
+            if v < 2.0 / 3.0 { return 1 }
+            return 2
         }
-        if abs(dx) > abs(dy) {
-            return dx < 0 ? .left : .right
-        } else {
-            return dy < 0 ? .top : .bottom
+        switch (third(y), third(x)) {
+        case (0, 0): return .topLeft
+        case (0, 1): return .top
+        case (0, 2): return .topRight
+        case (1, 0): return .left
+        case (1, 1): return .center
+        case (1, 2): return .right
+        case (2, 0): return .bottomLeft
+        case (2, 1): return .bottom
+        default:     return .bottomRight
         }
     }
 }
@@ -319,18 +335,26 @@ public struct GestureConfig: Codable, Equatable, Sendable {
     ///   left = Again, right = Easy, top/up = Good, bottom/down = Hard.
     ///   (Grading only fires once the answer is shown, so on the question side the
     ///   edges do nothing — no accidental grade.)
+    /// - **Corners** (top-left/right, bottom-left/right) → *Nothing* — unbound by
+    ///   default, matching AnkiDroid; available to bind in Controls.
     /// - **Long press** → *Edit note*.
     /// - **Double tap** → *Nothing* (AnkiDroid ships it unbound; keeping it unbound
     ///   also keeps single taps snappy, since no double-tap disambiguation delay
     ///   is added unless the user binds it).
     ///
-    /// Gestures not listed default to ``ViewerCommand/none``.
+    /// Every gesture is listed explicitly (the corners and double-tap ship
+    /// unbound as ``ViewerCommand/none``), so the canonical `defaults` and a
+    /// config decoded from its own JSON hold identical, complete maps.
     public static let defaultBindings: [ReviewerGesture: ViewerCommand] = [
         .tapCenter: .showAnswer,
         .tapLeft: .answerAgain,
         .tapRight: .answerEasy,
         .tapTop: .answerGood,
         .tapBottom: .answerHard,
+        .tapTopLeft: .none,
+        .tapTopRight: .none,
+        .tapBottomLeft: .none,
+        .tapBottomRight: .none,
         .swipeLeft: .answerAgain,
         .swipeRight: .answerEasy,
         .swipeUp: .answerGood,

@@ -1984,6 +1984,12 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(config.command(for: .swipeDown), .answerHard)
         XCTAssertEqual(config.command(for: .longPress), .editNote)
         XCTAssertEqual(config.command(for: .doubleTap), .none)
+        // The four corners of the 3×3 grid ship unbound (AnkiDroid-faithful; the
+        // user can bind them in Controls).
+        XCTAssertEqual(config.command(for: .tapTopLeft), .none)
+        XCTAssertEqual(config.command(for: .tapTopRight), .none)
+        XCTAssertEqual(config.command(for: .tapBottomLeft), .none)
+        XCTAssertEqual(config.command(for: .tapBottomRight), .none)
         XCTAssertTrue(config.isDefault)
     }
 
@@ -2043,22 +2049,32 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(GestureConfig.from(jsonData: Data("not json".utf8)), .defaults)
     }
 
-    /// The tap-zone partition: a comfortable central square is the center, and the
-    /// surrounding ring resolves to the four edges by the more-extreme axis.
+    /// The tap-zone partition is AnkiDroid's 3×3 grid: each axis split into equal
+    /// thirds, giving nine cells (four corners, four mid-edges, and center).
     func testTapZonePartition() {
+        // Center cell (middle third on both axes).
         XCTAssertEqual(TapZone.from(x: 0.5, y: 0.5), .center)
-        XCTAssertEqual(TapZone.from(x: 0.7, y: 0.6), .center, "inside the [0.25,0.75] square")
-        XCTAssertEqual(TapZone.from(x: 0.05, y: 0.5), .left)
-        XCTAssertEqual(TapZone.from(x: 0.95, y: 0.5), .right)
-        XCTAssertEqual(TapZone.from(x: 0.5, y: 0.05), .top)
-        XCTAssertEqual(TapZone.from(x: 0.5, y: 0.95), .bottom)
-        // Off-center but still within the central band on both axes → center.
-        XCTAssertEqual(TapZone.from(x: 0.3, y: 0.7), .center)
-        // Horizontally dominant corner region → left/right.
-        XCTAssertEqual(TapZone.from(x: 0.05, y: 0.2), .left)
-        // Each zone maps back to its tap gesture.
+        // Four mid-edges.
+        XCTAssertEqual(TapZone.from(x: 0.5, y: 0.1), .top)
+        XCTAssertEqual(TapZone.from(x: 0.5, y: 0.9), .bottom)
+        XCTAssertEqual(TapZone.from(x: 0.1, y: 0.5), .left)
+        XCTAssertEqual(TapZone.from(x: 0.9, y: 0.5), .right)
+        // Four corners.
+        XCTAssertEqual(TapZone.from(x: 0.1, y: 0.1), .topLeft)
+        XCTAssertEqual(TapZone.from(x: 0.9, y: 0.1), .topRight)
+        XCTAssertEqual(TapZone.from(x: 0.1, y: 0.9), .bottomLeft)
+        XCTAssertEqual(TapZone.from(x: 0.9, y: 0.9), .bottomRight)
+        // Third boundaries: strictly < ⅓ is the low band; ≥ ⅓ (and < ⅔) is middle.
+        XCTAssertEqual(TapZone.from(x: 0.3, y: 0.3), .topLeft, "0.3 < ⅓ on both axes")
+        XCTAssertEqual(TapZone.from(x: 0.4, y: 0.4), .center, "0.4 is in [⅓, ⅔) on both axes")
+        // Corners resolve to the diagonal cell, not an edge.
+        XCTAssertEqual(TapZone.from(x: 0.05, y: 0.2), .topLeft)
+        // Each zone maps back to its tap gesture, and all nine cells exist.
         XCTAssertEqual(TapZone.center.gesture, .tapCenter)
         XCTAssertEqual(TapZone.left.gesture, .tapLeft)
+        XCTAssertEqual(TapZone.topLeft.gesture, .tapTopLeft)
+        XCTAssertEqual(TapZone.bottomRight.gesture, .tapBottomRight)
+        XCTAssertEqual(TapZone.allCases.count, 9)
     }
 
     /// Every `ViewerCommand` appears exactly once in `menuOrder`, so the settings

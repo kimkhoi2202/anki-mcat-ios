@@ -3,8 +3,9 @@ import AnkiKit
 
 /// "Controls / Gestures" settings, cloning AnkiDroid's gesture settings.
 ///
-/// Lists every recognizable reviewer gesture — the five tap zones, four swipes,
-/// long-press, and double-tap — each with a menu `Picker` to choose the
+/// Lists every recognizable reviewer gesture — the nine tap zones (AnkiDroid's
+/// 3×3 grid), four swipes, long-press, and double-tap — each with a menu
+/// `Picker` to choose the
 /// `ViewerCommand` it triggers, plus a "Reset to defaults". Edits mutate
 /// `store.gestureConfig`, which persists immediately (JSON in `UserDefaults`)
 /// and is read live by the reviewer's gesture dispatcher.
@@ -33,19 +34,23 @@ struct ControlsSettingsView: View {
 
     // MARK: - Sections
 
-    /// Tap zones, listed center-first then the four edges, matching the on-card
-    /// layout (a large central "reveal" target ringed by the edges).
+    /// Tap zones, laid out in reading order to mirror AnkiDroid's 3×3 grid
+    /// (top row, middle row, bottom row).
     private var tapZonesSection: some View {
         Section {
-            gestureRow(.tapCenter)
+            gestureRow(.tapTopLeft)
             gestureRow(.tapTop)
-            gestureRow(.tapBottom)
+            gestureRow(.tapTopRight)
             gestureRow(.tapLeft)
+            gestureRow(.tapCenter)
             gestureRow(.tapRight)
+            gestureRow(.tapBottomLeft)
+            gestureRow(.tapBottom)
+            gestureRow(.tapBottomRight)
         } header: {
             sectionHeader("Tap zones")
         } footer: {
-            sectionFooter("The card is split into a central zone plus four edges. Tapping a zone runs its action. Rating actions only apply once the answer is shown.")
+            sectionFooter("The card is split into a 3×3 grid of nine tap zones, like AnkiDroid. Tapping a zone runs its action. Rating actions only apply once the answer is shown.")
         }
     }
 
