@@ -803,6 +803,164 @@ final class AnkiKitTests: XCTestCase {
                        "the replaced collection's note text should be searchable")
     }
 
+    // MARK: - CSV / text import
+
+    /// `getCsvMetadata` (ImportExportService 39, 5) inspects a tab-separated file
+    /// and reports its columns + delimiter, then `importCsv` (39, 6) adds the rows
+    /// as notes using a chosen note type + per-field column mapping — the engine
+    /// behind the CSV import wizard. A two-column, two-row TSV imports as two
+    /// Basic notes whose Front/Back fields come from columns 1/2, and the mapped
+    /// field text is searchable. Proves the service/method indices, the
+    /// `CsvMetadata`/`ImportCsvRequest` shapes, and the column→field mapping.
+    func testCsvImportMapsColumnsToFieldsAndAddsNotes() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+
+        let csv = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: csv) }
+        // Tab-separated (Anki's native text delimiter), no header row.
+        try "Hello\tWorld\nFoo\tBar\n".write(to: csv, atomically: true, encoding: .utf8)
+
+        // Metadata detection: two columns, tab delimiter auto-detected.
+        let metadata = try backend.getCsvMetadata(path: csv.path, notetypeID: notetypeID, deckID: 1)
+        XCTAssertEqual(metadata.columnLabels.count, 2, "the file has two columns")
+        XCTAssertEqual(metadata.delimiter, .tab, "a tab-separated file should detect the tab delimiter")
+
+        // Map Front←column 1, Back←column 2 (one-based) onto the Basic note type.
+        var toImport = metadata
+        var mapped = Anki_ImportExport_CsvMetadata.MappedNotetype()
+        mapped.id = notetypeID
+        mapped.fieldColumns = [1, 2]
+        toImport.globalNotetype = mapped
+        toImport.deckID = 1
+
+        let result = try backend.importCsv(path: csv.path, metadata: toImport)
+        XCTAssertEqual(result.found, 2, "both rows should be found as notes")
+        XCTAssertEqual(result.imported, 2, "both rows should be added to the fresh collection")
+
+        XCTAssertEqual(try backend.searchCards(query: "").count, 2, "two notes should now exist")
+        let noteID = try XCTUnwrap(try backend.searchNotes(query: "Hello").first,
+                                   "the mapped Front text should be searchable")
+        XCTAssertEqual(try backend.getNote(noteID: noteID).fields, ["Hello", "World"],
+                       "columns 1/2 should map onto the Front/Back fields")
+    }
+
+    /// Importing a column into the Tags field works via `tagsColumn`: a
+    /// three-column TSV whose third column is mapped to tags lands those tags on
+    /// the note — the "Tags" target of the mapping UI.
+    func testCsvImportTagsColumnAddsTags() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+
+        let csv = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: csv) }
+        try "Q1\tA1\tanimal mammal\n".write(to: csv, atomically: true, encoding: .utf8)
+
+        var metadata = try backend.getCsvMetadata(path: csv.path, notetypeID: notetypeID, deckID: 1)
+        var mapped = Anki_ImportExport_CsvMetadata.MappedNotetype()
+        mapped.id = notetypeID
+        mapped.fieldColumns = [1, 2] // Front←1, Back←2; column 3 is tags
+        metadata.globalNotetype = mapped
+        metadata.deckID = 1
+        metadata.tagsColumn = 3
+
+        _ = try backend.importCsv(path: csv.path, metadata: metadata)
+        let noteID = try XCTUnwrap(try backend.searchNotes(query: "Q1").first)
+        let tags = try backend.getNote(noteID: noteID).tags
+        XCTAssertTrue(tags.contains("animal"), "the tags column should add its tags")
+        XCTAssertTrue(tags.contains("mammal"), "space-separated tags in the column should all land")
+    }
+
+    // MARK: - Notes / cards text (CSV) export
+
+    /// `exportNoteCsv` (ImportExportService 39, 7) writes the collection's notes
+    /// to a tab-separated text file and returns the note count — the "Notes in
+    /// Plain Text" export. The produced file exists and contains each note's
+    /// mapped field text (and, with `withTags`, its tags). Proves the
+    /// service/method indices and the `ExportNoteCsvRequest` shape.
+    func testExportNoteCsvWritesNotesWithFieldsAndTags() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["ExportFront", "ExportBack"],
+                                deckID: 1, tags: ["geo"])
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["SecondQ", "SecondA"], deckID: 1)
+
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        let count = try backend.exportNoteCsv(
+            outPath: out.path, limit: Backend.wholeCollectionExportLimit(),
+            withHtml: false, withTags: true
+        )
+        XCTAssertEqual(count, 2, "both notes should be exported")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: out.path), "a text file should be written")
+
+        let contents = try String(contentsOf: out, encoding: .utf8)
+        XCTAssertTrue(contents.contains("ExportFront"), "the first note's Front should be written")
+        XCTAssertTrue(contents.contains("ExportBack"), "the first note's Back should be written")
+        XCTAssertTrue(contents.contains("SecondQ"), "the second note should be written too")
+        XCTAssertTrue(contents.contains("geo"), "with-tags should include the note's tags")
+    }
+
+    /// `exportCardCsv` (ImportExportService 39, 8) writes each card's rendered
+    /// question/answer to a tab-separated text file and returns the card count —
+    /// the "Cards in Plain Text" export. With `withHtml: false` the rendered text
+    /// is stripped to plain text and still carries the field contents.
+    func testExportCardCsvWritesRenderedCards() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+        _ = try backend.addNote(notetypeID: notetypeID, fields: ["CardQ", "CardA"], deckID: 1)
+
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        let count = try backend.exportCardCsv(
+            outPath: out.path, limit: Backend.wholeCollectionExportLimit(), withHtml: false
+        )
+        XCTAssertEqual(count, 1, "the one card should be exported")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: out.path), "a text file should be written")
+
+        let contents = try String(contentsOf: out, encoding: .utf8)
+        XCTAssertTrue(contents.contains("CardQ"), "the rendered question text should be present")
+        XCTAssertTrue(contents.contains("CardA"), "the rendered answer text should be present")
+    }
+
+    /// Round-trips notes through a CSV/text file: export a source collection's
+    /// notes (with the note-type and deck columns) and re-import them into a fresh
+    /// collection, asserting the field text survives. Exercises `exportNoteCsv`
+    /// and `importCsv` together, including the `notetypeColumn`/`deckColumn`
+    /// mapping the engine writes and reads back.
+    func testNoteCsvExportThenReimportRoundTrip() throws {
+        let source = try freshCollection()
+        let notetypeID = try basicNotetypeID(source)
+        _ = try source.addNote(notetypeID: notetypeID, fields: ["RtFront", "RtBack"], deckID: 1)
+
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        // Export with the note-type column so a re-import can resolve the type.
+        let exported = try source.exportNoteCsv(
+            outPath: out.path, limit: Backend.wholeCollectionExportLimit(),
+            withHtml: false, withTags: true, withDeck: true, withNotetype: true
+        )
+        XCTAssertEqual(exported, 1, "the one note should be exported")
+
+        // Re-import into a fresh collection. The header (#notetype column / #deck
+        // column) lets getCsvMetadata derive a notetype-column mapping.
+        let dest = try freshCollection()
+        let metadata = try dest.getCsvMetadata(path: out.path)
+        let result = try dest.importCsv(path: out.path, metadata: metadata)
+        XCTAssertGreaterThanOrEqual(result.found, 1, "the exported note should be found on re-import")
+
+        XCTAssertEqual(try dest.searchNotes(query: "RtFront").count, 1,
+                       "the round-tripped note's field text should be searchable")
+    }
+
     // MARK: - Statistics
 
     /// `graphs` (StatsService, service 43, method 2) returns real data from the

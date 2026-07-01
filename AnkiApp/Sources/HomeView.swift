@@ -328,6 +328,13 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInImportReplaceConfirm") {
                 goImportExport = true
             }
+            // Open Import & Export and present the CSV import wizard / text export
+            // options (used for the CSV-mapping and text-export screenshots).
+            // ImportExportView reads the same arguments to drive the sheets.
+            if ProcessInfo.processInfo.arguments.contains("-startInCSVImport")
+                || ProcessInfo.processInfo.arguments.contains("-startInTextExport") {
+                goImportExport = true
+            }
             if ProcessInfo.processInfo.arguments.contains("-startInAddNote") {
                 showAddNote = true
             }

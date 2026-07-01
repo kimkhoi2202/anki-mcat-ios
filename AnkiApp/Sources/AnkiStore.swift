@@ -2275,6 +2275,122 @@ final class AnkiStore: ObservableObject {
         }
     }
 
+    // MARK: - CSV / text import
+
+    /// Copies a picked `.csv`/`.tsv`/`.txt` file into the app's temp dir (so the
+    /// engine can read it by path) and asks the engine for its `CsvMetadata`
+    /// (detected delimiter, columns, preview rows, and a default note-type + deck
+    /// + field→column mapping) — the data the CSV import wizard shows. Reading
+    /// metadata doesn't mutate the collection, so it isn't gated behind
+    /// `runExclusive`. The caller owns the returned temp file and must remove it
+    /// when the wizard is dismissed (on import success or cancel); on failure
+    /// here it's cleaned up before throwing.
+    func prepareCsvImport(
+        from url: URL
+    ) async throws -> (localURL: URL, metadata: Anki_ImportExport_CsvMetadata) {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let localURL = try copyIntoTemp(url)
+        do {
+            let path = localURL.path
+            let metadata = try await runDetached { try backend.getCsvMetadata(path: path) }
+            return (localURL, metadata)
+        } catch {
+            try? FileManager.default.removeItem(at: localURL)
+            throw error
+        }
+    }
+
+    /// Re-derives the engine's default CSV metadata/mapping for a chosen note type
+    /// / delimiter / is-HTML — what Anki's wizard does when the user changes those
+    /// controls (the engine recomputes a sensible default field mapping). Doesn't
+    /// mutate the collection.
+    func recomputeCsvMetadata(
+        path: String,
+        delimiter: Anki_ImportExport_CsvMetadata.Delimiter?,
+        notetypeID: Int64?,
+        deckID: Int64?,
+        isHtml: Bool?
+    ) async throws -> Anki_ImportExport_CsvMetadata {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        return try await runDetached {
+            try backend.getCsvMetadata(
+                path: path, delimiter: delimiter, notetypeID: notetypeID,
+                deckID: deckID, isHtml: isHtml
+            )
+        }
+    }
+
+    /// Imports the CSV/text file at `path` using the chosen `metadata` (note type,
+    /// deck, field/tags column mapping, delimiter, is-HTML, duplicate handling).
+    /// Runs inside the exclusive-op gate since it mutates the collection, off the
+    /// main actor, and refreshes derived UI state on success. Returns the
+    /// add/update/duplicate summary (same shape as an `.apkg` import).
+    func importCsv(
+        path: String, metadata: Anki_ImportExport_CsvMetadata
+    ) async throws -> ImportResult {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        return try await runExclusive {
+            let result = try await runDetached {
+                try backend.importCsv(path: path, metadata: metadata)
+            }
+            refreshAfterImport()
+            return result
+        }
+    }
+
+    // MARK: - Notes / cards text (CSV) export
+
+    /// Exports notes to a temporary tab-separated text file, returning the file
+    /// URL for the share sheet. `deckID == nil` exports the whole collection;
+    /// otherwise it scopes to that deck (and its subdecks). The `with*` toggles
+    /// mirror Anki's text-export dialog (keep HTML, include tags/deck/notetype
+    /// columns). Gated behind `runExclusive` as it holds the backend for the write.
+    func exportNotesText(
+        deckID: Int64?,
+        name: String,
+        withHTML: Bool,
+        withTags: Bool,
+        withDeck: Bool,
+        withNotetype: Bool
+    ) async throws -> URL {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let outURL = Self.exportFileURL(name: deckID == nil ? "All notes" : name, ext: "txt")
+        let path = outURL.path
+        let limit = Self.exportLimit(deckID: deckID)
+        return try await runExclusive {
+            _ = try await runDetached {
+                try backend.exportNoteCsv(
+                    outPath: path, limit: limit, withHtml: withHTML,
+                    withTags: withTags, withDeck: withDeck, withNotetype: withNotetype
+                )
+            }
+            return outURL
+        }
+    }
+
+    /// Exports cards (each card's rendered question/answer) to a temporary
+    /// tab-separated text file, returning the file URL for the share sheet. Scope
+    /// and gating match `exportNotesText`; `withHTML` keeps the rendered HTML.
+    func exportCardsText(deckID: Int64?, name: String, withHTML: Bool) async throws -> URL {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let outURL = Self.exportFileURL(name: deckID == nil ? "All cards" : name, ext: "txt")
+        let path = outURL.path
+        let limit = Self.exportLimit(deckID: deckID)
+        return try await runExclusive {
+            _ = try await runDetached {
+                try backend.exportCardCsv(outPath: path, limit: limit, withHtml: withHTML)
+            }
+            return outURL
+        }
+    }
+
+    /// An `ExportLimit` for an optional deck scope: a specific deck, or the whole
+    /// collection when `deckID` is `nil`.
+    private static func exportLimit(deckID: Int64?) -> Anki_ImportExport_ExportLimit {
+        if let deckID { return Backend.exportLimit(deckID: deckID) }
+        return Backend.wholeCollectionExportLimit()
+    }
+
     /// Clone of AnkiDroid's `ImportUtils.isCollectionPackage`: a `.colpkg`, or the
     /// conventional whole-collection export name `collection.apkg`, is a full
     /// collection import; any other `.apkg` is a note/deck import.

@@ -19,10 +19,14 @@ import SwiftProtobuf
 /// | importAnkiPackage       | 2     | ImportAnkiPackageRequest         | ImportResponse       |
 /// | getImportAnkiPackagePresets | 3 | Empty                            | ImportAnkiPackageOptions |
 /// | exportAnkiPackage       | 4     | ExportAnkiPackageRequest         | generic.UInt32       |
+/// | getCsvMetadata          | 5     | CsvMetadataRequest               | CsvMetadata          |
+/// | importCsv               | 6     | ImportCsvRequest                 | ImportResponse       |
+/// | exportNoteCsv           | 7     | ExportNoteCsvRequest             | generic.UInt32       |
+/// | exportCardCsv           | 8     | ExportCardCsvRequest             | generic.UInt32       |
 ///
-/// `.apkg` import/export act on the open collection. `.colpkg` import/export
-/// change the collection file itself, so the app must manage the open/close
-/// lifecycle around them (see `AnkiStore`).
+/// `.apkg` import/export and CSV/text import/export act on the open collection.
+/// `.colpkg` import/export change the collection file itself, so the app must
+/// manage the open/close lifecycle around them (see `AnkiStore`).
 public extension Backend {
     private enum ImportExportMethod {
         static let importCollectionPackage: UInt32 = 0
@@ -30,6 +34,10 @@ public extension Backend {
         static let importAnkiPackage: UInt32 = 2
         static let getImportAnkiPackagePresets: UInt32 = 3
         static let exportAnkiPackage: UInt32 = 4
+        static let getCsvMetadata: UInt32 = 5
+        static let importCsv: UInt32 = 6
+        static let exportNoteCsv: UInt32 = 7
+        static let exportCardCsv: UInt32 = 8
     }
     private static let importExportService: UInt32 = 39
 
@@ -170,6 +178,112 @@ public extension Backend {
             service: Self.importExportService, method: ImportExportMethod.exportCollectionPackage,
             input: try req.serializedData()
         )
+    }
+
+    // MARK: - CSV / text import
+
+    /// ImportExportService.getCsvMetadata (39, 5). Inspects a `.csv`/`.tsv`/`.txt`
+    /// file and returns the engine's detected/derived `CsvMetadata`: the
+    /// delimiter, whether the contents are HTML, the column labels (which also
+    /// give the column count), a few preview rows, and a default note-type + deck
+    /// + field→column mapping the user can then adjust — the data behind Anki's
+    /// CSV import wizard.
+    ///
+    /// Pass `notetypeID`/`deckID` to ask the engine to recompute the default
+    /// mapping for a chosen note type / deck (what the desktop does when the user
+    /// changes either), and `delimiter`/`isHtml` to override auto-detection
+    /// (leaving them `nil` lets the engine detect them). Optional fields are only
+    /// set when provided, matching the proto's "unset = auto" convention.
+    func getCsvMetadata(
+        path: String,
+        delimiter: Anki_ImportExport_CsvMetadata.Delimiter? = nil,
+        notetypeID: Int64? = nil,
+        deckID: Int64? = nil,
+        isHtml: Bool? = nil
+    ) throws -> Anki_ImportExport_CsvMetadata {
+        var req = Anki_ImportExport_CsvMetadataRequest()
+        req.path = path
+        if let delimiter { req.delimiter = delimiter }
+        if let notetypeID { req.notetypeID = notetypeID }
+        if let deckID { req.deckID = deckID }
+        if let isHtml { req.isHtml = isHtml }
+        return try run(
+            service: Self.importExportService, method: ImportExportMethod.getCsvMetadata,
+            req, returning: Anki_ImportExport_CsvMetadata.self
+        )
+    }
+
+    /// ImportExportService.importCsv (39, 6). Imports the rows of the file at
+    /// `path` into the open collection using the chosen `metadata` (note type,
+    /// deck, per-field column mapping, tags column, delimiter, is-HTML, duplicate
+    /// handling, …). Returns the same `ImportResult` summary as an `.apkg` import
+    /// (found / added / updated / duplicate). The change is undoable.
+    @discardableResult
+    func importCsv(
+        path: String, metadata: Anki_ImportExport_CsvMetadata
+    ) throws -> ImportResult {
+        var req = Anki_ImportExport_ImportCsvRequest()
+        req.path = path
+        req.metadata = metadata
+        let resp = try run(
+            service: Self.importExportService, method: ImportExportMethod.importCsv,
+            req, returning: Anki_ImportExport_ImportResponse.self
+        )
+        return ImportResult(resp.log)
+    }
+
+    // MARK: - Notes / cards text (CSV) export
+
+    /// ImportExportService.exportNoteCsv (39, 7). Writes the notes selected by
+    /// `limit` to a tab-separated text file at `outPath`, returning the number of
+    /// notes exported. The `with*` toggles add optional columns (matching Anki's
+    /// text-export dialog): `withHtml` keeps field HTML (off strips it to plain
+    /// text), and `withTags`/`withDeck`/`withNotetype`/`withGuid` prepend the
+    /// corresponding columns.
+    @discardableResult
+    func exportNoteCsv(
+        outPath: String,
+        limit: Anki_ImportExport_ExportLimit,
+        withHtml: Bool = false,
+        withTags: Bool = true,
+        withDeck: Bool = false,
+        withNotetype: Bool = false,
+        withGuid: Bool = false
+    ) throws -> Int {
+        var req = Anki_ImportExport_ExportNoteCsvRequest()
+        req.outPath = outPath
+        req.withHtml = withHtml
+        req.withTags = withTags
+        req.withDeck = withDeck
+        req.withNotetype = withNotetype
+        req.withGuid = withGuid
+        req.limit = limit
+        let resp = try run(
+            service: Self.importExportService, method: ImportExportMethod.exportNoteCsv,
+            req, returning: Anki_Generic_UInt32.self
+        )
+        return Int(resp.val)
+    }
+
+    /// ImportExportService.exportCardCsv (39, 8). Writes the cards selected by
+    /// `limit` to a tab-separated text file at `outPath` (each card's rendered
+    /// question/answer), returning the number of cards exported. `withHtml` keeps
+    /// the rendered HTML; off strips it to plain text.
+    @discardableResult
+    func exportCardCsv(
+        outPath: String,
+        limit: Anki_ImportExport_ExportLimit,
+        withHtml: Bool = false
+    ) throws -> Int {
+        var req = Anki_ImportExport_ExportCardCsvRequest()
+        req.outPath = outPath
+        req.withHtml = withHtml
+        req.limit = limit
+        let resp = try run(
+            service: Self.importExportService, method: ImportExportMethod.exportCardCsv,
+            req, returning: Anki_Generic_UInt32.self
+        )
+        return Int(resp.val)
     }
 }
 
