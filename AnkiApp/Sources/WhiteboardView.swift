@@ -11,6 +11,7 @@ import PencilKit
 /// drawing at the start of each stroke, so "undo" removes exactly the last stroke
 /// (or erase) and "clear" wipes the canvas — both without relying on PencilKit's
 /// own undo manager. Kept on the main thread (SwiftUI + UIKit callbacks only).
+@MainActor
 final class WhiteboardController: ObservableObject {
     /// Pen colors offered in the toolbar. A small set of vivid tones chosen to
     /// read on both light and dark cards (AnkiDroid's whiteboard is likewise a
@@ -194,14 +195,18 @@ struct WhiteboardCanvas: UIViewRepresentable {
         let controller: WhiteboardController
         init(controller: WhiteboardController) { self.controller = controller }
 
+        // PencilKit invokes these on the main thread; `assumeIsolated` lets the
+        // nonisolated delegate call the `@MainActor` controller without a hop.
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
-            controller.snapshotBeforeStroke()
+            MainActor.assumeIsolated { controller.snapshotBeforeStroke() }
         }
 
         /// Fires on any drawing change (stroke added/erased, undo, clear), so the
         /// controller's `hasContent` stays accurate for the editor's Insert button.
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-            controller.updateHasContent(!canvasView.drawing.strokes.isEmpty)
+            MainActor.assumeIsolated {
+                controller.updateHasContent(!canvasView.drawing.strokes.isEmpty)
+            }
         }
     }
 }
