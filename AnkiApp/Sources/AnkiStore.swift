@@ -535,6 +535,26 @@ final class AnkiStore: ObservableObject {
         return (try? backend.notetypeFields(notetypeID: notetypeID)) ?? []
     }
 
+    /// Whether `notetypeID` is an Image Occlusion note type (its config's
+    /// `original_stock_kind` is IMAGE_OCCLUSION). The Note Editor uses this to
+    /// switch to the image-occlusion add flow (pick image → web editor) instead of
+    /// showing the raw IO fields, mirroring AnkiDroid's `NoteType.isImageOcclusion`.
+    func isImageOcclusionNotetype(_ notetypeID: Int64) -> Bool {
+        guard let backend, let notetype = try? backend.notetype(id: notetypeID) else { return false }
+        return notetype.config.originalStockKind == .imageOcclusion
+    }
+
+    /// Sets the collection's current deck without touching the reviewer. New image
+    /// occlusion notes are added to the *current* deck by the engine
+    /// (`add_image_occlusion_note` reads `get_current_deck`, which takes no deck
+    /// argument), so the add flow calls this to target the deck the user picked
+    /// before opening the web editor.
+    func setCurrentDeck(_ deckID: Int64) {
+        guard let backend else { return }
+        try? backend.setCurrentDeck(id: deckID)
+        currentDeckID = deckID
+    }
+
     /// Loads an existing note's notetype, fields, and tags for editing.
     func note(forEditing noteID: Int64) -> NoteForEditing? {
         guard let backend else { return nil }

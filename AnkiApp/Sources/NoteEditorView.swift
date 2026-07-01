@@ -69,6 +69,18 @@ struct NoteEditorView: View {
     /// let an earlier timer clear a newer banner.
     @State private var addConfirmationToken = UUID()
 
+    /// True when the selected note type is Image Occlusion, which swaps the raw
+    /// field editors for the image-occlusion flow (pick an image → web editor to
+    /// add, or "Edit Occlusions" → web editor to edit), mirroring AnkiDroid's
+    /// NoteEditor. Recomputed whenever the note type is (re)loaded.
+    @State private var isIONotetype = false
+    /// Drives the image source chooser (Photo Library / Take Photo) for a new IO note.
+    @State private var ioImageSourceShown = false
+    /// The concrete IO image picker currently presented as a sheet.
+    @State private var ioImageSource: IOImageSource?
+    /// Presents the web image-occlusion editor (add on a picked image, or edit).
+    @State private var imageOcclusionPresentation: ImageOcclusionPresentation?
+
     var body: some View {
         NavigationStack {
             Form {
@@ -92,9 +104,13 @@ struct NoteEditorView: View {
                     Button(isEditing ? "Cancel" : "Done") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isEditing ? "Save" : "Add") { save() }
-                        .fontWeight(.semibold)
-                        .disabled(!didLoad || fieldNames.isEmpty)
+                    // Image Occlusion notes are saved inside the web editor (its own
+                    // Add/Save), so the note editor hides its save action for them.
+                    if !isIONotetype {
+                        Button(isEditing ? "Save" : "Add") { save() }
+                            .fontWeight(.semibold)
+                            .disabled(!didLoad || fieldNames.isEmpty)
+                    }
                 }
             }
             .alert(
@@ -132,6 +148,26 @@ struct NoteEditorView: View {
             }
             .sheet(item: $activeMediaPicker) { picker in
                 mediaPickerView(for: picker)
+            }
+            // Image Occlusion add flow: choose an image source, then pick, then
+            // open the web editor pointed at the picked image (mirrors AnkiDroid's
+            // NoteEditor image-selection buttons → ImageOcclusion activity).
+            .confirmationDialog(
+                "Add Image Occlusion",
+                isPresented: $ioImageSourceShown,
+                titleVisibility: .visible
+            ) {
+                Button("Photo Library") { presentIOImagePicker(.photoLibrary) }
+                if CameraPicker.isAvailable {
+                    Button("Take Photo") { presentIOImagePicker(.camera) }
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+            .sheet(item: $ioImageSource) { source in
+                ioImagePickerView(for: source)
+            }
+            .sheet(item: $imageOcclusionPresentation) { presentation in
+                imageOcclusionEditor(for: presentation)
             }
             .overlay(alignment: .top) { addConfirmationBanner }
             .animation(.easeInOut(duration: 0.2), value: addConfirmation)
@@ -199,7 +235,9 @@ struct NoteEditorView: View {
 
     private var fieldsSection: some View {
         Section {
-            if fieldNames.isEmpty {
+            if isIONotetype {
+                imageOcclusionCTA
+            } else if fieldNames.isEmpty {
                 Text("This note type has no fields.")
                     .font(DS.Typography.body)
                     .foregroundStyle(DS.textSecondary)
@@ -232,11 +270,17 @@ struct NoteEditorView: View {
                 }
             }
         } header: {
-            sectionHeader("Fields")
+            sectionHeader(isIONotetype ? "Image Occlusion" : "Fields")
         } footer: {
-            sectionFooter(isEditing
-                ? "The first field can’t be empty."
-                : "The first field can’t be empty. Pin a field to keep its value for the next note.")
+            if isIONotetype {
+                sectionFooter(isEditing
+                    ? "Edit the occlusion masks and note fields in the editor."
+                    : "Pick an image, then draw occlusion masks in the editor.")
+            } else {
+                sectionFooter(isEditing
+                    ? "The first field can’t be empty."
+                    : "The first field can’t be empty. Pin a field to keep its value for the next note.")
+            }
         }
     }
 
@@ -343,6 +387,104 @@ struct NoteEditorView: View {
         }
     }
 
+    // MARK: - Image Occlusion UI
+
+    /// Shown in place of the raw fields when an Image Occlusion note type is
+    /// selected: an explanation plus the entry action — "Select Image" (add) or
+    /// "Edit Occlusions" (edit) — that opens the web mask editor.
+    @ViewBuilder
+    private var imageOcclusionCTA: some View {
+        VStack(alignment: .leading, spacing: DS.Spacing.m) {
+            Text("Image Occlusion hides parts of an image, revealed on the back.")
+                .font(DS.Typography.body)
+                .foregroundStyle(DS.textSecondary)
+            if case .edit(let noteID) = mode {
+                Button {
+                    imageOcclusionPresentation = .edit(noteID: noteID)
+                } label: {
+                    Label("Edit Occlusions", systemImage: "rectangle.dashed")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Button {
+                    ioImageSourceShown = true
+                } label: {
+                    Label("Select Image", systemImage: "photo.on.rectangle.angled")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(.vertical, DS.Spacing.xs)
+    }
+
+    /// Presents the chosen IO image picker just after the source dialog dismisses
+    /// (same defer as `presentPicker`, so the sheet isn't dropped).
+    private func presentIOImagePicker(_ source: IOImageSource) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            ioImageSource = source
+        }
+    }
+
+    /// Builds the concrete IO image picker; its result opens the web editor.
+    @ViewBuilder
+    private func ioImagePickerView(for source: IOImageSource) -> some View {
+        switch source {
+        case .photoLibrary:
+            PhotoLibraryPicker { media in startImageOcclusionAdd(media) }
+                .ignoresSafeArea()
+        case .camera:
+            CameraPicker { media in startImageOcclusionAdd(media) }
+                .ignoresSafeArea()
+        }
+    }
+
+    /// Builds the web image-occlusion editor for the active add/edit target.
+    /// After a successful save the editor refreshes the presenting screen; for
+    /// edit it also closes the note editor (back to wherever it was opened from).
+    @ViewBuilder
+    private func imageOcclusionEditor(for presentation: ImageOcclusionPresentation) -> some View {
+        switch presentation {
+        case .add(let url):
+            ImageOcclusionView(
+                store: store,
+                mode: .add(imagePath: url.path),
+                temporaryImageURL: url,
+                onSaved: { onSaved() }
+            )
+        case .edit(let noteID):
+            ImageOcclusionView(
+                store: store,
+                mode: .edit(noteID: noteID),
+                onSaved: {
+                    onSaved()
+                    dismiss()
+                }
+            )
+        }
+    }
+
+    /// Handles the IO image pick: dismiss the picker, write the bytes to a temp
+    /// file, point the collection's current deck at the chosen deck (the engine
+    /// adds IO notes to the current deck), then open the web editor on the image.
+    private func startImageOcclusionAdd(_ media: PickedMedia?) {
+        ioImageSource = nil
+        guard let media else { return }
+        guard let url = ImageOcclusionView.writeTemporaryImage(media) else {
+            mediaErrorMessage = "Couldn’t prepare the image for occlusion."
+            return
+        }
+        store.setCurrentDeck(selectedDeckID)
+        // Let the picker sheet finish dismissing before presenting the editor
+        // sheet, so the transition isn't dropped.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            imageOcclusionPresentation = .add(imageURL: url)
+        }
+    }
+
     /// The transient "note added" banner shown after an ADD-mode save, anchored
     /// at the top so it stays visible above the keyboard while the editor stays
     /// open for the next note.
@@ -436,6 +578,9 @@ struct NoteEditorView: View {
                 return
             }
             selectedNotetypeID = note.notetypeID
+            // An Image Occlusion note edits its masks/fields in the web editor
+            // ("Edit Occlusions") rather than through the raw field inputs.
+            isIONotetype = store.isImageOcclusionNotetype(note.notetypeID)
             // Ensure the (fixed) notetype is present so the picker shows its name.
             if !notetypes.contains(where: { $0.id == note.notetypeID }) {
                 notetypes.append(NotetypeOption(id: note.notetypeID, name: "Note type"))
@@ -472,6 +617,8 @@ struct NoteEditorView: View {
     /// Loads the selected notetype's field labels, resetting (ADD) or preserving
     /// (defensive) the current values to match the new field count.
     private func reloadFields(preservingValues: Bool) {
+        // An Image Occlusion type swaps the raw fields for the IO add flow.
+        isIONotetype = store.isImageOcclusionNotetype(selectedNotetypeID)
         let names = store.fieldNames(forNotetype: selectedNotetypeID)
         fieldNames = names
         fieldValues = preservingValues
@@ -749,6 +896,27 @@ private struct MediaSourceChoice: Identifiable {
     let fieldIndex: Int
     let caret: NSRange
     let kind: RichFieldMediaKind
+}
+
+/// The image source for a new Image Occlusion note (drives its picker sheet).
+private enum IOImageSource: Identifiable {
+    case photoLibrary
+    case camera
+    var id: String { self == .photoLibrary ? "io-photo" : "io-camera" }
+}
+
+/// What the web image-occlusion editor is being opened for (drives its sheet):
+/// a new note from a just-picked temporary image, or editing an existing note.
+private enum ImageOcclusionPresentation: Identifiable {
+    case add(imageURL: URL)
+    case edit(noteID: Int64)
+
+    var id: String {
+        switch self {
+        case .add(let url): return "io-add-\(url.path)"
+        case .edit(let noteID): return "io-edit-\(noteID)"
+        }
+    }
 }
 
 /// The concrete media picker presented as a sheet, carrying the field + caret to

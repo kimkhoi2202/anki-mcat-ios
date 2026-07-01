@@ -61,6 +61,9 @@ struct HomeView: View {
     // Card Info / Change Note Type (T3.3) screenshot/automation hooks.
     @State private var cardInfoTarget: CardInfoTarget?
     @State private var changeNotetypeNoteID: HomeNoteTarget?
+    // Image Occlusion editor screenshot/automation hook (opens the web mask
+    // editor on a generated sample image).
+    @State private var imageOcclusionHookTarget: ImageOcclusionAddTarget?
 
     // Note-type management (full-parity) screenshot/automation hooks: jump
     // straight to the manager list, a note type's Fields editor, or its Card
@@ -212,6 +215,16 @@ struct HomeView: View {
                 ChangeNotetypeView(store: store, noteID: target.id) {
                     store.refreshDecks()
                 }
+            }
+            // Image Occlusion editor (verification hook): the web mask editor
+            // opened on a generated sample image in add mode.
+            .sheet(item: $imageOcclusionHookTarget) { target in
+                ImageOcclusionView(
+                    store: store,
+                    mode: .add(imagePath: target.imageURL.path),
+                    temporaryImageURL: target.imageURL,
+                    onSaved: { store.refreshDecks() }
+                )
             }
             // Create deck — clone of AnkiDroid's CreateDeckDialog text prompt.
             .alert("New Deck", isPresented: $showCreateDeck) {
@@ -386,6 +399,13 @@ struct HomeView: View {
             if ProcessInfo.processInfo.arguments.contains("-startInChangeNotetype") {
                 if let noteID = await store.firstNoteID() {
                     changeNotetypeNoteID = HomeNoteTarget(id: noteID)
+                }
+            }
+            // Open the Image Occlusion web editor on a generated sample image
+            // (add mode) — full-parity IO screenshot / round-trip verification.
+            if ProcessInfo.processInfo.arguments.contains("-startInImageOcclusion") {
+                if let url = Self.makeSampleImageOcclusionURL() {
+                    imageOcclusionHookTarget = ImageOcclusionAddTarget(imageURL: url)
                 }
             }
             // Note-type management screenshots. `-startInManageNotetypes` opens
@@ -820,6 +840,55 @@ struct HomeView: View {
         }
         return error.localizedDescription
     }
+
+    #if DEBUG
+    /// Renders a labelled sample diagram and writes it to a temp file, returning
+    /// the URL — a stand-in "picked image" for the `-startInImageOcclusion`
+    /// screenshot hook so the web mask editor has a real image to occlude without
+    /// needing the photo picker. Debug-only.
+    static func makeSampleImageOcclusionURL() -> URL? {
+        let size = CGSize(width: 640, height: 440)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let image = renderer.image { ctx in
+            let cg = ctx.cgContext
+            UIColor(white: 0.98, alpha: 1).setFill()
+            cg.fill(CGRect(origin: .zero, size: size))
+            let title = "Sample Diagram"
+            (title as NSString).draw(
+                at: CGPoint(x: 24, y: 20),
+                withAttributes: [
+                    .font: UIFont.boldSystemFont(ofSize: 26),
+                    .foregroundColor: UIColor.darkGray,
+                ]
+            )
+            let boxes: [(CGRect, UIColor, String)] = [
+                (CGRect(x: 40, y: 90, width: 240, height: 120), UIColor.systemBlue, "Region A"),
+                (CGRect(x: 360, y: 90, width: 240, height: 120), UIColor.systemGreen, "Region B"),
+                (CGRect(x: 40, y: 260, width: 240, height: 120), UIColor.systemOrange, "Region C"),
+                (CGRect(x: 360, y: 260, width: 240, height: 120), UIColor.systemPurple, "Region D"),
+            ]
+            for (rect, color, label) in boxes {
+                color.withAlphaComponent(0.25).setFill()
+                color.setStroke()
+                let path = UIBezierPath(roundedRect: rect, cornerRadius: 12)
+                path.lineWidth = 3
+                path.fill()
+                path.stroke()
+                (label as NSString).draw(
+                    at: CGPoint(x: rect.minX + 16, y: rect.midY - 12),
+                    withAttributes: [
+                        .font: UIFont.systemFont(ofSize: 20, weight: .semibold),
+                        .foregroundColor: color,
+                    ]
+                )
+            }
+        }
+        guard let data = image.pngData() else { return nil }
+        return ImageOcclusionView.writeTemporaryImage(
+            PickedMedia(data: data, desiredName: "sample-occlusion.png")
+        )
+    }
+    #endif
 }
 
 /// Identifiable wrapper so the Change Note Type sheet can be driven by

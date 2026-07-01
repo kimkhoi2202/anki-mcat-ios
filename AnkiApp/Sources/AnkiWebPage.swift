@@ -3,6 +3,25 @@ import WebKit
 import UIKit
 import AnkiKit
 
+/// A lightweight handle a host view can pass into ``AnkiWebPage`` to imperatively
+/// run JavaScript in the hosted page after it loads. Kept as a plain reference
+/// type (held via `@StateObject`) so it survives re-renders; it publishes
+/// nothing, so setting the WebView never triggers a view update.
+///
+/// The image-occlusion editor uses this to invoke the page's own
+/// `anki.imageOcclusion.save()` from a native Save button, exactly as AnkiDroid's
+/// `ImageOcclusion` fragment does from its toolbar (`evaluateJavascript`).
+@MainActor
+final class AnkiWebPageController: ObservableObject {
+    fileprivate weak var webView: WKWebView?
+
+    /// Evaluates `script` in the hosted page, ignoring the result. A no-op until
+    /// the page's WebView exists (assigned by ``AnkiWebPage`` on creation).
+    func evaluateJavaScript(_ script: String) {
+        webView?.evaluateJavaScript(script, completionHandler: nil)
+    }
+}
+
 /// Hosts one of Anki's shared web pages (the same SvelteKit pages AnkiDroid and
 /// desktop Anki use — Statistics, Card Info, Deck Options, …) in a `WKWebView`,
 /// backed by our Rust engine.
@@ -23,6 +42,11 @@ struct AnkiWebPage: UIViewRepresentable {
     let backend: Backend
     /// Render Anki's night theme (passed as the `#night` URL fragment).
     var nightMode: Bool = false
+    /// Optional handle giving the host imperative access to the page (to run JS in
+    /// it). Used by the image-occlusion editor to trigger the page's own
+    /// `anki.imageOcclusion.save()` from a native toolbar button, mirroring
+    /// AnkiDroid's `webViewLayout.evaluateJavascript("anki.imageOcclusion.save()")`.
+    var controller: AnkiWebPageController? = nil
     /// Called when the page asks the host to close (e.g. Deck Options after save).
     var onClose: (() -> Void)? = nil
 
@@ -67,6 +91,10 @@ struct AnkiWebPage: UIViewRepresentable {
         // they are silent no-ops in a WKWebView, which hides backend errors.
         webView.uiDelegate = context.coordinator
         context.coordinator.onClose = onClose
+        // Hand the WebView to the optional controller so the host can drive it
+        // (e.g. the IO editor's Save button calling `anki.imageOcclusion.save()`).
+        // `self.` disambiguates from the local `controller` (userContentController).
+        self.controller?.webView = webView
         load(into: webView)
         context.coordinator.loadedKey = loadKey
         return webView
@@ -74,6 +102,7 @@ struct AnkiWebPage: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.onClose = onClose
+        controller?.webView = webView
         // Reload if the requested page or theme changed.
         if context.coordinator.loadedKey != loadKey {
             load(into: webView)
@@ -207,7 +236,14 @@ struct AnkiWebPage: UIViewRepresentable {
                 // save — the host drives the close off this RPC. We're already on the
                 // main actor and `dismiss()` defers teardown, so the page still
                 // receives this reply.
-                if method == "updateDeckConfigs" {
+                //
+                // The image-occlusion editor is driven the same way: it never sends a
+                // UI close command, so we close off the successful add/update RPC
+                // (the backend calls are made only on success, mirroring AnkiDroid's
+                // `ImageOcclusion.handlePostRequest` detecting these method names).
+                if method == "updateDeckConfigs"
+                    || method == "addImageOcclusionNote"
+                    || method == "updateImageOcclusionNote" {
                     onClose?()
                 }
                 return (data.base64EncodedString(), nil)
