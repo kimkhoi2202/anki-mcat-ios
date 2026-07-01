@@ -193,6 +193,26 @@ public extension Backend {
         try updateNotetype(nt)
     }
 
+    // MARK: - Sticky fields (per-notetype, persisted + synced)
+
+    /// Reads each field's sticky flag (field order) — whether the editor keeps its
+    /// value for the next added note. Per-notetype and persisted in the collection
+    /// (`field.config.sticky`), so it survives relaunch and syncs, exactly like
+    /// Anki's sticky fields.
+    func notetypeFieldStickies(notetypeID: Int64) throws -> [Bool] {
+        try notetype(id: notetypeID).fieldStickies
+    }
+
+    /// Sets the sticky flag on the field at `index` and persists it (load-mutate-
+    /// save via `updateNotetype`, keeping every field's `ord`). Mirrors AnkiDroid's
+    /// per-field sticky toggle, which flips `field.config.sticky` on the note type
+    /// and saves it.
+    func setNotetypeFieldSticky(notetypeID: Int64, at index: Int, sticky: Bool) throws {
+        var nt = try notetype(id: notetypeID)
+        nt.setFieldSticky(at: index, sticky)
+        try updateNotetype(nt)
+    }
+
     // MARK: - Card-template preview
 
     /// CardRenderingService.renderUncommittedCard (27, 7).
@@ -214,6 +234,77 @@ public extension Backend {
         req.fillEmpty = fillEmpty
         let resp = try run(service: 27, method: 7, req, returning: Anki_CardRendering_RenderCardResponse.self)
         return (Backend.joinNodes(resp.questionNodes), Backend.joinNodes(resp.answerNodes))
+    }
+
+    /// Every card the *uncommitted* note (`notetypeID` + `fields`) would generate,
+    /// rendered via `renderUncommittedCard` for the editor's Preview — one entry
+    /// per card, each with its question/answer HTML, the note type's CSS, and a
+    /// label/ordinal to drive the preview's card picker.
+    ///
+    /// - A **normal** note type yields one entry per card template (ordinal =
+    ///   template index), labelled by the template's name.
+    /// - A **cloze** note type has a single template but one card per cloze number
+    ///   (`{{cN::…}}`); each entry's ordinal is `number − 1` and it's labelled
+    ///   "Cloze N". A cloze note with no deletions still previews its ord-0 card so
+    ///   the Preview isn't blank.
+    ///
+    /// `fillEmpty` is on, so empty fields render as their name and a fresh note
+    /// still previews (matching desktop's Card Layout / AnkiDroid's Preview).
+    func renderUncommittedNoteCards(
+        notetypeID: Int64, fields: [String]
+    ) throws -> [EditorCardPreview] {
+        let nt = try notetype(id: notetypeID)
+        var note = Anki_Notes_Note()
+        note.notetypeID = notetypeID
+        note.fields = fields
+        let css = nt.config.css
+
+        if nt.isCloze {
+            guard let template = nt.templates.first else { return [] }
+            let numbers = (try? clozeNumbersInNote(notetypeID: notetypeID, fields: fields)) ?? []
+            // No deletions yet → still show the ord-0 card so Preview isn't blank.
+            let ordinals = numbers.isEmpty ? [0] : numbers.map { $0 - 1 }
+            return ordinals.map { ord in
+                let rendered = (try? renderUncommittedCard(note: note, cardOrd: ord, template: template))
+                    ?? (question: "", answer: "")
+                return EditorCardPreview(
+                    ordinal: ord, label: "Cloze \(ord + 1)",
+                    question: rendered.question, answer: rendered.answer, css: css
+                )
+            }
+        }
+
+        return nt.templates.enumerated().map { index, template in
+            let rendered = (try? renderUncommittedCard(note: note, cardOrd: index, template: template))
+                ?? (question: "", answer: "")
+            let name = template.name.isEmpty ? "Card \(index + 1)" : template.name
+            return EditorCardPreview(
+                ordinal: index, label: name,
+                question: rendered.question, answer: rendered.answer, css: css
+            )
+        }
+    }
+}
+
+/// One card of an uncommitted note, rendered for the note editor's Preview: its
+/// ordinal (for the `card cardN` body class + the multi-card picker), a display
+/// label, the question/answer HTML, and the note type's CSS. Decoupled from the
+/// generated render protobufs, like `CardPreviewContent`.
+public struct EditorCardPreview: Sendable, Equatable, Identifiable {
+    public let ordinal: Int
+    public let label: String
+    public let question: String
+    public let answer: String
+    public let css: String
+
+    public var id: Int { ordinal }
+
+    public init(ordinal: Int, label: String, question: String, answer: String, css: String) {
+        self.ordinal = ordinal
+        self.label = label
+        self.question = question
+        self.answer = answer
+        self.css = css
     }
 }
 

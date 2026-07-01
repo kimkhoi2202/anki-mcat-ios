@@ -2217,4 +2217,205 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertEqual(edited.plan(showingAnswer: true),
                        AutoAdvancePlan(seconds: 12, action: .answer(.good)))
     }
+
+    // MARK: - Note editor parity
+
+    /// The cloze stock note type a fresh collection ships (for cloze-specific
+    /// checks / previews).
+    private func clozeNotetypeID(_ backend: Backend) throws -> Int64 {
+        let notetypes = try backend.notetypeNames()
+        let cloze = try XCTUnwrap(
+            notetypes.first(where: { $0.name.hasPrefix("Cloze") }),
+            "fresh collection should ship a Cloze notetype"
+        )
+        return cloze.id
+    }
+
+    /// `note_fields_check` (NotesService 25,11) over the live engine: a fresh
+    /// first field is NORMAL, an empty one is EMPTY, and one matching an existing
+    /// note of the same type is DUPLICATE — but only when the id differs (an
+    /// EDIT-mode self-check passing the note's own id is NORMAL, not a dupe).
+    func testNoteFieldsCheckStates() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+
+        // Clean, non-duplicate note.
+        XCTAssertEqual(
+            try backend.noteFieldsCheck(notetypeID: notetypeID, fields: ["Bonjour", "Hello"]),
+            .normal
+        )
+        // Empty first field.
+        XCTAssertEqual(
+            try backend.noteFieldsCheck(notetypeID: notetypeID, fields: ["", "Hello"]),
+            .empty
+        )
+
+        // Persist it, then an identical first field is a duplicate.
+        let noteID = try backend.addNote(notetypeID: notetypeID, fields: ["Bonjour", "Hello"], deckID: 1)
+        XCTAssertEqual(
+            try backend.noteFieldsCheck(notetypeID: notetypeID, fields: ["Bonjour", "Different"]),
+            .duplicate
+        )
+        // Passing the note's own id excludes it (EDIT mode → not a self-duplicate).
+        XCTAssertEqual(
+            try backend.noteFieldsCheck(
+                notetypeID: notetypeID, fields: ["Bonjour", "Hello"], noteID: noteID
+            ),
+            .normal
+        )
+    }
+
+    /// Cloze-specific fields-check states + `cloze_numbers_in_note`: a `{{cN::…}}`
+    /// in a non-cloze type is NOTETYPE_NOT_CLOZE; a cloze type with no deletions
+    /// is MISSING_CLOZE; and the cloze numbers are enumerated for the preview.
+    func testClozeChecksAndNumbers() throws {
+        let backend = try freshCollection()
+        let basic = try basicNotetypeID(backend)
+        let cloze = try clozeNotetypeID(backend)
+
+        XCTAssertEqual(
+            try backend.noteFieldsCheck(notetypeID: basic, fields: ["{{c1::x}}", ""]),
+            .notetypeNotCloze
+        )
+        XCTAssertEqual(
+            try backend.noteFieldsCheck(notetypeID: cloze, fields: ["no deletions here", ""]),
+            .missingCloze
+        )
+        XCTAssertEqual(
+            try backend.noteFieldsCheck(notetypeID: cloze, fields: ["{{c1::a}} and {{c2::b}}", ""]),
+            .normal
+        )
+        XCTAssertEqual(
+            try backend.clozeNumbersInNote(notetypeID: cloze, fields: ["{{c1::a}} {{c2::b}}", ""]),
+            [1, 2]
+        )
+        XCTAssertEqual(
+            try backend.clozeNumbersInNote(notetypeID: cloze, fields: ["plain", ""]),
+            []
+        )
+    }
+
+    /// The pure state→warning mapping the editor uses: every engine state maps to
+    /// the right `NoteFieldsWarning` (or nil), only the duplicate highlights the
+    /// first field, and every warning has a non-empty message.
+    func testNoteFieldsWarningMapping() {
+        XCTAssertNil(Anki_Notes_NoteFieldsCheckResponse.State.normal.editorWarning)
+        XCTAssertEqual(Anki_Notes_NoteFieldsCheckResponse.State.duplicate.editorWarning, .duplicate)
+        XCTAssertEqual(Anki_Notes_NoteFieldsCheckResponse.State.empty.editorWarning, .emptyFirstField)
+        XCTAssertEqual(Anki_Notes_NoteFieldsCheckResponse.State.missingCloze.editorWarning, .missingCloze)
+        XCTAssertEqual(
+            Anki_Notes_NoteFieldsCheckResponse.State.notetypeNotCloze.editorWarning,
+            .clozeOutsideClozeNotetype
+        )
+        XCTAssertEqual(
+            Anki_Notes_NoteFieldsCheckResponse.State.fieldNotCloze.editorWarning,
+            .clozeInNonClozeField
+        )
+
+        // Only the duplicate warns with the red first-field highlight.
+        XCTAssertTrue(NoteFieldsWarning.duplicate.highlightsFirstField)
+        for warning: NoteFieldsWarning in [.emptyFirstField, .missingCloze, .clozeOutsideClozeNotetype, .clozeInNonClozeField] {
+            XCTAssertFalse(warning.highlightsFirstField)
+        }
+        for warning: NoteFieldsWarning in [.duplicate, .emptyFirstField, .missingCloze, .clozeOutsideClozeNotetype, .clozeInNonClozeField] {
+            XCTAssertFalse(warning.message.isEmpty)
+        }
+    }
+
+    /// The per-notetype sticky mutators + their load-mutate-save wrapper round-trip
+    /// through the live engine: flipping a field's sticky flag persists to the note
+    /// type (survives a re-read), exactly like Anki's sticky fields.
+    func testStickyFieldRoundTrip() throws {
+        let backend = try freshCollection()
+        let notetypeID = try basicNotetypeID(backend)
+
+        // A fresh Basic type has no sticky fields.
+        XCTAssertEqual(try backend.notetypeFieldStickies(notetypeID: notetypeID), [false, false])
+
+        // Pure mutator: flip the first field sticky in-memory.
+        var nt = try backend.notetype(id: notetypeID)
+        XCTAssertEqual(nt.fieldStickies, [false, false])
+        XCTAssertEqual(nt.toggleFieldSticky(at: 0), true)
+        XCTAssertEqual(nt.fieldStickies, [true, false])
+        nt.setFieldSticky(at: 0, false)
+        XCTAssertEqual(nt.fieldStickies, [false, false])
+        XCTAssertNil(nt.toggleFieldSticky(at: 9)) // out of range → nil
+
+        // Backend wrapper persists it: re-reading reflects the change.
+        try backend.setNotetypeFieldSticky(notetypeID: notetypeID, at: 0, sticky: true)
+        XCTAssertEqual(try backend.notetypeFieldStickies(notetypeID: notetypeID), [true, false])
+        try backend.setNotetypeFieldSticky(notetypeID: notetypeID, at: 0, sticky: false)
+        XCTAssertEqual(try backend.notetypeFieldStickies(notetypeID: notetypeID), [false, false])
+    }
+
+    /// The editor's Preview data source (`render_uncommitted_card` per card): a
+    /// Basic note yields one card whose rendered HTML reflects the uncommitted
+    /// field values, and a cloze note yields one card per cloze number.
+    func testRenderUncommittedNoteCards() throws {
+        let backend = try freshCollection()
+        let basic = try basicNotetypeID(backend)
+        let cloze = try clozeNotetypeID(backend)
+
+        let basicCards = try backend.renderUncommittedNoteCards(
+            notetypeID: basic, fields: ["Capital of France", "Paris"]
+        )
+        XCTAssertEqual(basicCards.count, 1, "Basic has a single card template")
+        let front = try XCTUnwrap(basicCards.first)
+        XCTAssertEqual(front.ordinal, 0)
+        XCTAssertTrue(front.question.contains("Capital of France"), "front reflects field 1")
+        XCTAssertTrue(front.answer.contains("Paris"), "back reflects field 2")
+        XCTAssertFalse(front.css.isEmpty, "carries the note type CSS")
+
+        // A two-deletion cloze note previews two cards (Cloze 1 / Cloze 2).
+        let clozeCards = try backend.renderUncommittedNoteCards(
+            notetypeID: cloze, fields: ["{{c1::alpha}} then {{c2::beta}}", ""]
+        )
+        XCTAssertEqual(clozeCards.count, 2)
+        XCTAssertEqual(clozeCards.map { $0.ordinal }, [0, 1])
+        XCTAssertEqual(clozeCards.map { $0.label }, ["Cloze 1", "Cloze 2"])
+    }
+
+    /// Tag-autocomplete pure logic: token parsing, prefix/substring filtering with
+    /// hierarchical (`parent::child`) tags, exclusion of already-entered tags, and
+    /// token completion.
+    func testTagSuggestions() {
+        let tags = ["anatomy::heart", "anatomy::lung", "biology", "chemistry"]
+
+        // Current token = the run after the last whitespace.
+        XCTAssertEqual(TagSuggestions.currentToken(in: "anat"), "anat")
+        XCTAssertEqual(TagSuggestions.currentToken(in: "biology anat"), "anat")
+        XCTAssertEqual(TagSuggestions.currentToken(in: "biology "), "")
+        XCTAssertEqual(TagSuggestions.currentToken(in: ""), "")
+
+        // Committed tokens exclude the partial one still being typed.
+        XCTAssertEqual(TagSuggestions.committedTokens(in: "biology anat"), ["biology"])
+        XCTAssertEqual(TagSuggestions.committedTokens(in: "biology chem "), ["biology", "chem"])
+        XCTAssertEqual(TagSuggestions.committedTokens(in: ""), [])
+
+        // Prefix matches (hierarchical parent) come first.
+        XCTAssertEqual(
+            TagSuggestions.suggestions(for: "anat", allTags: tags),
+            ["anatomy::heart", "anatomy::lung"]
+        )
+        // Substring match on a child segment surfaces the full hierarchical tag.
+        XCTAssertEqual(TagSuggestions.suggestions(for: "heart", allTags: tags), ["anatomy::heart"])
+        // Case-insensitive.
+        XCTAssertEqual(TagSuggestions.suggestions(for: "BIO", allTags: tags), ["biology"])
+        // Already-entered tags are excluded.
+        XCTAssertEqual(
+            TagSuggestions.suggestions(for: "anat", allTags: tags, existing: ["anatomy::heart"]),
+            ["anatomy::lung"]
+        )
+        // An exact, complete token yields no suggestion, and an empty token none.
+        XCTAssertEqual(TagSuggestions.suggestions(for: "biology", allTags: tags), [])
+        XCTAssertEqual(TagSuggestions.suggestions(for: "", allTags: tags), [])
+
+        // Completion replaces the partial token and appends a trailing space,
+        // leaving earlier tags intact.
+        XCTAssertEqual(
+            TagSuggestions.complete("biology anat", with: "anatomy::heart"),
+            "biology anatomy::heart "
+        )
+        XCTAssertEqual(TagSuggestions.complete("anat", with: "anatomy::heart"), "anatomy::heart ")
+    }
 }

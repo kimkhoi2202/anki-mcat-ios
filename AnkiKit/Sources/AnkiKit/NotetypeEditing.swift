@@ -54,6 +54,33 @@ public extension Anki_Notetypes_Notetype {
         fields[index].name = name
     }
 
+    // MARK: - Sticky fields
+
+    /// Whether each field keeps its value for the next added note ("sticky"), in
+    /// field order — Anki's per-notetype sticky flags (`field.config.sticky`),
+    /// persisted in the collection and synced. Aligns index-for-index with
+    /// `fieldNames` and a note's `fields`.
+    var fieldStickies: [Bool] { fields.map { $0.config.sticky } }
+
+    /// Sets the sticky flag on the field at `index` (a no-op for an out-of-range
+    /// index). Every field keeps its `ord`, so persisting via `updateNotetype`
+    /// touches only the flag.
+    mutating func setFieldSticky(at index: Int, _ sticky: Bool) {
+        guard fields.indices.contains(index) else { return }
+        fields[index].config.sticky = sticky
+    }
+
+    /// Flips the sticky flag on the field at `index`, returning the new value (or
+    /// `nil` for an out-of-range index). Mirrors AnkiDroid's per-field sticky
+    /// toggle (`toggleStickyText`), which inverts `field.config.sticky`.
+    @discardableResult
+    mutating func toggleFieldSticky(at index: Int) -> Bool? {
+        guard fields.indices.contains(index) else { return nil }
+        let newValue = !fields[index].config.sticky
+        fields[index].config.sticky = newValue
+        return newValue
+    }
+
     /// Moves the field at `source` to `destination`.
     ///
     /// The sort field is left untouched: on save the engine treats

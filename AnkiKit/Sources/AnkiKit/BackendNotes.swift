@@ -65,4 +65,47 @@ public extension Backend {
         req.ntid = notetypeID
         return try run(service: 23, method: 16, req, returning: Anki_Generic_StringList.self).vals
     }
+
+    /// NotesService.noteFieldsCheck (25, 11).
+    ///
+    /// Validates an *uncommitted* note's fields against the collection and returns
+    /// the engine's state:
+    /// - `NORMAL` — nothing wrong.
+    /// - `EMPTY` — the first field is empty.
+    /// - `DUPLICATE` — the first field matches an existing note of the same type.
+    /// - `MISSING_CLOZE` / `NOTETYPE_NOT_CLOZE` / `FIELD_NOT_CLOZE` — cloze issues.
+    ///
+    /// The note carries the notetype id + field values, plus (in EDIT mode) the
+    /// note's own id so the engine's duplicate check excludes the note being
+    /// edited (`is_duplicate` skips `nid == note.id`). Pass `noteID: 0` for a new
+    /// (unsaved) note. Drives the editor's live duplicate / empty / cloze
+    /// warnings, mirroring AnkiDroid's `note.fieldsCheck(col)` in
+    /// `setDuplicateFieldStyles`.
+    func noteFieldsCheck(
+        notetypeID: Int64, fields: [String], noteID: Int64 = 0
+    ) throws -> Anki_Notes_NoteFieldsCheckResponse.State {
+        var note = Anki_Notes_Note()
+        note.id = noteID
+        note.notetypeID = notetypeID
+        note.fields = fields
+        return try run(service: 25, method: 11, note,
+                       returning: Anki_Notes_NoteFieldsCheckResponse.self).state
+    }
+
+    /// NotesService.clozeNumbersInNote (25, 8).
+    ///
+    /// The distinct cloze numbers (`{{cN::…}}`) used across an uncommitted note's
+    /// fields, in ascending order. A cloze note generates one card per number, so
+    /// the editor's preview uses these to enumerate the cards to render (each card
+    /// ord = number − 1). Empty for a note with no cloze deletions. The engine
+    /// returns them as an unordered set, so they're sorted here for a deterministic
+    /// Cloze 1, 2, … ordering.
+    func clozeNumbersInNote(notetypeID: Int64, fields: [String]) throws -> [Int] {
+        var note = Anki_Notes_Note()
+        note.notetypeID = notetypeID
+        note.fields = fields
+        let resp = try run(service: 25, method: 8, note,
+                           returning: Anki_Notes_ClozeNumbersInNoteResponse.self)
+        return resp.numbers.map(Int.init).sorted()
+    }
 }

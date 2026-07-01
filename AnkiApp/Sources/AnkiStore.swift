@@ -711,6 +711,49 @@ final class AnkiStore: ObservableObject {
         return try await runDetached { try backend.addMediaFile(desiredName: desiredName, data: data) }
     }
 
+    /// Runs the engine's `note_fields_check` on an uncommitted note (notetype +
+    /// field values), off the main actor, for the editor's live duplicate / empty
+    /// / cloze warning. Best-effort: nil if the collection isn't ready or the
+    /// check fails (e.g. a transient field-count mismatch mid note-type switch),
+    /// which the editor treats as "no warning".
+    func checkNoteFields(
+        notetypeID: Int64, fields: [String], noteID: Int64 = 0
+    ) async -> Anki_Notes_NoteFieldsCheckResponse.State? {
+        guard let backend else { return nil }
+        return try? await runDetached {
+            try backend.noteFieldsCheck(notetypeID: notetypeID, fields: fields, noteID: noteID)
+        }
+    }
+
+    /// The current per-notetype sticky flags (field order) — which fields keep
+    /// their value for the next added note. Loaded when the editor's field set
+    /// (re)loads. Best-effort: empty list if unavailable.
+    func notetypeFieldStickies(_ notetypeID: Int64) -> [Bool] {
+        guard let backend else { return [] }
+        return (try? backend.notetypeFieldStickies(notetypeID: notetypeID)) ?? []
+    }
+
+    /// Flips a field's sticky flag on the note type and persists it (so it
+    /// survives relaunch and syncs), off the main actor. Throws so the editor can
+    /// revert its optimistic toggle and surface a message.
+    func setNotetypeFieldSticky(notetypeID: Int64, at index: Int, sticky: Bool) async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached {
+            try backend.setNotetypeFieldSticky(notetypeID: notetypeID, at: index, sticky: sticky)
+        }
+        refreshUndo()
+    }
+
+    /// Renders every card an uncommitted note (notetype + field values) would
+    /// generate, for the editor's Preview sheet, off the main actor. Best-effort:
+    /// empty list if the collection isn't ready or rendering fails.
+    func renderUncommittedNoteCards(notetypeID: Int64, fields: [String]) async -> [EditorCardPreview] {
+        guard let backend else { return [] }
+        return (try? await runDetached {
+            try backend.renderUncommittedNoteCards(notetypeID: notetypeID, fields: fields)
+        }) ?? []
+    }
+
     // MARK: - Card Browser
 
     /// Resolves a Card Browser search to its matching *row* ids (card ids in

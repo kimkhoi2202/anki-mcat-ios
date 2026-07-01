@@ -47,10 +47,28 @@ struct NoteEditorView: View {
 
     /// Sticky / pinned field indices (ADD mode): a pinned field keeps its value
     /// for the *next* note instead of being cleared, mirroring AnkiDroid's sticky
-    /// fields (its pin/`toggleSticky` button). Session-scoped to this editor and
-    /// reset when the notetype changes (a different field set); AnkiDroid persists
-    /// per-notetype, which the task allows simplifying to session level.
+    /// fields (its pin/`toggleSticky` button). This is the in-memory reflection of
+    /// the note type's per-field `config.sticky` flags — loaded from the note type
+    /// when the field set (re)loads and persisted back on toggle (via
+    /// `updateNotetype`), so sticky is per-notetype and survives relaunch/sync,
+    /// exactly like Anki.
     @State private var pinnedFields: Set<Int> = []
+
+    /// The current live fields-check warning (duplicate / empty / cloze), from the
+    /// engine's debounced `note_fields_check`. Drives the first-field duplicate
+    /// highlight and the inline notice, mirroring AnkiDroid's `NoteEditor`.
+    @State private var fieldsWarning: NoteFieldsWarning?
+    /// Debounce guard so the fields-check runs when typing pauses, not per key.
+    @State private var fieldsCheckToken = 0
+
+    /// Every tag used in the collection, for tag autocomplete (loaded on appear).
+    @State private var allTags: [String] = []
+
+    /// Presents the card Preview sheet for the current uncommitted note.
+    @State private var showPreview = false
+
+    /// The field + caret a "Draw" attachment targets; presents the drawing canvas.
+    @State private var drawingTarget: DrawingTarget?
 
     /// Drives the "attach media" source chooser once a field's toolbar image/audio
     /// button is tapped (carries which field + caret to insert at).
@@ -103,6 +121,18 @@ struct NoteEditorView: View {
                     // familiar discard-and-dismiss "Cancel".
                     Button(isEditing ? "Cancel" : "Done") { dismiss() }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    // Preview the current uncommitted note's card(s) (front/back,
+                    // and a card picker for multi-template/cloze types). Hidden for
+                    // Image Occlusion, whose preview lives in its own web editor.
+                    if !isIONotetype {
+                        Button { showPreview = true } label: {
+                            Image(systemName: "eye")
+                        }
+                        .accessibilityLabel("Preview cards")
+                        .disabled(!didLoad || fieldNames.isEmpty)
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     // Image Occlusion notes are saved inside the web editor (its own
                     // Add/Save), so the note editor hides its save action for them.
@@ -149,6 +179,16 @@ struct NoteEditorView: View {
             .sheet(item: $activeMediaPicker) { picker in
                 mediaPickerView(for: picker)
             }
+            // Card preview for the current uncommitted note (front/back + card
+            // picker), rendered by the engine's render_uncommitted_card.
+            .sheet(isPresented: $showPreview) {
+                NotePreviewView(store: store, notetypeID: selectedNotetypeID, fields: fieldValues)
+            }
+            // "Draw" attachment: a PencilKit canvas whose exported PNG is stored
+            // and inserted as an <img> at the field's caret.
+            .sheet(item: $drawingTarget) { target in
+                DrawingCanvasView { media in finishDrawing(media, target: target) }
+            }
             // Image Occlusion add flow: choose an image source, then pick, then
             // open the web editor pointed at the picked image (mirrors AnkiDroid's
             // NoteEditor image-selection buttons → ImageOcclusion activity).
@@ -178,6 +218,9 @@ struct NoteEditorView: View {
                 runScreenshotHookIfRequested()
                 #endif
             }
+            // Re-run the duplicate/empty/cloze check (debounced) as the fields
+            // change, mirroring AnkiDroid re-checking on every field edit.
+            .onChange(of: fieldValues) { _ in scheduleFieldsCheck() }
             // Refresh the note-type options when returning from the manager (a new
             // type may have been added). Only after the initial load, so it never
             // races `loadIfNeeded` on first appear.
@@ -259,15 +302,15 @@ struct NoteEditorView: View {
                                 }
                             },
                             onRequestMedia: { kind, caret in
-                                mediaSourceChoice = MediaSourceChoice(
-                                    fieldIndex: index, caret: caret, kind: kind
-                                )
+                                requestMedia(kind, fieldIndex: index, caret: caret)
                             }
                         )
                         .frame(height: fieldHeights[index] ?? RichFieldView.minHeight)
+                        .overlay { firstFieldDuplicateHighlight(index) }
                     }
                     .padding(.vertical, DS.Spacing.xs)
                 }
+                fieldsWarningRow
             }
         } header: {
             sectionHeader(isIONotetype ? "Image Occlusion" : "Fields")
@@ -310,6 +353,74 @@ struct NoteEditorView: View {
         }
     }
 
+    /// The AnkiDroid-style red outline drawn around the *first* field while it
+    /// holds a duplicate value (its `setDupeStyle()`), and nothing otherwise.
+    @ViewBuilder
+    private func firstFieldDuplicateHighlight(_ index: Int) -> some View {
+        if index == 0, fieldsWarning?.highlightsFirstField == true {
+            RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
+                .strokeBorder(DS.again, lineWidth: 1.5)
+                .padding(.horizontal, -DS.Spacing.xs)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// The inline duplicate / empty / cloze notice beneath the fields. The
+    /// duplicate is emphasized in red (matching AnkiDroid's dupe styling); the
+    /// empty / cloze notices are gentle secondary text.
+    @ViewBuilder
+    private var fieldsWarningRow: some View {
+        if let warning = fieldsWarning {
+            let attention = warning.highlightsFirstField
+            HStack(spacing: DS.Spacing.s) {
+                Image(systemName: attention ? "exclamationmark.triangle.fill" : "info.circle")
+                Text(warning.message)
+                Spacer(minLength: 0)
+            }
+            .font(DS.Typography.caption)
+            .foregroundStyle(attention ? DS.again : DS.textSecondary)
+            .padding(.top, DS.Spacing.xs)
+        }
+    }
+
+    /// Routes a field's media request: image/audio open the source chooser;
+    /// drawing opens the PencilKit canvas directly (no source to pick).
+    private func requestMedia(_ kind: RichFieldMediaKind, fieldIndex: Int, caret: NSRange) {
+        switch kind {
+        case .image, .audio:
+            mediaSourceChoice = MediaSourceChoice(fieldIndex: fieldIndex, caret: caret, kind: kind)
+        case .drawing:
+            drawingTarget = DrawingTarget(fieldIndex: fieldIndex, caret: caret)
+        }
+    }
+
+    /// Re-runs the engine's `note_fields_check` after a short debounce and maps
+    /// the result to the editor's warning. A wholly empty note shows nothing (the
+    /// initial state isn't an error); Image Occlusion types are validated in their
+    /// own web editor, so they're skipped here.
+    private func scheduleFieldsCheck() {
+        guard !isIONotetype else { fieldsWarning = nil; return }
+        fieldsCheckToken &+= 1
+        let token = fieldsCheckToken
+        let notetypeID = selectedNotetypeID
+        let fields = fieldValues
+        let allEmpty = fields.allSatisfy {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !allEmpty else { fieldsWarning = nil; return }
+        // In EDIT mode, pass the note's own id so the duplicate check excludes it.
+        let noteID: Int64 = { if case .edit(let id) = mode { return id }; return 0 }()
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard token == fieldsCheckToken else { return }
+            let state = await store.checkNoteFields(
+                notetypeID: notetypeID, fields: fields, noteID: noteID
+            )
+            guard token == fieldsCheckToken else { return }
+            fieldsWarning = state?.editorWarning
+        }
+    }
+
     private var tagsSection: some View {
         Section {
             TextField("space-separated tags", text: $tagsText)
@@ -317,8 +428,47 @@ struct NoteEditorView: View {
                 .foregroundStyle(DS.textPrimary)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
+            if !tagSuggestions.isEmpty {
+                tagSuggestionsRow
+            }
         } header: {
             sectionHeader("Tags")
+        } footer: {
+            sectionFooter("Separate tags with spaces. Use :: for nested tags (e.g. anatomy::heart).")
+        }
+    }
+
+    /// The current tag suggestions: existing tags matching the token being typed,
+    /// excluding ones already on the note. Hierarchical tags (`parent::child`) are
+    /// matched/completed as whole strings.
+    private var tagSuggestions: [String] {
+        let token = TagSuggestions.currentToken(in: tagsText)
+        let committed = TagSuggestions.committedTokens(in: tagsText)
+        return TagSuggestions.suggestions(for: token, allTags: allTags, existing: committed)
+    }
+
+    /// A horizontally scrolling row of tappable tag suggestions; tapping one
+    /// completes the current token and appends a trailing space.
+    private var tagSuggestionsRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: DS.Spacing.s) {
+                ForEach(tagSuggestions, id: \.self) { tag in
+                    Button {
+                        tagsText = TagSuggestions.complete(tagsText, with: tag)
+                    } label: {
+                        Text(tag)
+                            .font(DS.Typography.caption.weight(.medium))
+                            .lineLimit(1)
+                            .padding(.horizontal, DS.Spacing.m)
+                            .padding(.vertical, DS.Spacing.xs)
+                            .background(Capsule().fill(DS.accent.opacity(0.12)))
+                            .foregroundStyle(DS.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Add tag \(tag)")
+                }
+            }
+            .padding(.vertical, 2)
         }
     }
 
@@ -346,6 +496,10 @@ struct NoteEditorView: View {
             Button("Choose File") {
                 presentPicker(.audioFile(fieldIndex: choice.fieldIndex, caret: choice.caret))
             }
+        case .drawing:
+            // Drawing skips the source chooser (it opens the canvas directly), so
+            // no source buttons are needed; present for exhaustiveness only.
+            EmptyView()
         }
         Button("Cancel", role: .cancel) {}
     }
@@ -559,6 +713,8 @@ struct NoteEditorView: View {
         guard !didLoad else { return }
         didLoad = true
         notetypes = store.availableNotetypes().map { NotetypeOption(id: $0.id, name: $0.name) }
+        // Existing tags for autocomplete (engine-sorted), loaded off the main actor.
+        Task { @MainActor in allTags = await store.allTags() }
 
         switch mode {
         case .add(let defaultDeckID):
@@ -625,12 +781,13 @@ struct NoteEditorView: View {
             ? aligned(fieldValues, toCount: names.count)
             : Array(repeating: "", count: names.count)
         fieldHeights = [:]
-        // A reset means a new/changed notetype, so the old field indices no longer
-        // map to the same fields — drop any sticky pins (AnkiDroid tracks sticky
-        // per-notetype; clearing on switch keeps the session-level set coherent).
-        if !preservingValues {
-            pinnedFields = []
-        }
+        // Sticky is per-notetype (persisted in each field's config), so (re)load
+        // the pinned set from the selected note type whenever the field set loads.
+        loadStickyFlags()
+        // The field set changed; re-evaluate the duplicate/empty/cloze warning
+        // (clearing any stale one for the moment).
+        fieldsWarning = nil
+        scheduleFieldsCheck()
     }
 
     /// Pads or truncates `values` so it has exactly `count` entries.
@@ -654,12 +811,81 @@ struct NoteEditorView: View {
         let extras = arguments.contains("-demoEditorExtras")
         let mediaSource = arguments.contains("-demoMediaSource")
         let realMedia = arguments.contains("-demoInsertRealMedia")
+        let checks = arguments.contains("-demoEditorChecks")
+        let tagSuggest = arguments.contains("-demoTagSuggest")
+        let previewDemo = arguments.contains("-demoNotePreview")
+        let drawingInsert = arguments.contains("-demoDrawingInsert")
+        let drawCanvas = arguments.contains("-demoDrawCanvas")
         guard demo || extras || mediaSource || realMedia
+            || checks || tagSuggest || previewDemo || drawingInsert || drawCanvas
             || arguments.contains("-focusFirstField") else { return }
         Task { @MainActor in
             // Let the sheet finish presenting (and the note-type onChange settle)
             // before seeding text / grabbing keyboard focus.
             try? await Task.sleep(nanoseconds: 400_000_000)
+            if tagSuggest {
+                // Seed real tags via a note, then type a partial tag token so the
+                // autocomplete suggestions row shows (no field focus, so the Tags
+                // section stays on screen).
+                try? store.addNote(
+                    notetypeID: selectedNotetypeID,
+                    fields: ["Bonjour", "Hello"],
+                    tags: ["vocab::french", "vocab::greetings", "vocabulary"],
+                    deckID: selectedDeckID
+                )
+                allTags = await store.allTags()
+                if !fieldValues.isEmpty { fieldValues[0] = "Salut" }
+                if fieldValues.count > 1 { fieldValues[1] = "Hi" }
+                tagsText = "voc"
+                return
+            }
+            if checks {
+                // Seed a real note so the first field can duplicate it (red
+                // highlight + "Duplicate") and its tags feed autocomplete, then
+                // type a duplicate first field and a partial tag token.
+                try? store.addNote(
+                    notetypeID: selectedNotetypeID,
+                    fields: ["Bonjour", "Hello"],
+                    tags: ["vocab::french", "vocab::greetings"],
+                    deckID: selectedDeckID
+                )
+                allTags = await store.allTags()
+                if !fieldValues.isEmpty { fieldValues[0] = "Bonjour" }
+                tagsText = "voc"
+                focusedField = 0
+                scheduleFieldsCheck()
+                return
+            }
+            if previewDemo {
+                // Fill the note so its cards render, then open the Preview sheet.
+                if fieldValues.count >= 2 {
+                    fieldValues[0] = "Bonjour"
+                    fieldValues[1] = "Hello"
+                } else if !fieldValues.isEmpty {
+                    fieldValues[0] = "Bonjour"
+                }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                showPreview = true
+                return
+            }
+            if drawingInsert {
+                // Render a real PencilKit drawing to PNG, store it, and insert the
+                // <img> into the first field (proves the draw → media → field path).
+                if let png = DrawingCanvasView.demoDrawingPNG() {
+                    await storeAndInsert(
+                        PickedMedia(data: png, desiredName: "drawing.png"),
+                        kind: .drawing, fieldIndex: 0, caret: NSRange(location: 0, length: 0)
+                    )
+                }
+                return
+            }
+            if drawCanvas {
+                // Open the drawing canvas (which seeds sample strokes for the shot).
+                drawingTarget = DrawingTarget(
+                    fieldIndex: 0, caret: NSRange(location: 0, length: 0)
+                )
+                return
+            }
             if realMedia {
                 // Exercise the *real* app-side media path end-to-end: store bytes
                 // via the engine and insert the engine-returned name. The shown
@@ -742,14 +968,36 @@ struct NoteEditorView: View {
 
     // MARK: - Sticky fields & add-another
 
-    /// Toggles a field's sticky pin (ADD mode): pinned fields keep their value
-    /// for the next note. Clone of AnkiDroid's per-field sticky toggle.
+    /// Toggles a field's sticky pin (ADD mode): pinned fields keep their value for
+    /// the next note. Now persisted to the note type's field config (per-notetype,
+    /// survives relaunch, syncs) — the pin is updated optimistically for a snappy
+    /// tap, then written via `updateNotetype`, reverting on failure. Clone of
+    /// AnkiDroid's per-field sticky toggle.
     private func togglePin(_ index: Int) {
-        if pinnedFields.contains(index) {
-            pinnedFields.remove(index)
-        } else {
-            pinnedFields.insert(index)
+        let willPin = !pinnedFields.contains(index)
+        if willPin { pinnedFields.insert(index) } else { pinnedFields.remove(index) }
+        let notetypeID = selectedNotetypeID
+        Task { @MainActor in
+            do {
+                try await store.setNotetypeFieldSticky(
+                    notetypeID: notetypeID, at: index, sticky: willPin
+                )
+            } catch {
+                // Revert the optimistic change if the note type couldn't be saved.
+                if willPin { pinnedFields.remove(index) } else { pinnedFields.insert(index) }
+                mediaErrorMessage = describe(error)
+            }
         }
+    }
+
+    /// Loads the pinned (sticky) field set from the current note type's per-field
+    /// `config.sticky` flags — the source of truth for sticky, now that it's
+    /// persisted per-notetype rather than session-scoped.
+    private func loadStickyFlags() {
+        let stickies = store.notetypeFieldStickies(selectedNotetypeID)
+        var pinned = Set<Int>()
+        for (index, sticky) in stickies.enumerated() where sticky { pinned.insert(index) }
+        pinnedFields = pinned
     }
 
     /// After a successful ADD, resets the form for the next note while keeping the
@@ -793,6 +1041,18 @@ struct NoteEditorView: View {
         Task { await storeAndInsert(media, kind: kind, fieldIndex: fieldIndex, caret: caret) }
     }
 
+    /// Handles the drawing canvas result: dismiss it, then (if a drawing was
+    /// made) store the exported PNG and insert it as an `<img>` at the caret.
+    private func finishDrawing(_ media: PickedMedia?, target: DrawingTarget) {
+        drawingTarget = nil
+        guard let media else { return }
+        Task {
+            await storeAndInsert(
+                media, kind: .drawing, fieldIndex: target.fieldIndex, caret: target.caret
+            )
+        }
+    }
+
     /// Stores the bytes in the collection (engine-managed name + dedup), then
     /// inserts the resulting `<img>`/`[sound:]` reference at the saved caret.
     @MainActor
@@ -820,7 +1080,7 @@ struct NoteEditorView: View {
         guard fieldIndex < fieldValues.count else { return }
         let reference: String
         switch kind {
-        case .image: reference = "<img src=\"\(htmlAttributeEscaped(name))\">"
+        case .image, .drawing: reference = "<img src=\"\(htmlAttributeEscaped(name))\">"
         case .audio: reference = "[sound:\(name)]"
         }
         let current = fieldValues[fieldIndex] as NSString
@@ -896,6 +1156,14 @@ private struct MediaSourceChoice: Identifiable {
     let fieldIndex: Int
     let caret: NSRange
     let kind: RichFieldMediaKind
+}
+
+/// A pending "Draw" attachment: the field + caret to insert the exported drawing
+/// at once the user finishes on the PencilKit canvas.
+private struct DrawingTarget: Identifiable {
+    let id = UUID()
+    let fieldIndex: Int
+    let caret: NSRange
 }
 
 /// The image source for a new Image Occlusion note (drives its picker sheet).

@@ -13,10 +13,11 @@ enum FieldFormat: Int, CaseIterable {
 
 /// The kind of media the field toolbar can attach, mirroring AnkiDroid's
 /// NoteEditor multimedia actions. Each routes to a source picker in the editor
-/// (image → photo library / camera; audio → record / file) and inserts the
-/// stored reference at the field's caret.
+/// (image → photo library / camera; audio → record / file; drawing → PencilKit
+/// canvas) and inserts the stored reference at the field's caret. A drawing is
+/// exported to a PNG, so it inserts an `<img>` just like a picked image.
 enum RichFieldMediaKind {
-    case image, audio
+    case image, audio, drawing
 }
 
 #if DEBUG
@@ -291,6 +292,10 @@ struct RichFieldView: UIViewRepresentable {
             requestMedia(.audio)
         }
 
+        @objc func drawButtonTapped(_ sender: UIButton) {
+            requestMedia(.drawing)
+        }
+
         /// Hands the editor the kind of media tapped and the field's current
         /// caret/selection so it can insert the reference exactly where the user
         /// is editing — captured *now*, while this field is still first responder
@@ -420,6 +425,10 @@ struct RichFieldView: UIViewRepresentable {
             stack.addArrangedSubview(
                 makeMediaButton(symbol: "mic", fallback: "AUD",
                                 label: "Insert audio", action: #selector(audioButtonTapped(_:)))
+            )
+            stack.addArrangedSubview(
+                makeMediaButton(symbol: "scribble.variable", fallback: "DRAW",
+                                label: "Insert drawing", action: #selector(drawButtonTapped(_:)))
             )
 
             NSLayoutConstraint.activate([

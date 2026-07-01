@@ -429,7 +429,12 @@ struct HomeView: View {
                 || ProcessInfo.processInfo.arguments.contains("-startInTextExport") {
                 goImportExport = true
             }
-            if ProcessInfo.processInfo.arguments.contains("-startInAddNote") {
+            if ProcessInfo.processInfo.arguments.contains("-startInAddNote")
+                || ProcessInfo.processInfo.arguments.contains("-demoEditorChecks")
+                || ProcessInfo.processInfo.arguments.contains("-demoTagSuggest")
+                || ProcessInfo.processInfo.arguments.contains("-demoNotePreview")
+                || ProcessInfo.processInfo.arguments.contains("-demoDrawingInsert")
+                || ProcessInfo.processInfo.arguments.contains("-demoDrawCanvas") {
                 showAddNote = true
             }
             // Open the AnkiWeb shared-decks browser (needs simulator network to

@@ -33,6 +33,10 @@ final class WhiteboardController: ObservableObject {
     @Published var isEraser = false
     /// Whether there's a stroke to undo (drives the toolbar Undo button).
     @Published private(set) var canUndo = false
+    /// Whether the canvas currently holds any ink. Distinct from `canUndo` (which
+    /// stays true after a clear so the clear itself can be undone); drives the
+    /// note editor's "Draw" attachment Insert button, which needs actual content.
+    @Published private(set) var hasContent = false
 
     /// The live canvas, set by the representable so undo/clear/reset act on it.
     private weak var canvas: PKCanvasView?
@@ -95,6 +99,24 @@ final class WhiteboardController: ObservableObject {
         canvas?.drawing = PKDrawing()
         undoStack.removeAll()
         if canUndo { canUndo = false }
+    }
+
+    /// Updates `hasContent` from the live canvas (called by the canvas delegate on
+    /// every drawing change, so it tracks draw / erase / clear / undo).
+    func updateHasContent(_ value: Bool) {
+        if hasContent != value { hasContent = value }
+    }
+
+    /// Renders the current drawing to PNG bytes for the note editor's "Draw"
+    /// attachment: a transparent-background image of the visible canvas (so the
+    /// ink composites over any card, like AnkiDroid's drawing attachment). Nil
+    /// when the canvas is empty or not yet laid out. The 2× scale keeps the
+    /// exported strokes crisp on the card.
+    func exportPNG(scale: CGFloat = 2) -> Data? {
+        guard let canvas, !canvas.drawing.strokes.isEmpty else { return nil }
+        let bounds = canvas.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        return canvas.drawing.image(from: bounds, scale: scale).pngData()
     }
 
     #if DEBUG
@@ -174,6 +196,12 @@ struct WhiteboardCanvas: UIViewRepresentable {
 
         func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
             controller.snapshotBeforeStroke()
+        }
+
+        /// Fires on any drawing change (stroke added/erased, undo, clear), so the
+        /// controller's `hasContent` stays accurate for the editor's Insert button.
+        func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+            controller.updateHasContent(!canvasView.drawing.strokes.isEmpty)
         }
     }
 }
