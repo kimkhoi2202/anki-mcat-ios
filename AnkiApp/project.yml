@@ -93,3 +93,34 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: "Anki Due"
         # Same App Group as the app so both read/write the shared due snapshot.
         CODE_SIGN_ENTITLEMENTS: AnkiWidget/AnkiWidget.entitlements
+  # XCUITest target: native-layer UI smoke tests for the critical user journeys
+  # (launch, toolbar navigation, gestures screen, review reminder, study flow).
+  # Additive only — touches no app source. Swift 5 language mode keeps the XCTest
+  # overrides free of Swift 6 concurrency friction. Lives on feat/ui-tests.
+  AnkiSpeedrunUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - AnkiSpeedrunUITests
+    dependencies:
+      - target: AnkiSpeedrun
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.khoilam.ankispeedrun.uitests
+        GENERATE_INFOPLIST_FILE: "YES"
+        SWIFT_VERSION: "5.0"
+        TEST_TARGET_NAME: AnkiSpeedrun
+schemes:
+  # Explicit scheme so `xcodebuild test -scheme AnkiSpeedrun` builds the app and
+  # runs the XCUITest suite (the app target still embeds the widget dependency).
+  AnkiSpeedrun:
+    build:
+      targets:
+        AnkiSpeedrun: all
+        AnkiSpeedrunUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - AnkiSpeedrunUITests
