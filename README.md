@@ -129,13 +129,20 @@ fork (`../anki-desktop/main`) branch `feat/rust-points-at-stake`. `main` here ha
 | `AnkiApp/project.yml` | XcodeGen project definition |
 | `deploy/syncserver/` | self-hosted, version-matched sync server (Fly.io) |
 
-## Known gaps vs AnkiDroid
+## Status vs AnkiDroid
 
-Small long-tail items not yet built: the **whiteboard/drawing** overlay,
-**configurable gesture/tap-zone** remapping, **local notifications/reminders**, and
-the deepest **Advanced** settings. Auto-advance defaults its answer action to
-"Good" (Anki's default is "Bury"); its timings are app-local rather than sourced
-from deck config. The home-screen widget requires an Apple team for a device build.
+The long-tail items once listed here are now implemented: the
+**whiteboard/drawing** overlay (PencilKit), **configurable gesture/tap-zone**
+remapping (Settings ▸ Gestures — the full 3×3 tap grid + swipes/long-press),
+**local review reminders** (Settings ▸ Notifications), and the **Advanced**
+database tools (Check database / fsck, Empty cards, Force full sync, Restore from
+backup). Auto-advance now defaults its answer action to **Bury** and sources its
+timings from the deck's config.
+
+Remaining items are environment/polish rather than missing features: the
+home-screen **widget** needs an Apple developer team for an on-device build (it
+runs in the simulator), and **localization** + App Store metadata are left for
+publishing time.
 
 ## License
 
