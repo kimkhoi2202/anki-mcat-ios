@@ -2,9 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>com.apple.security.application-groups</key>
-	<array>
-		<string>group.com.khoilam.ankispeedrun</string>
-	</array>
+	<!--
+	  Intentionally empty — matches the app target. See
+	  AnkiSpeedrun.entitlements for why the App Group is not declared. Without a
+	  shared group the widget shows placeholder data instead of live due counts,
+	  but both targets sign cleanly on any device.
+	-->
 </dict>
 </plist>
