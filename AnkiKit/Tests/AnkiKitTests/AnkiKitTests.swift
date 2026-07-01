@@ -2659,4 +2659,219 @@ final class AnkiKitTests: XCTestCase {
         )
         XCTAssertEqual(TagSuggestions.complete("anat", with: "anatomy::heart"), "anatomy::heart ")
     }
+
+    // MARK: - Advanced maintenance (check database / empty cards / full sync)
+
+    /// A fresh collection is healthy: `check_database` (3, 6) reports no problems,
+    /// and the summary maps that to the "rebuilt and optimized" headline.
+    func testCheckDatabaseReturnsNoProblemsForFreshCollection() throws {
+        let backend = try freshCollection()
+        let problems = try backend.checkDatabase()
+        XCTAssertTrue(problems.isEmpty, "a fresh collection should have no database problems")
+
+        let summary = DatabaseCheckSummary(problems: problems)
+        XCTAssertTrue(summary.isHealthy)
+        XCTAssertEqual(summary.headline, "Database rebuilt and optimized.")
+    }
+
+    /// The check-database summary counts and phrases problems (pluralized).
+    func testDatabaseCheckSummaryHeadline() {
+        XCTAssertEqual(DatabaseCheckSummary(problems: ["fixed x"]).headline, "1 problem found and fixed.")
+        XCTAssertEqual(DatabaseCheckSummary(problems: ["a", "b"]).headline, "2 problems found and fixed.")
+        XCTAssertFalse(DatabaseCheckSummary(problems: ["a"]).isHealthy)
+    }
+
+    /// A fresh collection with a normal note has no empty cards: `get_empty_cards`
+    /// (27, 5) returns an empty report and the summary reports nothing to delete.
+    func testEmptyCardsReportEmptyForNormalNote() throws {
+        let backend = try freshCollection()
+        _ = try backend.addNote(
+            notetypeID: try basicNotetypeID(backend), fields: ["Q", "A"], deckID: 1
+        )
+        let report = try backend.emptyCardsReport()
+        let summary = EmptyCardsSummary(report)
+        XCTAssertTrue(summary.isEmpty, "a valid Basic note should not produce empty cards")
+        XCTAssertEqual(summary.cardCount, 0)
+        XCTAssertEqual(summary.headline, "No empty cards.")
+    }
+
+    /// The empty-cards summary flattens every note's empty card ids and counts the
+    /// notes that would be fully deleted, producing the confirmation headline.
+    func testEmptyCardsSummaryMapsReport() {
+        var report = Anki_CardRendering_EmptyCardsReport()
+        var noteA = Anki_CardRendering_EmptyCardsReport.NoteWithEmptyCards()
+        noteA.noteID = 1
+        noteA.cardIds = [10, 11]
+        noteA.willDeleteNote = true
+        var noteB = Anki_CardRendering_EmptyCardsReport.NoteWithEmptyCards()
+        noteB.noteID = 2
+        noteB.cardIds = [20]
+        noteB.willDeleteNote = false
+        report.notes = [noteA, noteB]
+
+        let summary = EmptyCardsSummary(report)
+        XCTAssertEqual(summary.noteCount, 2)
+        XCTAssertEqual(summary.cardCount, 3)
+        XCTAssertEqual(summary.notesToDeleteCount, 1)
+        XCTAssertEqual(summary.cardIDsToDelete, [10, 11, 20])
+        XCTAssertFalse(summary.isEmpty)
+        XCTAssertEqual(summary.headline, "3 empty cards in 2 notes (1 note will be deleted)")
+    }
+
+    /// `remove_cards` (5, 2) deletes the given cards and returns the removed count;
+    /// the note is orphaned and gone afterwards.
+    func testRemoveCardsDeletesCards() throws {
+        let backend = try freshCollection()
+        _ = try backend.addNote(
+            notetypeID: try basicNotetypeID(backend), fields: ["DeleteMe", "Back"], deckID: 1
+        )
+        let cardIDs = try backend.searchCards(query: "DeleteMe")
+        XCTAssertEqual(cardIDs.count, 1, "the added note should have one card")
+
+        let removed = try backend.removeCards(cardIDs: cardIDs)
+        XCTAssertEqual(removed, 1, "one card should be removed")
+        XCTAssertTrue(try backend.searchCards(query: "DeleteMe").isEmpty, "the card should be gone")
+    }
+
+    /// "Force full sync": `setSchemaModified` advances the schema modification time
+    /// via a raw DB command, so `scm > ls` and the next sync is a full sync.
+    func testSetSchemaModifiedArmsFullSync() throws {
+        let backend = try freshCollection()
+        let before = try schemaModTime(backend)
+        // Use an explicit future time so the bump is unambiguously larger even if
+        // the fresh collection was created within the same millisecond.
+        try backend.setSchemaModified(now: Date().addingTimeInterval(120))
+        let after = try schemaModTime(backend)
+        XCTAssertGreaterThan(after, before, "setSchemaModified should advance scm")
+        XCTAssertTrue(try backend.schemaChanged(), "after the bump, a full sync should be required (scm > ls)")
+    }
+
+    /// Reads the collection's schema modification time (`scm`) via a scalar DB
+    /// query, exercising `runDBCommand` + `DBRequest.firstScalarInt`.
+    private func schemaModTime(_ backend: Backend) throws -> Int64 {
+        let data = try backend.runDBCommand(
+            DBRequest.query(sql: "select scm from col", intArgs: [], firstRowOnly: true)
+        )
+        return try XCTUnwrap(DBRequest.firstScalarInt(data), "scm should be a scalar integer")
+    }
+
+    /// `DBRequest.query` encodes the JSON `DbRequest` shape the core expects, and
+    /// `firstScalarInt` parses a `DbResult` rows payload (and tolerates `null`).
+    func testDBRequestEncodingAndScalarParsing() throws {
+        let payload = DBRequest.query(sql: "update col set scm=?", intArgs: [5, 6])
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: payload) as? [String: Any]
+        )
+        XCTAssertEqual(object["kind"] as? String, "query")
+        XCTAssertEqual(object["sql"] as? String, "update col set scm=?")
+        XCTAssertEqual(object["first_row_only"] as? Bool, false)
+        XCTAssertEqual((object["args"] as? [Any])?.compactMap { ($0 as? NSNumber)?.int64Value }, [5, 6])
+
+        XCTAssertEqual(DBRequest.firstScalarInt(Data("[[42]]".utf8)), 42)
+        XCTAssertEqual(DBRequest.firstScalarInt(Data("[[1,2]]".utf8)), 1)
+        XCTAssertNil(DBRequest.firstScalarInt(Data("null".utf8)))
+        XCTAssertNil(DBRequest.firstScalarInt(Data("[]".utf8)))
+    }
+
+    // MARK: - Review reminder (pure scheduling logic)
+
+    /// The reminder trigger uses the chosen hour/minute, clamped to valid ranges.
+    func testReviewReminderDateComponentsClamp() {
+        let normal = ReviewReminderSchedule.dateComponents(hour: 20, minute: 30)
+        XCTAssertEqual(normal.hour, 20)
+        XCTAssertEqual(normal.minute, 30)
+
+        let clamped = ReviewReminderSchedule.dateComponents(hour: 99, minute: -5)
+        XCTAssertEqual(clamped.hour, 23)
+        XCTAssertEqual(clamped.minute, 0)
+    }
+
+    /// The reminder body reads "You have N cards due" (singular/plural) and falls
+    /// back to a generic prompt for a missing or zero count.
+    func testReviewReminderBody() {
+        XCTAssertEqual(ReviewReminderSchedule.body(dueCount: 5), "You have 5 cards due")
+        XCTAssertEqual(ReviewReminderSchedule.body(dueCount: 1), "You have 1 card due")
+        XCTAssertEqual(ReviewReminderSchedule.body(dueCount: 0), "Time to study!")
+        XCTAssertEqual(ReviewReminderSchedule.body(dueCount: nil), "Time to study!")
+    }
+
+    /// The next reminder fire date is strictly after the reference time and lands
+    /// on the configured hour/minute.
+    func testReviewReminderNextFireDate() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        // A reference at 2026-06-30 10:00 UTC; a 9:30 reminder should roll to the
+        // next day, still landing on 09:30.
+        var refComponents = DateComponents()
+        refComponents.year = 2026; refComponents.month = 6; refComponents.day = 30
+        refComponents.hour = 10; refComponents.minute = 0
+        let reference = try XCTUnwrap(calendar.date(from: refComponents))
+
+        let next = try XCTUnwrap(
+            ReviewReminderSchedule.nextFireDate(after: reference, hour: 9, minute: 30, calendar: calendar)
+        )
+        XCTAssertGreaterThan(next, reference)
+        let got = calendar.dateComponents([.hour, .minute], from: next)
+        XCTAssertEqual(got.hour, 9)
+        XCTAssertEqual(got.minute, 30)
+    }
+
+    // MARK: - Backup listing (restore from backup)
+
+    /// `BackupFile.list` returns only `.colpkg` files, newest first, and ignores
+    /// other files; a missing folder yields an empty list rather than throwing.
+    func testBackupFileListingFiltersAndSorts() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        func write(_ name: String, modified: Date) throws {
+            let url = dir.appendingPathComponent(name)
+            try Data("x".utf8).write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+        }
+
+        let now = Date()
+        try write("older.colpkg", modified: now.addingTimeInterval(-3600))
+        try write("newer.colpkg", modified: now)
+        try write("notes.apkg", modified: now) // ignored (not a .colpkg)
+
+        let backups = BackupFile.list(in: dir)
+        XCTAssertEqual(backups.map(\.name), ["newer.colpkg", "older.colpkg"],
+                       "only .colpkg files, newest first")
+
+        // Missing folder → empty list, no throw.
+        let missing = dir.appendingPathComponent("does-not-exist", isDirectory: true)
+        XCTAssertTrue(BackupFile.list(in: missing).isEmpty)
+    }
+
+    /// `sortedNewestFirst` orders by modified time (desc), breaking ties by name.
+    func testBackupFileSortIsStableByName() {
+        let day = Date(timeIntervalSince1970: 1_000_000)
+        let a = BackupFile(url: URL(fileURLWithPath: "/a.colpkg"), modified: day, size: 1)
+        let b = BackupFile(url: URL(fileURLWithPath: "/b.colpkg"), modified: day, size: 1)
+        let newer = BackupFile(url: URL(fileURLWithPath: "/c.colpkg"),
+                               modified: day.addingTimeInterval(10), size: 1)
+        XCTAssertEqual(BackupFile.sortedNewestFirst([a, b, newer]), [newer, b, a])
+    }
+
+    /// A real `.colpkg` written by `createBackup` is discovered by `BackupFile.list`
+    /// — the exact path "Restore from backup" relies on.
+    func testCreatedBackupAppearsInBackupList() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let backend = try openCollection(in: dir)
+        _ = try backend.addNote(
+            notetypeID: try basicNotetypeID(backend), fields: ["Q", "A"], deckID: 1
+        )
+        let backupFolder = dir.appendingPathComponent("backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: backupFolder, withIntermediateDirectories: true)
+
+        _ = try backend.createBackup(backupFolder: backupFolder.path, force: true, waitForCompletion: true)
+
+        let backups = BackupFile.list(in: backupFolder)
+        XCTAssertFalse(backups.isEmpty, "createBackup should write a .colpkg the restore list can find")
+        XCTAssertTrue(backups.allSatisfy { $0.name.hasSuffix(".colpkg") })
+    }
 }

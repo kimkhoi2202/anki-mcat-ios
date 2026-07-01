@@ -119,6 +119,10 @@ final class AnkiStore: ObservableObject {
 
     // MARK: - Preferences state (engine-backed)
 
+    /// Scheduling preferences from the engine `Preferences.scheduling` sub-message
+    /// — Anki's Preferences ▸ Scheduling (next-day rollover hour, learn-ahead
+    /// limit). Collection prefs, so they sync across devices.
+    @Published var schedulingPrefs = SchedulingPrefs()
     /// Reviewing preferences read from the engine `Preferences` message, shown as
     /// toggles on the Settings screen. Cloned from AnkiDroid's Appearance/Study
     /// settings, which read/write the same collection prefs.
@@ -141,6 +145,14 @@ final class AnkiStore: ObservableObject {
     @Published private(set) var backupInProgress = false
     /// Outcome of the most recent manual backup, shown transiently in Settings.
     @Published var lastBackupMessage: String?
+
+    // MARK: - Notifications (daily review reminder)
+
+    /// Schedules the daily review-reminder local notification (AnkiDroid's review
+    /// reminder). The enable flag and time live in `UserDefaults` (edited on the
+    /// Settings screen); the store reschedules with a fresh due count when the
+    /// app backgrounds, so the "You have N cards due" body stays current.
+    let reviewReminders = ReviewReminders()
 
     // MARK: - Sync settings (app-local)
     //
@@ -2536,6 +2548,7 @@ final class AnkiStore: ObservableObject {
         guard let backend else { return }
         do {
             let prefs = try backend.getPreferences()
+            schedulingPrefs = SchedulingPrefs(prefs.scheduling)
             reviewingPrefs = ReviewingPrefs(prefs.reviewing)
             editingPrefs = EditingPrefs(prefs.editing)
             backupLimits = BackupLimitsPrefs(prefs.backups)
@@ -2574,6 +2587,27 @@ final class AnkiStore: ObservableObject {
         updatePreferences { $0.reviewing.interruptAudioWhenAnswering = value }
     }
 
+    /// "Timebox time limit" in minutes (engine `reviewing.time_limit_secs`,
+    /// stored in seconds like Anki desktop; 0 disables the timebox).
+    func setTimeboxMinutes(_ minutes: Int) {
+        updatePreferences { $0.reviewing.timeLimitSecs = UInt32(max(0, minutes) * 60) }
+    }
+
+    // MARK: Scheduling
+
+    /// "Next day starts at" — the hour (0–23) the collection rolls over to the
+    /// next day (engine `scheduling.rollover`).
+    func setNextDayStartsAt(_ hour: Int) {
+        updatePreferences { $0.scheduling.rollover = UInt32(min(max(0, hour), 23)) }
+    }
+
+    /// "Learn ahead limit" in minutes (engine `scheduling.learn_ahead_secs`,
+    /// stored in seconds like Anki desktop): how far ahead the scheduler will pull
+    /// learning cards when nothing else is due.
+    func setLearnAheadMinutes(_ minutes: Int) {
+        updatePreferences { $0.scheduling.learnAheadSecs = UInt32(max(0, minutes) * 60) }
+    }
+
     // MARK: Editing
 
     /// "Paste without shift key strips formatting" (engine
@@ -2604,6 +2638,12 @@ final class AnkiStore: ObservableObject {
     /// "deck:current" (engine `editing.default_search_text`).
     func setDefaultSearchText(_ value: String) {
         updatePreferences { $0.editing.defaultSearchText = value }
+    }
+
+    /// "Render LaTeX" — whether the editor/reviewer renders `[latex]`/`[$]` math
+    /// (engine `editing.render_latex`).
+    func setRenderLatex(_ value: Bool) {
+        updatePreferences { $0.editing.renderLatex = value }
     }
 
     // MARK: Backups
@@ -2677,6 +2717,97 @@ final class AnkiStore: ObservableObject {
         } catch {
             lastBackupMessage = "Backup failed: \(error)"
         }
+    }
+
+    // MARK: - Advanced maintenance (AnkiDroid database tools)
+
+    /// Runs "Check database" (fsck): a full integrity/repair pass. Gated behind
+    /// `runExclusive` (it holds the backend for a long, collection-wide op) and
+    /// dispatched off the main actor. Returns the summary of problems found and
+    /// fixed; derived UI state is refreshed since the pass may alter cards/decks.
+    func checkDatabase() async throws -> DatabaseCheckSummary {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let problems = try await runExclusive {
+            try await runDetached { try backend.checkDatabase() }
+        }
+        refreshDecks()
+        refreshUndo()
+        return DatabaseCheckSummary(problems: problems)
+    }
+
+    /// Fetches the "Empty cards" report (notes with cards that render to nothing),
+    /// summarized for the confirmation. Read-only, so it runs off the main actor
+    /// without the exclusive gate.
+    func emptyCardsSummary() async throws -> EmptyCardsSummary {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let report = try await runDetached { try backend.emptyCardsReport() }
+        return EmptyCardsSummary(report)
+    }
+
+    /// Deletes the given empty cards (and any notes orphaned by the removal),
+    /// returning the number removed. Off the main actor; refreshes counts after.
+    @discardableResult
+    func deleteEmptyCards(_ cardIDs: [Int64]) async throws -> Int {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        guard !cardIDs.isEmpty else { return 0 }
+        let removed = try await runDetached { try backend.removeCards(cardIDs: cardIDs) }
+        refreshDecks()
+        refreshUndo()
+        return removed
+    }
+
+    /// Arms a full (one-way) sync on the next sync — AnkiDroid's "Force a
+    /// one-way sync" — by bumping the schema modification time. Does NOT sync
+    /// immediately (matching AnkiDroid); the next `sync()` performs the full
+    /// up/down. Off the main actor; refreshes state since arming discards the
+    /// undo/study queues upstream.
+    func armFullSync() async throws {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        try await runDetached { try backend.setSchemaModified() }
+        refreshDecks()
+        refreshUndo()
+    }
+
+    /// Whether a full sync is already armed (`scm > ls`), so the UI can show it.
+    func isFullSyncArmed() async -> Bool {
+        guard let backend else { return false }
+        return (try? await runDetached { try backend.schemaChanged() }) ?? false
+    }
+
+    /// The `.colpkg` backups on disk (newest first), for "Restore from backup".
+    func backupFiles() -> [BackupFile] {
+        BackupFile.list(in: backupsFolderURL)
+    }
+
+    /// Restores a backup by replacing the whole collection with the chosen
+    /// `.colpkg`, reusing the same close→import→reopen flow as a `.colpkg`
+    /// import. Destructive — the caller confirms first.
+    @discardableResult
+    func restoreBackup(_ file: BackupFile) async throws -> ImportOutcome {
+        try await importPackage(from: file.url)
+    }
+
+    // MARK: - Review reminder rescheduling
+
+    /// Total cards due right now across top-level decks (Anki folds subdeck
+    /// counts into their parent), used for the reminder body's "N cards due".
+    var totalDueForReminder: Int {
+        decks.filter { $0.depth == 0 }
+            .reduce(0) { $0 + $1.newCount + $1.learnCount + $1.reviewCount }
+    }
+
+    /// Reschedules the daily review reminder with the current due count when it's
+    /// enabled (a no-op otherwise). Called when the app backgrounds so the "You
+    /// have N cards due" body reflects the latest counts. Never throws/crashes.
+    func refreshReviewReminderIfEnabled() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: ReviewReminders.enabledKey) else { return }
+        let hour = defaults.object(forKey: ReviewReminders.hourKey) as? Int
+            ?? ReviewReminderSchedule.defaultHour
+        let minute = defaults.object(forKey: ReviewReminders.minuteKey) as? Int
+            ?? ReviewReminderSchedule.defaultMinute
+        let due = totalDueForReminder
+        Task { await reviewReminders.schedule(hour: hour, minute: minute, dueCount: due) }
     }
 
     /// Syncs on app open/close when "Automatically sync on profile open/close" is
@@ -3035,6 +3166,9 @@ struct ReviewingPrefs: Equatable {
     var showPlayButtonsOnAudio = false
     /// "Interrupt current audio when answering".
     var interruptAudioWhenAnswering = false
+    /// "Timebox time limit" in seconds (0 disables). Surfaced in Settings as
+    /// minutes, matching Anki desktop.
+    var timeLimitSecs = 0
 
     init() {}
 
@@ -3043,7 +3177,12 @@ struct ReviewingPrefs: Equatable {
         showRemainingDueCounts = reviewing.showRemainingDueCounts
         showPlayButtonsOnAudio = !reviewing.hideAudioPlayButtons
         interruptAudioWhenAnswering = reviewing.interruptAudioWhenAnswering
+        timeLimitSecs = Int(reviewing.timeLimitSecs)
     }
+
+    /// The timebox limit as whole minutes (rounded down), for the Settings
+    /// stepper. Anki stores/edits this value in minutes.
+    var timeLimitMinutes: Int { timeLimitSecs / 60 }
 }
 
 /// Plain, view-facing snapshot of the engine's editing preferences (Anki's
@@ -3062,6 +3201,8 @@ struct EditingPrefs: Equatable {
     var ignoreAccentsInSearch = false
     /// "Default search text" for the browser (e.g. "deck:current").
     var defaultSearchText = ""
+    /// "Render LaTeX" — render `[latex]`/`[$]` math in the editor and reviewer.
+    var renderLatex = false
 
     init() {}
 
@@ -3071,7 +3212,28 @@ struct EditingPrefs: Equatable {
         addingDefaultsToCurrentDeck = editing.addingDefaultsToCurrentDeck
         ignoreAccentsInSearch = editing.ignoreAccentsInSearch
         defaultSearchText = editing.defaultSearchText
+        renderLatex = editing.renderLatex
     }
+}
+
+/// Plain, view-facing snapshot of the engine's scheduling preferences (Anki's
+/// Preferences ▸ Scheduling). Values map 1:1 to `Preferences.Scheduling`;
+/// seconds-based fields are surfaced as minutes by the Settings screen.
+struct SchedulingPrefs: Equatable {
+    /// "Next day starts at" — the rollover hour, 0–23.
+    var rollover = 4
+    /// "Learn ahead limit" in seconds (surfaced as minutes).
+    var learnAheadSecs = 1200
+
+    init() {}
+
+    init(_ scheduling: Anki_Config_Preferences.Scheduling) {
+        rollover = Int(scheduling.rollover)
+        learnAheadSecs = Int(scheduling.learnAheadSecs)
+    }
+
+    /// The learn-ahead limit as whole minutes (rounded down), for the stepper.
+    var learnAheadMinutes: Int { learnAheadSecs / 60 }
 }
 
 /// Plain, view-facing snapshot of the engine's backup limits (Anki's

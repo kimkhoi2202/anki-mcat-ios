@@ -405,7 +405,11 @@ struct HomeView: View {
                 store.prepareMathJaxDemoIfRequested()
                 goReview = true
             }
-            if ProcessInfo.processInfo.arguments.contains("-startInSettings") {
+            if ProcessInfo.processInfo.arguments.contains("-startInSettings")
+                || ProcessInfo.processInfo.arguments.contains("-demoReviewReminder")
+                || ProcessInfo.processInfo.arguments.contains("-startInAdvanced")
+                || ProcessInfo.processInfo.arguments.contains("-demoCheckDatabase")
+                || ProcessInfo.processInfo.arguments.contains("-demoEmptyCards") {
                 goSettings = true
             }
             // Controls/Gestures settings screen (full-parity screenshot hook).
@@ -556,6 +560,9 @@ struct HomeView: View {
                 // Keep the home-screen widget's snapshot current when the app
                 // leaves the foreground.
                 store.updateWidgetSnapshot()
+                // Refresh the daily reminder's "N cards due" body with the
+                // latest counts (a no-op unless the reminder is enabled).
+                store.refreshReviewReminderIfEnabled()
             default:
                 break
             }

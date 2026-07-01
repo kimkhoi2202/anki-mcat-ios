@@ -30,12 +30,29 @@ struct SettingsView: View {
     /// through the collection each character and fight the text cursor).
     @State private var defaultSearchTextDraft = ""
 
+    // MARK: - Daily review reminder (app-local; AnkiDroid's review reminder)
+
+    /// Whether the daily review reminder is on. Persisted app-locally and shared
+    /// with the store (which reschedules with a fresh due count on background).
+    @AppStorage(ReviewReminders.enabledKey) private var reminderEnabled = false
+    /// The reminder's daily hour/minute (persisted app-locally).
+    @AppStorage(ReviewReminders.hourKey) private var reminderHour = ReviewReminderSchedule.defaultHour
+    @AppStorage(ReviewReminders.minuteKey) private var reminderMinute = ReviewReminderSchedule.defaultMinute
+    /// Set when authorization was refused, so the section can point the user to
+    /// iOS Settings instead of silently failing.
+    @State private var reminderPermissionDenied = false
+    /// Programmatic push of the Advanced screen (used by the automation hook so a
+    /// screenshot can land directly on the maintenance tools).
+    @State private var goAdvanced = false
+
     var body: some View {
         Form {
             accountSection
             serverSection
             syncSection
+            notificationsSection
             appearanceSection
+            schedulingSection
             reviewingSection
             autoAdvanceSection
             controlsSection
@@ -43,6 +60,7 @@ struct SettingsView: View {
             backupsSection
             notetypesSection
             dataSection
+            advancedSection
             aboutSection
         }
         .scrollContentBackground(.hidden)
@@ -50,10 +68,29 @@ struct SettingsView: View {
         .tint(DS.accent)
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
+        // Programmatic route to Advanced for the screenshot/automation hook; the
+        // Advanced row also pushes it via its own NavigationLink for normal use.
+        .navigationDestination(isPresented: $goAdvanced) {
+            AdvancedSettingsView(store: store)
+        }
         .task {
+            // Screenshot/automation hook: show the daily reminder enabled (toggle
+            // + time visible) without going through the permission prompt.
+            if ProcessInfo.processInfo.arguments.contains("-demoReviewReminder") {
+                reminderEnabled = true
+                reminderHour = 20
+                reminderMinute = 0
+            }
             store.loadPreferences()
             reconcileServer()
             defaultSearchTextDraft = store.editingPrefs.defaultSearchText
+            await reconcileReminderAuthorization()
+            // Screenshot/automation hook: jump straight to the Advanced screen.
+            if ProcessInfo.processInfo.arguments.contains("-startInAdvanced")
+                || ProcessInfo.processInfo.arguments.contains("-demoCheckDatabase")
+                || ProcessInfo.processInfo.arguments.contains("-demoEmptyCards") {
+                goAdvanced = true
+            }
         }
         // Re-seed the picker when the login state or the in-use server changes
         // (e.g. logging out while on this screen, or a shard reassignment), so it
@@ -177,6 +214,39 @@ struct SettingsView: View {
         .foregroundStyle(DS.textPrimary)
     }
 
+    // MARK: - Notifications (daily review reminder; app-local)
+
+    /// A daily local-notification reminder to study, cloning AnkiDroid's review
+    /// reminder. Enabling requests notification authorization; the time picker
+    /// (re)schedules a repeating `UNCalendarNotificationTrigger`. Enable + time
+    /// are app-local (`@AppStorage`); the store reschedules with a fresh due
+    /// count when the app backgrounds so the body reads "You have N cards due".
+    private var notificationsSection: some View {
+        Section {
+            Toggle("Daily review reminder", isOn: reminderToggleBinding)
+                .accessibilityIdentifier("reviewReminderToggle")
+            if reminderEnabled {
+                DatePicker(
+                    "Remind me at",
+                    selection: reminderTimeBinding,
+                    displayedComponents: .hourAndMinute
+                )
+                .accessibilityIdentifier("reviewReminderTime")
+            }
+            if reminderPermissionDenied {
+                Text("Notifications are turned off for Anki Speedrun. Enable them in iOS Settings ▸ Notifications to get reminders.")
+                    .font(DS.Typography.caption)
+                    .foregroundStyle(DS.again)
+            }
+        } header: {
+            sectionHeader("Notifications")
+        } footer: {
+            sectionFooter("Get a daily reminder to study at the time you choose. The reminder shows how many cards are due. Stored on this device.")
+        }
+        .font(DS.Typography.body)
+        .foregroundStyle(DS.textPrimary)
+    }
+
     // MARK: - Appearance
 
     private var appearanceSection: some View {
@@ -214,6 +284,46 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Scheduling (engine-backed)
+
+    /// Anki's Preferences ▸ Scheduling. Engine-backed via `Preferences.scheduling`
+    /// (the next-day rollover hour and the learn-ahead limit), so these sync
+    /// across devices and affect the scheduler on every client.
+    private var schedulingSection: some View {
+        Section {
+            if store.preferencesAvailable {
+                Stepper(value: rolloverBinding, in: 0...23) {
+                    HStack {
+                        Text("Next day starts at")
+                        Spacer()
+                        Text(rolloverLabel(store.schedulingPrefs.rollover))
+                            .foregroundStyle(DS.textSecondary)
+                            .monospacedDigit()
+                    }
+                }
+                Stepper(value: learnAheadBinding, in: 0...1440, step: 5) {
+                    HStack {
+                        Text("Learn ahead limit")
+                        Spacer()
+                        Text("\(store.schedulingPrefs.learnAheadMinutes) min")
+                            .foregroundStyle(DS.textSecondary)
+                            .monospacedDigit()
+                    }
+                }
+            } else {
+                Text("Scheduling preferences are unavailable.")
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textSecondary)
+            }
+        } header: {
+            sectionHeader("Scheduling")
+        } footer: {
+            sectionFooter("“Next day starts at” sets the hour a new day begins for due cards. “Learn ahead limit” lets the scheduler show learning cards early when nothing else is due. Stored in your collection.")
+        }
+        .font(DS.Typography.body)
+        .foregroundStyle(DS.textPrimary)
+    }
+
     // MARK: - Reviewing (engine-backed)
 
     private var reviewingSection: some View {
@@ -235,6 +345,17 @@ struct SettingsView: View {
                     get: { store.reviewingPrefs.interruptAudioWhenAnswering },
                     set: store.setInterruptAudioWhenAnswering
                 ))
+                Stepper(value: timeboxMinutesBinding, in: 0...600, step: 5) {
+                    HStack {
+                        Text("Timebox time limit")
+                        Spacer()
+                        Text(store.reviewingPrefs.timeLimitMinutes == 0
+                             ? "Off"
+                             : "\(store.reviewingPrefs.timeLimitMinutes) min")
+                            .foregroundStyle(DS.textSecondary)
+                            .monospacedDigit()
+                    }
+                }
             } else {
                 Text("Reviewing preferences are unavailable.")
                     .font(DS.Typography.body)
@@ -315,6 +436,10 @@ struct SettingsView: View {
                 Toggle("Ignore accents in search (slower)", isOn: boolBinding(
                     get: { store.editingPrefs.ignoreAccentsInSearch },
                     set: store.setIgnoreAccentsInSearch
+                ))
+                Toggle("Render LaTeX", isOn: boolBinding(
+                    get: { store.editingPrefs.renderLatex },
+                    set: store.setRenderLatex
                 ))
                 HStack {
                     Text("Default search text")
@@ -442,6 +567,28 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Advanced (maintenance tools)
+
+    /// Entry to the Advanced screen — AnkiDroid's "Advanced" settings category
+    /// with the database-maintenance tools (check database, empty cards, force
+    /// full sync, restore from backup).
+    private var advancedSection: some View {
+        Section {
+            NavigationLink {
+                AdvancedSettingsView(store: store)
+            } label: {
+                Label("Advanced", systemImage: "wrench.and.screwdriver")
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+            }
+            .accessibilityIdentifier("advancedSettings")
+        } header: {
+            sectionHeader("Advanced")
+        } footer: {
+            sectionFooter("Database maintenance: check database, find empty cards, force a full sync, or restore from a backup.")
+        }
+    }
+
     // MARK: - About
 
     private var aboutSection: some View {
@@ -499,6 +646,113 @@ struct SettingsView: View {
         set: @escaping (Bool) -> Void
     ) -> Binding<Bool> {
         Binding(get: get, set: set)
+    }
+
+    // MARK: Scheduling / Reviewing stepper bindings
+
+    private var rolloverBinding: Binding<Int> {
+        Binding(get: { store.schedulingPrefs.rollover }, set: { store.setNextDayStartsAt($0) })
+    }
+
+    private var learnAheadBinding: Binding<Int> {
+        Binding(get: { store.schedulingPrefs.learnAheadMinutes }, set: { store.setLearnAheadMinutes($0) })
+    }
+
+    private var timeboxMinutesBinding: Binding<Int> {
+        Binding(get: { store.reviewingPrefs.timeLimitMinutes }, set: { store.setTimeboxMinutes($0) })
+    }
+
+    /// Formats a rollover hour (0–23) as a localized time-of-day, e.g. "4 AM".
+    private func rolloverLabel(_ hour: Int) -> String {
+        var components = DateComponents()
+        components.hour = hour
+        components.minute = 0
+        if let date = Calendar.current.date(from: components) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return "\(hour):00"
+    }
+
+    // MARK: Review-reminder bindings & authorization
+
+    /// Toggling on requests notification authorization and schedules the daily
+    /// reminder on success; on denial it reverts the toggle and shows the hint.
+    /// Toggling off cancels any pending reminder. All notification-center work is
+    /// crash-proofed inside the manager.
+    private var reminderToggleBinding: Binding<Bool> {
+        Binding(
+            get: { reminderEnabled },
+            set: { newValue in
+                if newValue {
+                    Task {
+                        let granted = await store.reviewReminders.requestAuthorization()
+                        if granted {
+                            reminderEnabled = true
+                            reminderPermissionDenied = false
+                            await store.reviewReminders.schedule(
+                                hour: reminderHour, minute: reminderMinute,
+                                dueCount: store.totalDueForReminder
+                            )
+                        } else {
+                            reminderEnabled = false
+                            reminderPermissionDenied = true
+                        }
+                    }
+                } else {
+                    reminderEnabled = false
+                    reminderPermissionDenied = false
+                    store.reviewReminders.cancel()
+                }
+            }
+        )
+    }
+
+    /// Binds the time picker to the stored hour/minute, rescheduling the reminder
+    /// (when enabled) whenever the chosen time changes.
+    private var reminderTimeBinding: Binding<Date> {
+        Binding(
+            get: {
+                Calendar.current.date(
+                    from: DateComponents(hour: reminderHour, minute: reminderMinute)
+                ) ?? Date()
+            },
+            set: { newDate in
+                let components = Calendar.current.dateComponents([.hour, .minute], from: newDate)
+                reminderHour = components.hour ?? ReviewReminderSchedule.defaultHour
+                reminderMinute = components.minute ?? ReviewReminderSchedule.defaultMinute
+                if reminderEnabled {
+                    Task {
+                        await store.reviewReminders.schedule(
+                            hour: reminderHour, minute: reminderMinute,
+                            dueCount: store.totalDueForReminder
+                        )
+                    }
+                }
+            }
+        )
+    }
+
+    /// On appear, reconcile the toggle with the system authorization status: if
+    /// the user revoked permission in iOS Settings, turn the reminder off and
+    /// show the hint; if still authorized, make sure a reminder is scheduled.
+    private func reconcileReminderAuthorization() async {
+        guard reminderEnabled else { return }
+        switch await store.reviewReminders.authorizationStatus() {
+        case .authorized, .provisional, .ephemeral:
+            reminderPermissionDenied = false
+            await store.reviewReminders.schedule(
+                hour: reminderHour, minute: reminderMinute,
+                dueCount: store.totalDueForReminder
+            )
+        case .denied:
+            reminderEnabled = false
+            reminderPermissionDenied = true
+            store.reviewReminders.cancel()
+        case .notDetermined:
+            break
+        @unknown default:
+            break
+        }
     }
 
     private var appVersion: String {

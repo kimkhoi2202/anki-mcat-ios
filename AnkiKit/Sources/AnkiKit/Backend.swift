@@ -75,6 +75,35 @@ public final class Backend: @unchecked Sendable {
         return try Resp(serializedBytes: out)
     }
 
+    /// Raw DB command dispatch (JSON in / JSON out), mirroring pylib's `DBProxy`
+    /// and AnkiDroid's `backend.db_command` (`anki_run_db_command`).
+    ///
+    /// Anki performs a few operations with a direct SQL statement rather than a
+    /// protobuf RPC — most notably `set_schema_modified` ("Force full sync"),
+    /// which both pylib and AnkiDroid implement as `update col set scm=?`. The
+    /// `input` is a JSON `DbRequest`
+    /// (`{"kind":"query","sql":…,"args":[…],"first_row_only":false}`); the
+    /// returned JSON is a `DbResult` — an array of rows for a query, or the
+    /// literal `null` for a write — which write-only callers can ignore.
+    public func runDBCommand(_ input: Data) throws -> Data {
+        let result = input.withUnsafeBytes { raw in
+            anki_run_db_command(
+                handle, raw.bindMemory(to: UInt8.self).baseAddress, raw.count
+            )
+        }
+        defer { anki_free_bytes(result) }
+        let bytes: Data
+        if let ptr = result.ptr {
+            bytes = Data(bytes: ptr, count: result.len)
+        } else {
+            bytes = Data()
+        }
+        if result.is_error {
+            throw AnkiError.backendError(bytes)
+        }
+        return bytes
+    }
+
     // MARK: - Typed convenience methods
 
     /// CollectionService.openCollection (service 3, method 0).
