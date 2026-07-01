@@ -2351,7 +2351,7 @@ final class AnkiStore: ObservableObject {
                     // import or a closed handle left it shut) so the replacement
                     // can still be written instead of aborting on a close that
                     // throws.
-                    try? backend.closeCollection()
+                    _ = try? backend.closeCollection()
                     do {
                         try backend.importCollectionPackage(
                             colPath: colPath, backupPath: packagePath,
@@ -2360,7 +2360,7 @@ final class AnkiStore: ObservableObject {
                     } catch {
                         // Import failed before swapping the file in; reopen the
                         // unchanged collection so the app isn't left closed.
-                        try? backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
+                        _ = try? backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
                         throw error
                     }
                     try backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
@@ -2412,7 +2412,7 @@ final class AnkiStore: ObservableObject {
                 do {
                     try backend.exportCollectionPackage(outPath: path, includeMedia: includeMedia, legacy: false)
                 } catch {
-                    try? backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
+                    _ = try? backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
                     throw error
                 }
                 try backend.openCollection(path: colPath, mediaFolder: mediaFolder, mediaDB: mediaDB)
