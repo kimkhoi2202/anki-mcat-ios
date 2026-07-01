@@ -1,6 +1,9 @@
 import Foundation
 import AnkiKit
 import WidgetKit
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 final class AnkiStore: ObservableObject {
@@ -2068,6 +2071,132 @@ final class AnkiStore: ObservableObject {
             }
         }
     }
+
+    /// Debug-only screenshot hook for the Image Occlusion reviewer
+    /// (`-demoImageOcclusion`). Ensures an I/O note type exists, draws a small
+    /// labeled diagram into the media folder, and seeds one I/O note (building the
+    /// occlusion cloze field directly, in Anki's `to-cloze` format) in its own
+    /// deck, then selects it so the reviewer opens on the I/O card with masks
+    /// drawn. Idempotent (skips if the demo deck exists); excluded from release.
+    func prepareImageOcclusionDemoIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("-demoImageOcclusion") else { return }
+        guard let backend else { return }
+        let deckName = "Image Occlusion Demo"
+        do {
+            if let existing = try backend.deckNames().first(where: { $0.name == deckName }) {
+                selectDeck(id: existing.id)
+                return
+            }
+            // ImageOcclusionService.addImageOcclusionNotetype (service 37, method
+            // 3): adds an I/O note type if none exists. Input is generic Empty.
+            _ = try backend.run(service: 37, method: 3, input: Data())
+            guard let io = try backend.notetypeNames().first(where: { isImageOcclusionNotetype($0.id) }) else {
+                status = "Image occlusion demo: no I/O note type"
+                return
+            }
+            // Draw a diagram and write it into the media folder so the reviewer's
+            // media handler can serve it as `<img src="…">`.
+            let imageName = "io-demo-diagram.png"
+            try FileManager.default.createDirectory(at: mediaFolderURL, withIntermediateDirectories: true)
+            try Self.imageOcclusionDemoPNG().write(to: mediaFolderURL.appendingPathComponent(imageName))
+            // Two rectangular masks over the two labeled regions, in "hide all"
+            // mode (`:oi=1`) so both show on the question side. Format matches
+            // ts/routes/image-occlusion/shapes/to-cloze.ts.
+            let occlusions = [
+                "{{c1::image-occlusion:rect:left=0.08:top=0.15:width=0.38:height=0.22:oi=1}}",
+                "{{c2::image-occlusion:rect:left=0.55:top=0.55:width=0.34:height=0.28:oi=1}}",
+            ].joined(separator: "<br>") + "<br>"
+            let deckID = try backend.createDeck(name: deckName)
+            // I/O note type fields, in order: Occlusions, Image, Header, Back Extra, Comments.
+            _ = try backend.addNote(
+                notetypeID: io.id,
+                fields: [occlusions, "<img src=\"\(imageName)\">", "Name the hidden parts", "", ""],
+                deckID: deckID
+            )
+            selectDeck(id: deckID)
+        } catch {
+            status = "Image occlusion demo seed error: \(error)"
+        }
+    }
+
+    /// Debug-only screenshot hook for MathJax/LaTeX rendering (`-demoMathJax`).
+    /// Seeds one Basic note whose fields contain inline `\(…\)` and display
+    /// `\[…\]` math in its own deck, then selects it so the reviewer opens on the
+    /// math card. Idempotent; excluded from release builds.
+    func prepareMathJaxDemoIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("-demoMathJax") else { return }
+        guard let backend else { return }
+        let deckName = "MathJax Demo"
+        do {
+            if let existing = try backend.deckNames().first(where: { $0.name == deckName }) {
+                selectDeck(id: existing.id)
+                return
+            }
+            guard let basic = try backend.notetypeNames().first(where: {
+                $0.name.hasPrefix("Basic") && !$0.name.lowercased().contains("type")
+            }) else {
+                status = "MathJax demo: no Basic note type"
+                return
+            }
+            let deckID = try backend.createDeck(name: deckName)
+            let front = "Pythagorean theorem: \\(x^2 + y^2 = z^2\\)"
+            let back = "Euler's identity: \\(e^{i\\pi} + 1 = 0\\)"
+                + "<br><br>Gaussian integral: \\[\\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx = \\sqrt{\\pi}\\]"
+            _ = try backend.addNote(notetypeID: basic.id, fields: [front, back], deckID: deckID)
+            selectDeck(id: deckID)
+        } catch {
+            status = "MathJax demo seed error: \(error)"
+        }
+    }
+
+    #if canImport(UIKit)
+    /// Renders the small labeled diagram used by the Image Occlusion demo, so the
+    /// drawn masks visibly cover content in the verification screenshot. The two
+    /// masked regions (see `prepareImageOcclusionDemoIfRequested`) sit over the
+    /// "Nucleus" and "Mitochondria" boxes.
+    private static func imageOcclusionDemoPNG() -> Data {
+        let size = CGSize(width: 600, height: 400)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = true
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        return renderer.pngData { ctx in
+            let cg = ctx.cgContext
+            UIColor(white: 0.97, alpha: 1).setFill()
+            cg.fill(CGRect(origin: .zero, size: size))
+            ("Cell Diagram" as NSString).draw(
+                at: CGPoint(x: 20, y: 14),
+                withAttributes: [
+                    .font: UIFont.boldSystemFont(ofSize: 26),
+                    .foregroundColor: UIColor(white: 0.15, alpha: 1),
+                ]
+            )
+            func box(_ rect: CGRect, _ color: UIColor, _ label: String) {
+                color.setFill()
+                UIBezierPath(roundedRect: rect, cornerRadius: 10).fill()
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: UIFont.systemFont(ofSize: 18, weight: .semibold),
+                    .foregroundColor: UIColor.white,
+                ]
+                let label = label as NSString
+                let textSize = label.size(withAttributes: attrs)
+                label.draw(
+                    at: CGPoint(x: rect.midX - textSize.width / 2, y: rect.midY - textSize.height / 2),
+                    withAttributes: attrs
+                )
+            }
+            // Positions mirror the normalized mask rects above (600×400 canvas).
+            box(CGRect(x: 48, y: 60, width: 228, height: 88),
+                UIColor(red: 0.20, green: 0.50, blue: 0.80, alpha: 1), "Nucleus")
+            box(CGRect(x: 330, y: 60, width: 204, height: 88),
+                UIColor(red: 0.30, green: 0.60, blue: 0.35, alpha: 1), "Ribosome")
+            box(CGRect(x: 48, y: 220, width: 228, height: 112),
+                UIColor(red: 0.55, green: 0.40, blue: 0.70, alpha: 1), "Membrane")
+            box(CGRect(x: 330, y: 220, width: 204, height: 112),
+                UIColor(red: 0.85, green: 0.45, blue: 0.20, alpha: 1), "Mitochondria")
+        }
+    }
+    #endif
     #endif
 
     /// Runs a collection sync followed by a media sync, cloning AnkiDroid's

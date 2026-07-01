@@ -19,6 +19,13 @@ targets:
       # bundled as a folder reference so the directory structure is preserved.
       - path: Resources/sveltekit
         type: folder
+      # Reviewer runtime served to the card WKWebView: the compiled Anki
+      # reviewer bundle (defines `anki.imageOcclusion`), the MathJax config +
+      # engine subset, and the IO overlay CSS. Bundled as a folder reference so
+      # the nested mathjax/ directory structure is preserved (MediaSchemeHandler
+      # streams these under `ankimedia://.../runtime/...`).
+      - path: Resources/reviewer
+        type: folder
     dependencies:
       - package: AnkiKit
         product: AnkiKit

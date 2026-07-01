@@ -389,6 +389,18 @@ struct HomeView: View {
                 store.prepareReviewerFeatureDemosIfRequested()
                 goReview = true
             }
+            // Seed + open an Image Occlusion card (masks drawn over the image),
+            // for the IO reviewer screenshot.
+            if ProcessInfo.processInfo.arguments.contains("-demoImageOcclusion") {
+                store.prepareImageOcclusionDemoIfRequested()
+                goReview = true
+            }
+            // Seed + open a card with inline/display LaTeX, for the MathJax
+            // rendering screenshot.
+            if ProcessInfo.processInfo.arguments.contains("-demoMathJax") {
+                store.prepareMathJaxDemoIfRequested()
+                goReview = true
+            }
             if ProcessInfo.processInfo.arguments.contains("-startInSettings") {
                 goSettings = true
             }

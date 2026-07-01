@@ -25,5 +25,7 @@ DerivedData/
 !**/Assets.xcassets/**/*.png
 # Never drop raster assets bundled into the SvelteKit web app
 !**/Resources/sveltekit/**
+# Keep the bundled reviewer runtime (reviewer.js, MathJax engine + fonts, CSS)
+!**/Resources/reviewer/**
 
 .DS_Store

@@ -3,21 +3,43 @@ import WebKit
 import UniformTypeIdentifiers
 import AnkiKit
 
-/// Serves `<img src="...">` (and other media) from the collection's media
-/// folder over a custom URL scheme, mirroring how AnkiDroid serves card assets
-/// from `file:///android_asset`. A custom scheme handler is the robust option on
-/// iOS 16: `loadHTMLString` cannot grant a WebView file-read access to an
-/// arbitrary directory, but a registered scheme handler can stream any file.
+/// Serves the reviewer WebView's resources over a custom URL scheme, mirroring
+/// how AnkiDroid serves card assets from `file:///android_asset`. A custom scheme
+/// handler is the robust option on iOS 16: `loadHTMLString` cannot grant a
+/// WebView file-read access to an arbitrary directory, but a registered scheme
+/// handler can stream any file. Two kinds of request are served:
+///
+/// - **Media** (`<img src="foo.jpg">`, audio, …) from the collection's media
+///   folder — the default, sandboxed to that folder.
+/// - **Reviewer runtime** under the reserved `runtime/` path (or a `runtime`
+///   host) from the app bundle: the compiled Anki reviewer bundle (which defines
+///   `anki.imageOcclusion`), the MathJax config + engine, and the IO overlay CSS.
+///
+/// The runtime is served under the *same origin* as the document base
+/// (`ankimedia://card/…`) so scripts and `@font-face` fonts avoid WKWebView's
+/// cross-origin custom-scheme pitfalls.
 final class MediaSchemeHandler: NSObject, WKURLSchemeHandler {
     /// Custom scheme (must not be a built-in like `file`/`http`).
     static let scheme = "ankimedia"
     /// Document base; relative media URLs resolve against this and route here.
     static let baseURL = URL(string: "\(scheme)://card/")!
+    /// Reserved first path component (and alternate host) under which the bundled
+    /// reviewer runtime is served, e.g. `ankimedia://card/runtime/reviewer.js`.
+    static let runtimePathComponent = "runtime"
+    /// Absolute, same-origin base URL for bundled runtime assets. `makeDocument`
+    /// references assets relative to the document base, and points MathJax's
+    /// loader here so it builds correct (same-origin) font URLs.
+    static var runtimeBaseURL: String { "\(baseURL.absoluteString)\(runtimePathComponent)" }
 
     private let mediaFolder: URL
+    /// Bundled reviewer runtime directory (`Resources/reviewer`), or nil if it is
+    /// somehow missing from the app bundle.
+    private let runtimeFolder: URL?
 
     init(mediaFolder: URL) {
         self.mediaFolder = mediaFolder.standardizedFileURL
+        self.runtimeFolder = Bundle.main.resourceURL?
+            .appendingPathComponent("reviewer").standardizedFileURL
     }
 
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
@@ -26,36 +48,91 @@ final class MediaSchemeHandler: NSObject, WKURLSchemeHandler {
             return
         }
 
-        // Map the request path to a file inside the media folder. `url.path` is
-        // percent-decoded, turning the engine's `foo%20bar.jpg` back into the
-        // real filename. Reject anything that escapes the media folder.
-        let relativePath = url.path.hasPrefix("/") ? String(url.path.dropFirst()) : url.path
-        let fileURL = mediaFolder.appendingPathComponent(relativePath).standardizedFileURL
-        guard fileURL.path == mediaFolder.path || fileURL.path.hasPrefix(mediaFolder.path + "/"),
-              let data = try? Data(contentsOf: fileURL) else {
-            urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
+        // Reviewer runtime assets (bundled) vs. collection media (on disk).
+        if let runtimeRelative = Self.runtimeRelativePath(for: url) {
+            serve(from: runtimeFolder, relativePath: runtimeRelative, url: url,
+                  mime: Self.runtimeMIMEType(forExtension:), task: urlSchemeTask)
+        } else {
+            // `url.path` is percent-decoded, turning the engine's `foo%20bar.jpg`
+            // back into the real filename.
+            let relativePath = url.path.hasPrefix("/") ? String(url.path.dropFirst()) : url.path
+            serve(from: mediaFolder, relativePath: relativePath, url: url,
+                  mime: Self.mimeType(forExtension:), task: urlSchemeTask)
+        }
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+
+    /// Returns the runtime-relative path for a runtime asset request, or nil for
+    /// a normal media request. Accepts both the same-origin `.../runtime/<path>`
+    /// form (used by `makeDocument`) and a dedicated `runtime` host.
+    private static func runtimeRelativePath(for url: URL) -> String? {
+        let path = url.path.hasPrefix("/") ? String(url.path.dropFirst()) : url.path
+        if url.host == runtimePathComponent {
+            return path
+        }
+        let prefix = runtimePathComponent + "/"
+        return path.hasPrefix(prefix) ? String(path.dropFirst(prefix.count)) : nil
+    }
+
+    /// Streams `relativePath` from `folder`, rejecting anything that escapes it
+    /// (path-traversal / symlink) and 404ing a missing file or a missing folder.
+    private func serve(
+        from folder: URL?,
+        relativePath: String,
+        url: URL,
+        mime: (String) -> String,
+        task: WKURLSchemeTask
+    ) {
+        guard let folder else {
+            task.didFailWithError(URLError(.fileDoesNotExist))
             return
         }
-
-        let mimeType = Self.mimeType(forExtension: fileURL.pathExtension)
+        let fileURL = folder.appendingPathComponent(relativePath).standardizedFileURL
+        guard fileURL.path == folder.path || fileURL.path.hasPrefix(folder.path + "/"),
+              let data = try? Data(contentsOf: fileURL) else {
+            task.didFailWithError(URLError(.fileDoesNotExist))
+            return
+        }
         let response = HTTPURLResponse(
             url: url,
             statusCode: 200,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": mimeType, "Content-Length": "\(data.count)"]
+            headerFields: [
+                "Content-Type": mime(fileURL.pathExtension),
+                "Content-Length": "\(data.count)",
+                // Same-origin in practice, but harmless and future-proofs any
+                // cross-origin subresource (e.g. MathJax fonts).
+                "Access-Control-Allow-Origin": "*",
+            ]
         )!
-        urlSchemeTask.didReceive(response)
-        urlSchemeTask.didReceive(data)
-        urlSchemeTask.didFinish()
+        task.didReceive(response)
+        task.didReceive(data)
+        task.didFinish()
     }
-
-    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
 
     private static func mimeType(forExtension ext: String) -> String {
         if let type = UTType(filenameExtension: ext), let mime = type.preferredMIMEType {
             return mime
         }
         return "application/octet-stream"
+    }
+
+    /// Explicit MIME types for bundled runtime assets. WKWebView refuses to
+    /// *execute* a script served without a JavaScript MIME type, so we can't rely
+    /// on `UTType` inference (which can return `application/octet-stream` for
+    /// `.js`/`.woff`); fall back to it only for anything unexpected.
+    private static func runtimeMIMEType(forExtension ext: String) -> String {
+        switch ext.lowercased() {
+        case "js", "mjs": return "text/javascript; charset=utf-8"
+        case "css": return "text/css; charset=utf-8"
+        case "json": return "application/json; charset=utf-8"
+        case "woff": return "font/woff"
+        case "woff2": return "font/woff2"
+        case "wasm": return "application/wasm"
+        case "svg": return "image/svg+xml"
+        default: return mimeType(forExtension: ext)
+        }
     }
 }
 
@@ -309,10 +386,91 @@ struct CardWebView: UIViewRepresentable {
     /// Wraps the rendered HTML in `<div class="card cardN">` and injects the
     /// notetype CSS, mirroring Anki's reviewer (desktop builds the body class
     /// `card card{ord+1} nightMode`; AnkiDroid does the same via `getCardClass`).
+    ///
+    /// For Image Occlusion and MathJax/LaTeX cards it additionally loads the
+    /// bundled reviewer runtime, faithfully to AnkiDroid's `card_template.html`
+    /// (which links `reviewer_extras.css` + `mathjax/mathjax.css` and loads
+    /// `reviewer_extras_bundle.js`). The runtime is injected only when the card
+    /// needs it, so normal cards render exactly as before — no extra scripts, no
+    /// per-card cost.
+    ///
+    /// Ordering is critical: the reviewer bundle (which defines
+    /// `globalThis.anki.imageOcclusion`) is a classic, render-blocking `<script>`
+    /// in `<head>`, so `anki` is fully defined before the card's own inline
+    /// `<script>anki.imageOcclusion.setup()</script>` runs during body parsing.
+    /// MathJax's config likewise loads before its engine, and — since the card
+    /// HTML is injected statically rather than through Anki's `_updateQA` — we
+    /// trigger typesetting ourselves once the engine is ready.
     static func makeDocument(html: String, css: String, ordinal: Int, isDark: Bool) -> String {
         // Anki applies both `nightMode` (desktop) and `night_mode` (AnkiDroid).
         let nightClasses = isDark ? " nightMode night_mode" : ""
         let cardClasses = "card card\(ordinal + 1)\(nightClasses)"
+
+        // Only pull in the (large) runtime when the card actually needs it.
+        let needsImageOcclusion = html.contains("image-occlusion")
+        let needsMathJax = containsMathJax(html)
+
+        // <head> extras: the IO overlay CSS + reviewer bundle, and/or MathJax.
+        var headExtras = ""
+        if needsImageOcclusion {
+            headExtras += """
+
+            <link rel="stylesheet" href="\(runtimeAsset("reviewer_extras.css"))">
+            <script>
+              // The reviewer bundle may call window.bridgeCommand("updateToolbar")
+              // etc.; define a no-op so those calls never throw. Native gestures
+              // handle all reviewer actions, so nothing needs to be forwarded
+              // (mirrors the shim in AnkiWebPage for the shared web pages).
+              window.bridgeCommand = window.bridgeCommand || function () {};
+              globalThis.bridgeCommand = window.bridgeCommand;
+            </script>
+            <!-- Compiled Anki reviewer runtime: defines globalThis.anki (incl.
+                 anki.imageOcclusion.setup). Classic/blocking so `anki` exists
+                 before the card's inline script executes. -->
+            <script src="\(runtimeAsset("reviewer.js"))"></script>
+            """
+        }
+        if needsMathJax {
+            headExtras += """
+
+            <link rel="stylesheet" href="\(runtimeAsset("mathjax.css"))">
+            <!-- MathJax config (Anki's), then repoint its loader at the bundled
+                 engine/fonts, then load the self-contained TeX+CHTML engine. The
+                 config must exist before the engine script initializes. -->
+            <script src="\(runtimeAsset("mathjax.js"))"></script>
+            <script>
+              if (window.MathJax && window.MathJax.loader) {
+                window.MathJax.loader.paths.mathjax = "\(MediaSchemeHandler.runtimeBaseURL)/mathjax";
+              }
+            </script>
+            <script src="\(runtimeAsset("mathjax/tex-chtml-full.js"))"></script>
+            """
+        }
+
+        // Body extras: kick off MathJax typesetting once the engine is ready.
+        var bodyExtras = ""
+        if needsMathJax {
+            bodyExtras = """
+
+            <script>
+              (function () {
+                function typeset() {
+                  if (window.MathJax && MathJax.startup && MathJax.startup.promise) {
+                    MathJax.startup.promise
+                      .then(function () { return MathJax.typesetPromise([document.body]); })
+                      .catch(function () {});
+                  }
+                }
+                if (document.readyState === "loading") {
+                  document.addEventListener("DOMContentLoaded", typeset);
+                } else {
+                  typeset();
+                }
+              })();
+            </script>
+            """
+        }
+
         return """
         <!doctype html>
         <html>
@@ -345,13 +503,27 @@ struct CardWebView: UIViewRepresentable {
         </style>
         <style>
         \(css)
-        </style>
+        </style>\(headExtras)
         </head>
         <body class="\(isDark ? "nightMode night_mode" : "")">
-        <div class="\(cardClasses)">\(html)</div>
+        <div class="\(cardClasses)">\(html)</div>\(bodyExtras)
         </body>
         </html>
         """
+    }
+
+    /// Same-origin URL for a bundled runtime asset, resolved relative to the
+    /// document base (`ankimedia://card/`) so it routes to the bundle rather than
+    /// the media folder.
+    private static func runtimeAsset(_ path: String) -> String {
+        "\(MediaSchemeHandler.runtimePathComponent)/\(path)"
+    }
+
+    /// Whether the rendered card HTML contains MathJax/LaTeX that needs the
+    /// engine. Matches Anki's delimiters: inline `\(…\)`, display `\[…\]`, and
+    /// raw MathML. (Anki normalizes legacy `[$]…[/$]` to these during rendering.)
+    private static func containsMathJax(_ html: String) -> Bool {
+        html.contains("\\(") || html.contains("\\[") || html.contains("<math")
     }
 }
 

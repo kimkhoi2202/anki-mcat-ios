@@ -1,0 +1,31 @@
+/* Image Occlusion review overlay, compiled from Anki's
+   ts/routes/image-occlusion/review.scss. Positions the mask <canvas> exactly
+   over the card image so drawn shapes line up with the picture. Kept as a
+   standalone file linked by the reviewer document, mirroring AnkiDroid's
+   backend/css/reviewer_extras.css. */
+#image-occlusion-container {
+    position: relative;
+    /* if height-constrained, ensure container is centered */
+    margin: 0 auto;
+    /* allow for 20px margin on html element, or short windows can truncate image */
+    max-height: calc(95vh - 40px);
+}
+
+#image-occlusion-container img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    /* remove the default image limits, as we rely on container */
+    max-width: unset;
+    max-height: unset;
+}
+
+#image-occlusion-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+}

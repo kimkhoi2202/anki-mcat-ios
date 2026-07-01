@@ -1,0 +1,5 @@
+/* Mirrors AnkiDroid's assets/mathjax/mathjax.css: hide content that is waiting
+   for MathJax to typeset, so raw LaTeX doesn't flash before rendering. */
+.mathjax-needs-to-render {
+  visibility: hidden;
+}
