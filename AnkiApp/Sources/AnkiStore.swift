@@ -369,12 +369,30 @@ final class AnkiStore: ObservableObject {
         let mediaFolder = mediaFolderURL
         let colPath = collectionURL.path
         let mediaDBPath = mediaDBURL.path
+        // Open the engine in the user's language — Anki's own translation catalog
+        // (the same one Desktop and AnkiDroid use) — so the web screens (stats,
+        // deck options, card info) and every engine-sourced string localize like
+        // AnkiDroid instead of being pinned to English. An optional in-app
+        // override (Settings ▸ Language) wins over the device's languages; "en" is
+        // always the final fallback (Anki's source language). Read here on the
+        // main actor and captured as a Sendable [String] for the detached open.
+        let backendLangs: [String] = {
+            var langs: [String]
+            if let override = UserDefaults.standard.string(forKey: "appLanguageOverride"),
+               override != "system", !override.isEmpty {
+                langs = [override]
+            } else {
+                langs = Locale.preferredLanguages
+            }
+            if !langs.contains("en") { langs.append("en") }
+            return langs
+        }()
         let newBackend: Backend
         do {
             // Create + open the collection off the main actor; the handle stays
             // local until the open succeeds.
             newBackend = try await runDetached {
-                let backend = try Backend()
+                let backend = try Backend(preferredLangs: backendLangs)
                 try Self.openDefaultCollection(
                     backend, mediaFolder: mediaFolder, colPath: colPath, mediaDBPath: mediaDBPath
                 )
