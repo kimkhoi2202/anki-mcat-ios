@@ -881,10 +881,10 @@ struct ReviewerView: View {
     private var answerArea: some View {
         if store.showingAnswer {
             HStack(spacing: DS.Spacing.s) {
-                rateButton("Again", index: 0, rating: .again, color: DS.again)
-                rateButton("Hard", index: 1, rating: .hard, color: DS.hard)
-                rateButton("Good", index: 2, rating: .good, color: DS.good)
-                rateButton("Easy", index: 3, rating: .easy, color: DS.easy)
+                rateButton(Loc.tr("studying-again"), index: 0, rating: .again, color: DS.again)
+                rateButton(Loc.tr("studying-hard"), index: 1, rating: .hard, color: DS.hard)
+                rateButton(Loc.tr("studying-good"), index: 2, rating: .good, color: DS.good)
+                rateButton(Loc.tr("studying-easy"), index: 3, rating: .easy, color: DS.easy)
             }
             .padding()
         } else {
@@ -899,7 +899,7 @@ struct ReviewerView: View {
                         .accessibilityLabel("Type the answer")
                 }
                 Button(action: store.reveal) {
-                    Text("Show Answer").frame(maxWidth: .infinity)
+                    Text(Loc.tr("studying-show-answer")).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.dsPrimary)
             }

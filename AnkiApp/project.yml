@@ -26,6 +26,9 @@ targets:
       # streams these under `ankimedia://.../runtime/...`).
       - path: Resources/reviewer
         type: folder
+      # Fluent key -> (module, message) index map so native strings can pull from
+      # Anki's translation catalog via the engine (see tools/gen_ftl_index.py).
+      - path: Resources/ftl_index.json
     dependencies:
       - package: AnkiKit
         product: AnkiKit

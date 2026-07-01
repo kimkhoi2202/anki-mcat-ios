@@ -409,6 +409,9 @@ final class AnkiStore: ObservableObject {
         }
         // Retain the handle only now that the collection is actually open.
         self.backend = newBackend
+        // Make the engine's translation catalog available to the native UI so
+        // `Loc.tr(...)` resolves strings in the collection's language.
+        Loc.configure(backend: newBackend)
         // Seeding demo cards is best-effort (and runs note inserts, so it's
         // offloaded too); a hiccup must not brick a good open.
         try? await runDetached { try Self.seedIfNeeded(newBackend) }
