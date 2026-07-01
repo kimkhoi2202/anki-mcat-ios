@@ -38,6 +38,7 @@ struct SettingsView: View {
             appearanceSection
             reviewingSection
             autoAdvanceSection
+            controlsSection
             editingSection
             backupsSection
             notetypesSection
@@ -283,6 +284,28 @@ struct SettingsView: View {
             Text("\(seconds)s")
                 .foregroundStyle(DS.textSecondary)
                 .monospacedDigit()
+        }
+    }
+
+    // MARK: - Controls / Gestures
+
+    /// Entry to the reviewer gesture settings — AnkiDroid keeps a "Controls"
+    /// category for its configurable gestures; we mirror that with a row into the
+    /// native gesture editor (tap zones, swipes, long-press, double-tap → action).
+    private var controlsSection: some View {
+        Section {
+            NavigationLink {
+                ControlsSettingsView(store: store)
+            } label: {
+                Label("Gestures", systemImage: "hand.tap")
+                    .font(DS.Typography.body)
+                    .foregroundStyle(DS.textPrimary)
+            }
+            .accessibilityIdentifier("controlsSettings")
+        } header: {
+            sectionHeader("Controls")
+        } footer: {
+            sectionFooter("Choose what tapping a card zone, swiping, long-pressing, or double-tapping does during review. Stored on this device.")
         }
     }
 

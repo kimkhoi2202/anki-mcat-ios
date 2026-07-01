@@ -16,6 +16,8 @@ struct HomeView: View {
     @State private var hasLaunched = false
     @State private var goReview = false
     @State private var goSettings = false
+    /// Push straight to the Controls/Gestures settings screen (DEBUG launch hook).
+    @State private var goControls = false
     @State private var goBrowse = false
     @State private var goStats = false
     @State private var goImportExport = false
@@ -140,6 +142,11 @@ struct HomeView: View {
             }
             .navigationDestination(isPresented: $goSettings) {
                 SettingsView(store: store)
+            }
+            // DEBUG screenshot/automation hook: jump straight to the gesture
+            // settings screen (mirrors the app's other `-startIn…` destinations).
+            .navigationDestination(isPresented: $goControls) {
+                ControlsSettingsView(store: store)
             }
             .navigationDestination(isPresented: $goBrowse) {
                 CardBrowserView(store: store)
@@ -384,6 +391,16 @@ struct HomeView: View {
             }
             if ProcessInfo.processInfo.arguments.contains("-startInSettings") {
                 goSettings = true
+            }
+            // Controls/Gestures settings screen (full-parity screenshot hook).
+            if ProcessInfo.processInfo.arguments.contains("-startInControls") {
+                goControls = true
+            }
+            // Open the reviewer and dispatch a gesture command for the
+            // gesture-dispatch demo (ReviewerView reads the same arguments).
+            if ProcessInfo.processInfo.arguments.contains("-demoGestureReveal")
+                || ProcessInfo.processInfo.arguments.contains("-demoGestureLongPress") {
+                goReview = true
             }
             if ProcessInfo.processInfo.arguments.contains("-startInImportExport") {
                 goImportExport = true

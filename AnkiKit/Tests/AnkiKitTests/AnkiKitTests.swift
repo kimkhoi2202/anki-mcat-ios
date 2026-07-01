@@ -1964,4 +1964,119 @@ final class AnkiKitTests: XCTestCase {
         XCTAssertTrue(files.contains { $0.hasSuffix(".colpkg") },
                       "a .colpkg backup file should be written into the backup folder")
     }
+
+    // MARK: - Gesture configuration (Controls / Gestures)
+
+    /// The shipped defaults reproduce the app's prior reviewer behavior + the
+    /// AnkiDroid-faithful edge layout: center tap reveals, edges/swipes map to
+    /// the four ratings (left = Again, right = Easy, up/top = Good, down/bottom =
+    /// Hard), long-press edits, double-tap is unbound.
+    func testGestureConfigDefaults() {
+        let config = GestureConfig.defaults
+        XCTAssertEqual(config.command(for: .tapCenter), .showAnswer)
+        XCTAssertEqual(config.command(for: .tapLeft), .answerAgain)
+        XCTAssertEqual(config.command(for: .tapRight), .answerEasy)
+        XCTAssertEqual(config.command(for: .tapTop), .answerGood)
+        XCTAssertEqual(config.command(for: .tapBottom), .answerHard)
+        XCTAssertEqual(config.command(for: .swipeLeft), .answerAgain)
+        XCTAssertEqual(config.command(for: .swipeRight), .answerEasy)
+        XCTAssertEqual(config.command(for: .swipeUp), .answerGood)
+        XCTAssertEqual(config.command(for: .swipeDown), .answerHard)
+        XCTAssertEqual(config.command(for: .longPress), .editNote)
+        XCTAssertEqual(config.command(for: .doubleTap), .none)
+        XCTAssertTrue(config.isDefault)
+    }
+
+    /// Encoding then decoding the defaults yields an identical config (the
+    /// round-trip the Settings screen relies on to persist to `UserDefaults`).
+    func testGestureConfigRoundTripsDefaults() throws {
+        let data = try GestureConfig.defaults.jsonData()
+        let decoded = GestureConfig.from(jsonData: data)
+        XCTAssertEqual(decoded, .defaults)
+        XCTAssertTrue(decoded.isDefault)
+    }
+
+    /// A customized config round-trips exactly, including a gesture explicitly set
+    /// to `.none` (disabled) — proving `none` is persisted, not confused with a
+    /// missing/defaulted key.
+    func testGestureConfigRoundTripsCustomized() throws {
+        var config = GestureConfig.defaults
+        config.set(.undo, for: .doubleTap)
+        config.set(.replayAudio, for: .longPress)
+        config.set(.none, for: .tapCenter)         // disable reveal-on-center-tap
+        config.set(.flagRed, for: .tapTop)
+        XCTAssertFalse(config.isDefault)
+
+        let data = try config.jsonData()
+        let decoded = GestureConfig.from(jsonData: data)
+        XCTAssertEqual(decoded, config)
+        XCTAssertEqual(decoded.command(for: .doubleTap), .undo)
+        XCTAssertEqual(decoded.command(for: .longPress), .replayAudio)
+        XCTAssertEqual(decoded.command(for: .tapCenter), .none)
+        XCTAssertEqual(decoded.command(for: .tapTop), .flagRed)
+    }
+
+    /// Tolerant decoding: unknown gesture/command keys are ignored and any gesture
+    /// absent from the blob falls back to its default, so a config written by a
+    /// different app version still decodes to a complete, valid mapping.
+    func testGestureConfigTolerantDecoding() throws {
+        let json = """
+        {
+          "swipeLeft": "undo",
+          "tapTop": "notARealCommand",
+          "notARealGesture": "answerGood"
+        }
+        """
+        let decoded = GestureConfig.from(jsonData: Data(json.utf8))
+        // Recognized override applied.
+        XCTAssertEqual(decoded.command(for: .swipeLeft), .undo)
+        // Unknown command value ignored → the gesture keeps its default.
+        XCTAssertEqual(decoded.command(for: .tapTop), GestureConfig.defaults.command(for: .tapTop))
+        // A gesture absent from the blob keeps its default.
+        XCTAssertEqual(decoded.command(for: .tapCenter), .showAnswer)
+    }
+
+    /// Corrupt or empty data never throws — it degrades to the defaults so the
+    /// reviewer always has a usable gesture map.
+    func testGestureConfigFromBadDataFallsBackToDefaults() {
+        XCTAssertEqual(GestureConfig.from(jsonData: nil), .defaults)
+        XCTAssertEqual(GestureConfig.from(jsonData: Data("not json".utf8)), .defaults)
+    }
+
+    /// The tap-zone partition: a comfortable central square is the center, and the
+    /// surrounding ring resolves to the four edges by the more-extreme axis.
+    func testTapZonePartition() {
+        XCTAssertEqual(TapZone.from(x: 0.5, y: 0.5), .center)
+        XCTAssertEqual(TapZone.from(x: 0.7, y: 0.6), .center, "inside the [0.25,0.75] square")
+        XCTAssertEqual(TapZone.from(x: 0.05, y: 0.5), .left)
+        XCTAssertEqual(TapZone.from(x: 0.95, y: 0.5), .right)
+        XCTAssertEqual(TapZone.from(x: 0.5, y: 0.05), .top)
+        XCTAssertEqual(TapZone.from(x: 0.5, y: 0.95), .bottom)
+        // Off-center but still within the central band on both axes → center.
+        XCTAssertEqual(TapZone.from(x: 0.3, y: 0.7), .center)
+        // Horizontally dominant corner region → left/right.
+        XCTAssertEqual(TapZone.from(x: 0.05, y: 0.2), .left)
+        // Each zone maps back to its tap gesture.
+        XCTAssertEqual(TapZone.center.gesture, .tapCenter)
+        XCTAssertEqual(TapZone.left.gesture, .tapLeft)
+    }
+
+    /// Every `ViewerCommand` appears exactly once in `menuOrder`, so the settings
+    /// picker can't silently omit (or duplicate) a command.
+    func testViewerCommandMenuOrderIsComplete() {
+        XCTAssertEqual(Set(ViewerCommand.menuOrder), Set(ViewerCommand.allCases))
+        XCTAssertEqual(ViewerCommand.menuOrder.count, ViewerCommand.allCases.count)
+    }
+
+    /// Flag commands expose their Anki flag number (1 red … 7 purple); non-flag
+    /// commands don't, and the grading commands are the four ratings.
+    func testViewerCommandFlagAndGradingMetadata() {
+        XCTAssertEqual(ViewerCommand.flagRed.flagNumber, 1)
+        XCTAssertEqual(ViewerCommand.flagPurple.flagNumber, 7)
+        XCTAssertNil(ViewerCommand.showAnswer.flagNumber)
+        XCTAssertEqual(
+            Set(ViewerCommand.allCases.filter { $0.isGrading }),
+            [.answerAgain, .answerHard, .answerGood, .answerEasy]
+        )
+    }
 }

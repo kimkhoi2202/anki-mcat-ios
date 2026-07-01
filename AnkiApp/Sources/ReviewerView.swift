@@ -59,9 +59,19 @@ final class MediaSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 }
 
-/// A swipe direction over the card, used by the reviewer's grading gestures.
+/// A swipe direction over the card, used by the reviewer's gesture dispatcher.
 enum SwipeDirection {
     case left, right, up, down
+
+    /// The configurable `ReviewerGesture` this swipe maps to (for config lookup).
+    var gesture: ReviewerGesture {
+        switch self {
+        case .left: return .swipeLeft
+        case .right: return .swipeRight
+        case .up: return .swipeUp
+        case .down: return .swipeDown
+        }
+    }
 }
 
 /// Lets the reviewer's tap/swipe recognizers fire alongside the WebView's own
@@ -93,11 +103,21 @@ struct CardWebView: UIViewRepresentable {
     let isDark: Bool
     /// Media folder for `<img>` resolution.
     let mediaFolder: URL
+    /// The reviewer's gesture configuration. Decides which recognizers are
+    /// attached (double-tap and long-press are only wired when bound), so the
+    /// common case keeps single taps snappy and text selection undisturbed.
+    /// Defaults for static previews (Card Browser / template editor), which pass
+    /// no gesture callbacks and so stay inert regardless.
+    var config: GestureConfig = .defaults
     /// Tap callback with the tap location normalized to 0...1 in the card's
-    /// bounds (so the reviewer can tell apart center vs edge taps).
+    /// bounds (so the reviewer can resolve which zone was tapped).
     var onTap: (@MainActor (CGPoint) -> Void)?
     /// Swipe callback with the recognized direction.
     var onSwipe: (@MainActor (SwipeDirection) -> Void)?
+    /// Long-press callback (fired once, when the press is first recognized).
+    var onLongPress: (@MainActor () -> Void)?
+    /// Double-tap callback (only wired when double-tap is bound).
+    var onDoubleTap: (@MainActor () -> Void)?
     /// Reloads the current side when this changes even if the document is
     /// identical, so "Replay audio" can restart embedded media.
     var reloadToken: Int = 0
@@ -114,9 +134,11 @@ struct CardWebView: UIViewRepresentable {
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
-        context.coordinator.attachGestures(to: webView)
         context.coordinator.onTap = onTap
         context.coordinator.onSwipe = onSwipe
+        context.coordinator.onLongPress = onLongPress
+        context.coordinator.onDoubleTap = onDoubleTap
+        context.coordinator.attachGestures(to: webView, config: config)
         return webView
     }
 
@@ -124,6 +146,12 @@ struct CardWebView: UIViewRepresentable {
         // Keep the callbacks current (they capture the latest store state).
         context.coordinator.onTap = onTap
         context.coordinator.onSwipe = onSwipe
+        context.coordinator.onLongPress = onLongPress
+        context.coordinator.onDoubleTap = onDoubleTap
+        // Re-attach recognizers if the bound set changed (e.g. double-tap/long
+        // press became (un)bound). Zone/direction dispatch reads the live config
+        // through the callbacks, so most binding edits need no re-attach.
+        context.coordinator.updateGestureConfig(config)
 
         let document = Self.makeDocument(html: html, css: css, ordinal: ordinal, isDark: isDark)
         // Only reload when the rendered document actually changes; SwiftUI calls
@@ -143,26 +171,75 @@ struct CardWebView: UIViewRepresentable {
         var lastReloadToken = 0
         var onTap: (@MainActor (CGPoint) -> Void)?
         var onSwipe: (@MainActor (SwipeDirection) -> Void)?
+        var onLongPress: (@MainActor () -> Void)?
+        var onDoubleTap: (@MainActor () -> Void)?
         private let gestureDelegate = CardGestureDelegate()
+        /// The web view's own scroll view — recognizers attach here (not an
+        /// overlay) so the card still scrolls and its links/buttons keep working.
+        private weak var scrollView: UIScrollView?
+        /// Recognizers we added, so we can tear them down when the attached set
+        /// changes.
+        private var installedRecognizers: [UIGestureRecognizer] = []
+        /// Signature of the currently-attached recognizer *set*. Only the
+        /// optional double-tap / long-press recognizers change which recognizers
+        /// exist; the single tap and four swipes are always present and dispatch
+        /// by reading the live config through the callbacks.
+        private var installedSignature: String?
 
-        /// Adds a tap recognizer and the four swipe recognizers to the scroll
+        /// Attaches the gesture recognizers for `config` to the web view's scroll
         /// view. `cancelsTouchesInView = false` keeps card links/buttons working,
         /// and the shared delegate lets them recognize alongside scrolling.
-        ///
-        /// The vertical (up = Good / down = Hard) grade swipes are made to
-        /// `require(toFail:)` the scroll view's own pan: on a scrollable card a
-        /// real scroll wins and the card isn't silently graded, while on a card
-        /// that fits (the pan has nothing to scroll, so it fails) the swipe still
-        /// grades. The horizontal Again/Easy swipes don't collide with vertical
-        /// scrolling, so they're left to recognize freely.
-        func attachGestures(to webView: WKWebView) {
-            let scrollView = webView.scrollView
+        func attachGestures(to webView: WKWebView, config: GestureConfig) {
+            scrollView = webView.scrollView
+            rebuild(for: config)
+        }
+
+        /// Re-attaches recognizers only when the attached *set* changes
+        /// (double-tap / long-press bound or not). The zone/direction dispatch
+        /// always uses the live config via the callbacks, so a binding change
+        /// that neither adds nor removes a recognizer needs no rebuild.
+        func updateGestureConfig(_ config: GestureConfig) {
+            rebuild(for: config)
+        }
+
+        private func rebuild(for config: GestureConfig) {
+            guard let scrollView else { return }
+            let doubleBound = config.command(for: .doubleTap) != .none
+            let longBound = config.command(for: .longPress) != .none
+            let signature = "\(doubleBound)-\(longBound)"
+            guard signature != installedSignature else { return }
+            installedSignature = signature
+
+            for recognizer in installedRecognizers {
+                scrollView.removeGestureRecognizer(recognizer)
+            }
+            installedRecognizers.removeAll()
 
             let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
             tap.delegate = gestureDelegate
             tap.cancelsTouchesInView = false
-            scrollView.addGestureRecognizer(tap)
 
+            // Double-tap is wired only when bound, so single taps stay snappy
+            // (no require-to-fail delay) in the default (unbound) case. When it's
+            // bound, the single tap waits for it to fail so both can coexist.
+            if doubleBound {
+                let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+                doubleTap.numberOfTapsRequired = 2
+                doubleTap.delegate = gestureDelegate
+                doubleTap.cancelsTouchesInView = false
+                scrollView.addGestureRecognizer(doubleTap)
+                installedRecognizers.append(doubleTap)
+                tap.require(toFail: doubleTap)
+            }
+            scrollView.addGestureRecognizer(tap)
+            installedRecognizers.append(tap)
+
+            // The four swipes are always attached; `handleSwipe` dispatches by the
+            // live config (unbound directions do nothing). The vertical (up/down)
+            // swipes keep the scroll-vs-grade safety: they `require(toFail:)` the
+            // scroll pan so a real scroll wins on a scrollable card, and only fire
+            // when the card can't scroll — so scrolling can never trigger an
+            // action. The horizontal swipes don't collide with vertical scrolling.
             for direction in [UISwipeGestureRecognizer.Direction.left, .right, .up, .down] {
                 let swipe = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipe(_:)))
                 swipe.direction = direction
@@ -172,6 +249,20 @@ struct CardWebView: UIViewRepresentable {
                     swipe.require(toFail: scrollView.panGestureRecognizer)
                 }
                 scrollView.addGestureRecognizer(swipe)
+                installedRecognizers.append(swipe)
+            }
+
+            // Long-press only when bound, so it doesn't interfere with the web
+            // view's own text selection / callout when the user hasn't asked for
+            // a long-press action.
+            if longBound {
+                let longPress = UILongPressGestureRecognizer(
+                    target: self, action: #selector(handleLongPress(_:))
+                )
+                longPress.delegate = gestureDelegate
+                longPress.cancelsTouchesInView = false
+                scrollView.addGestureRecognizer(longPress)
+                installedRecognizers.append(longPress)
             }
         }
 
@@ -183,12 +274,22 @@ struct CardWebView: UIViewRepresentable {
             onTap?(CGPoint(x: point.x / width, y: point.y / height))
         }
 
+        @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
+            onDoubleTap?()
+        }
+
+        @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+            // Fire once, when the press is first recognized (not on end/cancel).
+            guard recognizer.state == .began else { return }
+            onLongPress?()
+        }
+
         @objc func handleSwipe(_ recognizer: UISwipeGestureRecognizer) {
             switch recognizer.direction {
             case .left: onSwipe?(.left)
             case .right: onSwipe?(.right)
-            // Only grade on a vertical swipe when the card can't scroll, so a
-            // flick meant to scroll a long answer never silently grades it.
+            // Only forward a vertical swipe when the card can't scroll, so a
+            // flick meant to scroll a long answer never triggers an action.
             // (Backs up the `require(toFail:)` on these recognizers above.)
             case .up where !isVerticallyScrollable(recognizer.view): onSwipe?(.up)
             case .down where !isVerticallyScrollable(recognizer.view): onSwipe?(.down)
@@ -258,6 +359,8 @@ struct ReviewerView: View {
     @ObservedObject var store: AnkiStore
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Pops the reviewer for the `exitReviewer` gesture command.
+    @Environment(\.dismiss) private var dismiss
     /// "Full-screen reviewer" (Anki's Distractions ▸ hide bars during review):
     /// hides the status bar and home indicator for a distraction-free session.
     /// The in-app toolbar (Undo / back / card menu) stays, so the user can always
@@ -271,11 +374,13 @@ struct ReviewerView: View {
     /// Drives the "Set due date" prompt and holds its in-progress text.
     @State private var showSetDueDate = false
     @State private var dueDateText = ""
+    /// Drives the "Add note" editor sheet (the `addNote` gesture command).
+    @State private var showAddNote = false
 
     /// Whether any menu, sheet, or prompt is presented over the reviewer. Drives
     /// pausing auto-advance so a timer never reveals or grades behind a dialog.
     private var anyOverlayPresented: Bool {
-        showCardMenu || confirmDelete || showSetDueDate
+        showCardMenu || confirmDelete || showSetDueDate || showAddNote
             || infoCardID != nil || editNoteTarget != nil
     }
 
@@ -338,6 +443,14 @@ struct ReviewerView: View {
                 store.reloadCurrentCard()
             }
         }
+        // "Add note" during review (the `addNote` gesture command), defaulting to
+        // the deck being studied. A new note doesn't change the current card, so
+        // we only refresh the deck counts on save.
+        .sheet(isPresented: $showAddNote) {
+            NoteEditorView(store: store, mode: .add(defaultDeckID: store.currentDeckID)) {
+                store.refreshDecks()
+            }
+        }
         .confirmationDialog(
             "Delete note?",
             isPresented: $confirmDelete,
@@ -387,6 +500,18 @@ struct ReviewerView: View {
                 dueDateText = "7-14"
                 showSetDueDate = true
             }
+            // Gesture-dispatch demos: run a real gesture command through the
+            // config-driven dispatcher so a screenshot shows the resulting action.
+            // `-demoGestureReveal` fires the tap-center command (reveal / flip);
+            // `-demoGestureLongPress` fires the long-press command (edit note),
+            // proving a gesture dispatches through `store.gestureConfig`.
+            if ProcessInfo.processInfo.arguments.contains("-demoGestureReveal") {
+                dispatch(store.gestureConfig.command(for: .tapCenter))
+            }
+            if ProcessInfo.processInfo.arguments.contains("-demoGestureLongPress"),
+               store.currentNoteID != nil {
+                dispatch(store.gestureConfig.command(for: .longPress))
+            }
             #endif
         }
     }
@@ -400,8 +525,11 @@ struct ReviewerView: View {
             ordinal: store.currentOrdinal,
             isDark: colorScheme == .dark,
             mediaFolder: store.mediaFolderURL,
+            config: store.gestureConfig,
             onTap: handleCardTap,
             onSwipe: handleCardSwipe,
+            onLongPress: handleLongPress,
+            onDoubleTap: handleDoubleTap,
             reloadToken: store.replayToken
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -575,39 +703,101 @@ struct ReviewerView: View {
         }
     }
 
-    // MARK: - Gestures
+    // MARK: - Gestures (config-driven dispatch)
+    //
+    // Every recognized gesture is looked up in `store.gestureConfig` and the
+    // mapped `ViewerCommand` dispatched, replacing the old hardcoded mapping.
+    // Defaults reproduce the prior behavior (see `GestureConfig.defaults`).
 
-    /// AnkiDroid-style tap mapping (respecting reduced motion — no animation is
-    /// introduced): on the question, a tap anywhere shows the answer; on the
-    /// answer, a tap in the center cell flips back to the question (so edge taps
-    /// don't disrupt reading). On-screen buttons remain the primary path.
+    /// Resolves a tap to its zone (a pure, tested function of the normalized
+    /// point) and dispatches the bound command.
     private func handleCardTap(_ point: CGPoint) {
         guard !store.reviewDone, !showCardMenu else { return }
-        if !store.showingAnswer {
-            store.reveal()
-        } else if isCenter(point) {
-            store.flipBack()
-        }
+        let zone = TapZone.from(x: point.x, y: point.y)
+        dispatch(store.gestureConfig.command(for: zone.gesture))
     }
 
-    /// Once the answer is shown, swipes grade the card (the four directions map
-    /// to the four ratings, mirroring the on-screen button order: left = Again,
-    /// down = Hard, up = Good, right = Easy). AnkiDroid ships gestures unbound by
-    /// default; this is a sensible default pending a gesture-settings screen.
+    /// Dispatches the command bound to a swipe direction. The swipe-vs-scroll
+    /// safety (vertical swipes require the scroll pan to fail / only fire when the
+    /// card can't scroll) is enforced in the recognizer, so a scroll never
+    /// reaches here as an action.
     private func handleCardSwipe(_ direction: SwipeDirection) {
-        guard store.showingAnswer, !store.reviewDone, !showCardMenu else { return }
-        switch direction {
-        case .left: store.rate(.again)
-        case .down: store.rate(.hard)
-        case .up: store.rate(.good)
-        case .right: store.rate(.easy)
+        guard !store.reviewDone, !showCardMenu else { return }
+        dispatch(store.gestureConfig.command(for: direction.gesture))
+    }
+
+    /// Dispatches the long-press command (only wired when it's bound).
+    private func handleLongPress() {
+        guard !store.reviewDone, !showCardMenu else { return }
+        dispatch(store.gestureConfig.command(for: .longPress))
+    }
+
+    /// Dispatches the double-tap command (only wired when it's bound).
+    private func handleDoubleTap() {
+        guard !store.reviewDone, !showCardMenu else { return }
+        dispatch(store.gestureConfig.command(for: .doubleTap))
+    }
+
+    /// Central gesture → action dispatcher. Reuses the existing `AnkiStore`
+    /// reviewer methods for card actions; view-level actions (edit/add/info
+    /// sheets, delete confirmation, exit) are handled here.
+    ///
+    /// CRITICAL safety: grading commands only ever run while the answer is shown
+    /// (`grade(_:)`), so a stray tap/swipe on a question can never grade it — the
+    /// same "grade only when the answer is shown" rule the old code enforced.
+    private func dispatch(_ command: ViewerCommand) {
+        switch command {
+        case .none:
+            break
+        case .showAnswer:
+            // Reveal on the question; flip back when the answer is already shown
+            // (preserves the prior "tap center reveals / flips back" behavior).
+            if store.showingAnswer { store.flipBack() } else { store.reveal() }
+        case .answerAgain: grade(.again)
+        case .answerHard: grade(.hard)
+        case .answerGood: grade(.good)
+        case .answerEasy: grade(.easy)
+        case .undo:
+            if store.canUndo { store.undo() }
+        case .editNote:
+            openEditor()
+        case .addNote:
+            showAddNote = true
+        case .markNote:
+            store.toggleMark()
+        case .buryCard:
+            store.buryCard()
+        case .buryNote:
+            store.buryNote()
+        case .suspendCard:
+            store.suspendCard()
+        case .suspendNote:
+            store.suspendNote()
+        case .deleteNote:
+            // Route through the same confirmation as the menu — a gesture must
+            // not silently delete a note (it's still undoable afterward).
+            confirmDelete = true
+        case .flagRed, .flagOrange, .flagGreen, .flagBlue,
+             .flagPink, .flagTurquoise, .flagPurple:
+            if let flag = command.flagNumber { store.toggleReviewerFlag(flag) }
+        case .replayAudio:
+            store.replayAudio()
+        case .cardInfo:
+            infoCardID = store.currentCardID
+        case .toggleWhiteboard:
+            // Whiteboard drawing UI lands in a later task; flip the store hook so
+            // the binding is real and can be filled in then.
+            store.toggleWhiteboard()
+        case .exitReviewer:
+            dismiss()
         }
     }
 
-    /// The center cell of AnkiDroid's 3×3 (`NINE_POINT`) tap grid.
-    private func isCenter(_ point: CGPoint) -> Bool {
-        let third = 1.0 / 3.0
-        return (third...(2 * third)).contains(point.x) && (third...(2 * third)).contains(point.y)
+    /// Grades the card, but only while the answer is shown — the core safety rule
+    /// that keeps a swipe/tap from grading a question.
+    private func grade(_ rating: Anki_Scheduler_CardAnswer.Rating) {
+        guard store.showingAnswer else { return }
+        store.rate(rating)
     }
 
     // MARK: - Actions

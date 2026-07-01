@@ -201,6 +201,60 @@ final class AnkiStore: ObservableObject {
     /// (still adjustable, and 0 disables a side).
     static let defaultAutoAdvanceSeconds = 10
 
+    // MARK: - Gesture configuration (app-local)
+    //
+    // AnkiDroid's configurable reviewer gestures (tap zones, swipes, long-press,
+    // double-tap → a `ViewerCommand`). Like AnkiDroid, these are client
+    // behaviour, not collection data, so the whole `GestureConfig` is persisted
+    // app-locally as JSON in `UserDefaults`. The reviewer reads `gestureConfig`
+    // to dispatch gestures; the Controls settings screen edits it. The model
+    // (defaults, JSON round-trip, tap-zone partition) lives in `AnkiKit` so it's
+    // unit-tested there.
+
+    /// The gesture → action mapping used by the reviewer. Defaults reproduce the
+    /// app's prior reviewer behavior (see `GestureConfig.defaults`). Any change
+    /// (from the settings screen) persists immediately.
+    @Published var gestureConfig = GestureConfig.defaults {
+        didSet {
+            guard gestureConfig != oldValue else { return }
+            persistGestureConfig()
+        }
+    }
+    private static let gestureConfigKey = "gestureConfig"
+
+    /// Resets every gesture binding to the shipped defaults (the settings
+    /// screen's "Reset to defaults"). Persisted via the `didSet` above.
+    func resetGestureConfig() {
+        gestureConfig = .defaults
+    }
+
+    /// Writes the current gesture config to `UserDefaults` as JSON.
+    private func persistGestureConfig() {
+        guard let data = try? gestureConfig.jsonData() else { return }
+        UserDefaults.standard.set(data, forKey: Self.gestureConfigKey)
+    }
+
+    /// Loads the persisted gesture config from `UserDefaults` (defaults when
+    /// absent/corrupt). Read once at boot; the published setter persists changes.
+    private func loadGesturePrefs() {
+        let data = UserDefaults.standard.data(forKey: Self.gestureConfigKey)
+        gestureConfig = GestureConfig.from(jsonData: data)
+    }
+
+    // MARK: - Whiteboard (hook for a later task)
+
+    /// Whiteboard visibility. The whiteboard *drawing* UI lands in a later task;
+    /// the `toggleWhiteboard` gesture command flips this now so the binding is
+    /// real and the reviewer can later render an overlay from it. No engine call.
+    @Published var whiteboardVisible = false
+
+    /// Toggles the whiteboard (see `whiteboardVisible`) — the reviewer hook for
+    /// the `toggleWhiteboard` gesture command. A near no-op until the whiteboard
+    /// UI exists.
+    func toggleWhiteboard() {
+        whiteboardVisible.toggle()
+    }
+
     /// Pending auto-advance timer (reveal or auto-"Good"); cancelled on any manual
     /// interaction, side/card change, overlay, or leaving the reviewer.
     private var autoAdvanceTask: Task<Void, Never>?
@@ -318,6 +372,7 @@ final class AnkiStore: ObservableObject {
         loadLoginState()
         loadPreferences()
         loadAutoAdvancePrefs()
+        loadGesturePrefs()
         loadSyncPrefs()
         status = "Engine OK"
     }
