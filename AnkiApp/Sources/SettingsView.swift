@@ -28,7 +28,7 @@ struct SettingsView: View {
     /// translation catalog in that language. Changing it re-opens the collection
     /// so every `Loc.tr(...)` result and bundled web screen updates.
     @AppStorage("appLanguageOverride") private var appLanguageOverride = "system"
-    @State private var serverChoice: ServerChoice = .ankiweb
+    @State private var serverChoice: ServerChoice = .hosted
     @State private var customServerURL = ""
     /// Inline validation error for the custom ("Other") server URL, if any.
     @State private var serverError: String?
@@ -158,7 +158,8 @@ struct SettingsView: View {
     private var serverSection: some View {
         Section {
             Picker(selection: $serverChoice) {
-                Text("AnkiWeb (default)").tag(ServerChoice.ankiweb)
+                Text("anki-mcat-sync.fly.dev").tag(ServerChoice.hosted)
+                Text("AnkiWeb").tag(ServerChoice.ankiweb)
                 Text("Other…").tag(ServerChoice.other)
             } label: {
                 Text("Sync server")
@@ -898,6 +899,9 @@ struct SettingsView: View {
     private func applyServer() {
         guard !store.isLoggedIn else { return }
         switch serverChoice {
+        case .hosted:
+            serverError = nil
+            store.setPreferredSyncServer(AnkiStore.hostedSyncServer)
         case .ankiweb:
             serverError = nil
             store.setPreferredSyncServer(nil)
@@ -931,17 +935,20 @@ struct SettingsView: View {
 
 /// Sync server presets offered in the Settings dropdown.
 private enum ServerChoice: Hashable {
+    case hosted
     case ankiweb
     case other
 
-    /// Classifies a stored endpoint into a picker choice. A nil/empty endpoint or
-    /// any AnkiWeb host — `ankiweb.net` or a `*.ankiweb.net` shard such as
-    /// `sync.ankiweb.net` / `sync-xxx.ankiweb.net` — is AnkiWeb; anything else is
-    /// a custom ("Other") server.
+    /// Classifies a stored endpoint into a picker choice: the app's self-hosted
+    /// server, any AnkiWeb host (`ankiweb.net` or a `*.ankiweb.net` shard such as
+    /// `sync.ankiweb.net` / `sync-xxx.ankiweb.net`), or anything else ("Other").
+    /// A nil/empty endpoint means an explicit AnkiWeb choice (the first-run
+    /// default is resolved to `hostedSyncServer` before this is called).
     static func classify(_ endpoint: String?) -> ServerChoice {
         guard let endpoint,
               !endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return .ankiweb }
+        if endpoint.isHostedSyncHost { return .hosted }
         if endpoint.isAnkiWebHost { return .ankiweb }
         return .other
     }
@@ -956,5 +963,17 @@ private extension String {
             string: trimmingCharacters(in: .whitespacesAndNewlines)
         )?.host?.lowercased() else { return false }
         return host == "ankiweb.net" || host.hasSuffix(".ankiweb.net")
+    }
+
+    /// Whether this endpoint points at the app's self-hosted sync server. The
+    /// host is derived from `AnkiStore.hostedSyncServer`, so the two stay in sync
+    /// if the URL ever changes.
+    var isHostedSyncHost: Bool {
+        guard let host = URLComponents(
+            string: trimmingCharacters(in: .whitespacesAndNewlines)
+        )?.host?.lowercased(),
+              let hostedHost = URLComponents(string: AnkiStore.hostedSyncServer)?.host?.lowercased()
+        else { return false }
+        return host == hostedHost
     }
 }

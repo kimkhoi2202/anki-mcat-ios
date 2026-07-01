@@ -2,9 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>com.apple.security.application-groups</key>
-	<array>
-		<string>group.com.khoilam.ankispeedrun</string>
-	</array>
+	<!--
+	  Intentionally empty. The App Group `group.com.khoilam.ankispeedrun`
+	  (used only to feed the home-screen widget's due counts) requires the
+	  group to be registered/provisioned for the signing team. On devices where
+	  it isn't, iOS still carries the entitlement but the container is missing,
+	  which makes cfprefsd "detach" and destabilizes the app's normal
+	  UserDefaults reads (including the sync-server preference). Shipping no
+	  App Group keeps device signing clean; the widget degrades to placeholder
+	  data (see AnkiWidgetShared.sharedDefaults) until the group is provisioned.
+	-->
 </dict>
 </plist>
