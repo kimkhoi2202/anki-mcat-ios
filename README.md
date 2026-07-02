@@ -40,7 +40,7 @@ mcat-speedrun/
 1. **Clone both, side by side:**
    ```bash
    mkdir mcat-speedrun && cd mcat-speedrun
-   git clone -b main https://github.com/kimkhoi2202/anki-mcat.git anki-desktop/main
+   git clone -b wednesday-submission https://github.com/kimkhoi2202/anki-mcat.git anki-desktop/main
    git clone -b wednesday-submission https://github.com/kimkhoi2202/anki-mcat-ios.git anki-ios
    ```
 2. **Build the shared engine into an xcframework** (gitignored, so this step is required):
