@@ -45,6 +45,9 @@ struct HomeView: View {
     @State private var goReadiness = false
     @State private var readinessAutoDemo = false
 
+    // MCAT Speedrun Library (browse + import curated decks) navigation trigger.
+    @State private var goLibrary = false
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -70,6 +73,9 @@ struct HomeView: View {
             }
             .navigationDestination(isPresented: $goReadiness) {
                 ReadinessDashboardView(store: store, autoLoadDemo: readinessAutoDemo)
+            }
+            .navigationDestination(isPresented: $goLibrary) {
+                LibraryView(store: store)
             }
             .navigationDestination(isPresented: $goSettings) {
                 SettingsView(store: store)
@@ -313,6 +319,7 @@ struct HomeView: View {
                     weakTopicsButton
                     readinessButton
                     coverageButton
+                    libraryButton
                     newDeckButton
                     newFilteredDeckButton
                 }
@@ -493,6 +500,32 @@ struct HomeView: View {
         .buttonStyle(.plain)
         .accessibilityLabel("MCAT coverage map")
         .accessibilityHint("See how many MCAT topics your deck covers")
+    }
+
+    /// Full-width "MCAT Library" action: opens the curated shared-deck browser
+    /// (Supabase-backed) to import a deck in one tap, with scheduling — so the
+    /// readiness score and weak-topics have data right after import.
+    private var libraryButton: some View {
+        Button {
+            goLibrary = true
+        } label: {
+            Label("MCAT Library", systemImage: "books.vertical")
+                .font(DS.Typography.body.weight(.semibold))
+                .foregroundStyle(DS.accent)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: DS.minTapTarget)
+                .background(
+                    DS.surface,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                        .strokeBorder(DS.separator, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("MCAT Library")
+        .accessibilityHint("Browse and import curated MCAT decks")
     }
 
     /// Full-width "New Deck" action below the list, keeping deck creation out of

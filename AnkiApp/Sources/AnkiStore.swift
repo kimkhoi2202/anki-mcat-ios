@@ -1285,6 +1285,21 @@ final class AnkiStore: ObservableObject {
         return outcome
     }
 
+    /// Imports a Library deck (already downloaded to a local `.apkg` path) into
+    /// the open collection **with scheduling** — so the deck's FSRS memory state
+    /// and review history come across and the readiness score has data at once.
+    /// Returns the note-level summary and refreshes the deck list on success.
+    func importLibraryDeck(fromLocalPath path: String) async throws -> ImportResult {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let result = try await runDetached {
+            var options = try backend.importAnkiPackagePresets()
+            options.withScheduling = true
+            return try backend.importAnkiPackage(path: path, options: options)
+        }
+        refreshAfterImport()
+        return result
+    }
+
     /// Exports a deck (and its subdecks) to a temporary `.apkg`, returning the
     /// file URL for the share sheet. Includes scheduling so the deck transfers
     /// with its progress; `includeMedia` carries referenced media.
