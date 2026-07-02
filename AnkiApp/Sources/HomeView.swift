@@ -90,6 +90,20 @@ struct HomeView: View {
     /// booted is deferred until decks are loaded, then processed once.
     @State private var pendingDeepLink: URL?
 
+    // MCAT readiness dashboard (the three scores) navigation trigger, plus a
+    // flag (set by the screenshot hook) to open straight into the scored demo.
+    @State private var goReadiness = false
+    @State private var readinessAutoDemo = false
+
+    // MCAT Speedrun Library (browse + import curated decks) navigation trigger.
+    @State private var goLibrary = false
+
+    // MCAT weak-topics (points-at-stake) + coverage navigation triggers.
+    @State private var goWeakTopics = false
+    @State private var goCoverage = false
+    // The deck the weak-topics read-out targets (set before navigating).
+    @State private var weakTopicsDeck: DeckTreeEntry?
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -139,6 +153,20 @@ struct HomeView: View {
             .navigationTitle(Loc.tr("actions-decks"))
             .navigationDestination(isPresented: $goReview) {
                 ReviewerView(store: store)
+            }
+            .navigationDestination(isPresented: $goWeakTopics) {
+                if let deck = weakTopicsDeck {
+                    WeakTopicsView(store: store, deck: deck)
+                }
+            }
+            .navigationDestination(isPresented: $goCoverage) {
+                CoverageView(store: store)
+            }
+            .navigationDestination(isPresented: $goReadiness) {
+                ReadinessDashboardView(store: store, autoLoadDemo: readinessAutoDemo)
+            }
+            .navigationDestination(isPresented: $goLibrary) {
+                LibraryView(store: store)
             }
             .navigationDestination(isPresented: $goSettings) {
                 SettingsView(store: store)
@@ -470,6 +498,36 @@ struct HomeView: View {
                 || ProcessInfo.processInfo.arguments.contains("-demoBrowserPreview") {
                 goBrowse = true
             }
+            // Open the "Focus weak topics" read-out for the deck with the most
+            // due reviews (the seeded MCAT deck) — the points-at-stake screenshot.
+            if ProcessInfo.processInfo.arguments.contains("-startInWeakTopics") {
+                openWeakTopics(for: weakTopicsCandidate)
+            }
+            // Open the MCAT coverage map (the PRD 7c coverage screenshot).
+            if ProcessInfo.processInfo.arguments.contains("-startInCoverage") {
+                goCoverage = true
+            }
+            // Open the readiness dashboard on the real deck (the abstain
+            // screenshot — real "MCAT Content" deck is under the give-up line).
+            if ProcessInfo.processInfo.arguments.contains("-startInReadiness") {
+                store.readinessDeckName = AnkiStore.realReadinessDeckName
+                readinessAutoDemo = false
+                goReadiness = true
+            }
+            // Open the readiness dashboard straight into the scored demo deck
+            // (the scored-state screenshot — seeds the clearly-marked demo).
+            if ProcessInfo.processInfo.arguments.contains("-startInReadinessDemo") {
+                readinessAutoDemo = true
+                goReadiness = true
+            }
+            // Drive straight into the weak-topics reviewer (weakest card first),
+            // verifying the points-at-stake review loop runs end-to-end.
+            if ProcessInfo.processInfo.arguments.contains("-startInWeakTopicsReview"),
+               let deck = weakTopicsCandidate {
+                store.loadWeakTopics(deckID: deck.id, deckName: deck.fullName)
+                store.startWeakTopicsReview()
+                goReview = true
+            }
             // Answer a few cards first so the stats screen has real review
             // history to show (used for the T3.1 screenshot).
             store.studySomeIfRequested()
@@ -621,6 +679,10 @@ struct HomeView: View {
             ScrollView {
                 VStack(spacing: DS.Spacing.l) {
                     deckList
+                    weakTopicsButton
+                    readinessButton
+                    coverageButton
+                    libraryButton
                     newDeckButton
                     newFilteredDeckButton
                 }
@@ -761,6 +823,126 @@ struct HomeView: View {
                 Label(Loc.tr("actions-delete"), systemImage: "trash")
             }
         }
+    }
+
+    /// Full-width "Focus weak topics" action: opens the points-at-stake read-out
+    /// (the Rust change's study mode) for the deck with the most due reviews,
+    /// where the ranking is most useful. Per-deck access is also in the long-press
+    /// menu. Accent-tinted to stand out as the headline study feature.
+    private var weakTopicsButton: some View {
+        Button {
+            openWeakTopics(for: weakTopicsCandidate)
+        } label: {
+            Label("Focus Weak Topics", systemImage: "scope")
+                .font(DS.Typography.body.weight(.semibold))
+                .foregroundStyle(Color.white)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: DS.minTapTarget)
+                .background(
+                    DS.accent,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Focus weak topics")
+        .accessibilityHint("Study your weakest topics first, ranked by the engine")
+    }
+
+    /// The deck the global "Focus Weak Topics" button targets: the one with the
+    /// most due reviews (where weak-topic ranking matters most), falling back to
+    /// the first deck so the read-out can still explain itself when nothing's due.
+    private var weakTopicsCandidate: DeckTreeEntry? {
+        store.decks.max { $0.reviewCount < $1.reviewCount } ?? store.decks.first
+    }
+
+    /// Opens the weak-topics read-out for a deck (shared by the global button and
+    /// the per-deck menu).
+    private func openWeakTopics(for deck: DeckTreeEntry?) {
+        guard let deck else { return }
+        weakTopicsDeck = deck
+        goWeakTopics = true
+    }
+
+    /// Full-width "MCAT Readiness" action: opens the readiness dashboard — the
+    /// three scores (Memory / Performance / Readiness) each as a range with the
+    /// honesty read-out, or the abstain state when the deck is below the give-up
+    /// line. Defaults to scoring the real "MCAT Content" deck (which abstains).
+    private var readinessButton: some View {
+        Button {
+            store.readinessDeckName = AnkiStore.realReadinessDeckName
+            readinessAutoDemo = false
+            goReadiness = true
+        } label: {
+            Label("MCAT Readiness", systemImage: "gauge.with.needle")
+                .font(DS.Typography.body.weight(.semibold))
+                .foregroundStyle(DS.accent)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: DS.minTapTarget)
+                .background(
+                    DS.surface,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                        .strokeBorder(DS.separator, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("MCAT readiness dashboard")
+        .accessibilityHint("See your Memory, Performance, and Readiness scores, or what’s missing")
+    }
+
+    /// Full-width "MCAT Coverage" action: opens the coverage map (PRD 7c), the
+    /// dashboard of how many outline topics the collection touches, with the
+    /// abstain banner when coverage is under the give-up line. Styled as a
+    /// surface card to sit a step below the headline weak-topics action.
+    private var coverageButton: some View {
+        Button {
+            goCoverage = true
+        } label: {
+            Label("MCAT Coverage", systemImage: "checklist")
+                .font(DS.Typography.body.weight(.semibold))
+                .foregroundStyle(DS.accent)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: DS.minTapTarget)
+                .background(
+                    DS.surface,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                        .strokeBorder(DS.separator, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("MCAT coverage map")
+        .accessibilityHint("See how many MCAT topics your deck covers")
+    }
+
+    /// Full-width "MCAT Library" action: opens the curated shared-deck browser
+    /// (Supabase-backed) to import a deck in one tap, with scheduling — so the
+    /// readiness score and weak-topics have data right after import.
+    private var libraryButton: some View {
+        Button {
+            goLibrary = true
+        } label: {
+            Label("MCAT Library", systemImage: "books.vertical")
+                .font(DS.Typography.body.weight(.semibold))
+                .foregroundStyle(DS.accent)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: DS.minTapTarget)
+                .background(
+                    DS.surface,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
+                        .strokeBorder(DS.separator, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("MCAT Library")
+        .accessibilityHint("Browse and import curated MCAT decks")
     }
 
     /// Full-width "New Deck" action below the list, keeping deck creation out of

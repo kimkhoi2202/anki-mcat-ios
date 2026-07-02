@@ -7,6 +7,13 @@ options:
 packages:
   AnkiKit:
     path: ../AnkiKit
+settings:
+  base:
+    # The engine xcframework (AnkiCore) ships arm64 slices only — device plus
+    # Apple-Silicon simulator. Exclude the dead x86_64 simulator arch so generic
+    # / CI simulator builds link on Apple Silicon (a specific-simulator build
+    # already picks arm64 as the active arch).
+    "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
 targets:
   AnkiSpeedrun:
     type: application
@@ -65,9 +72,9 @@ targets:
         INFOPLIST_KEY_NSCameraUsageDescription: "Take a photo to add to a note's fields."
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "Record audio to add to a note's fields."
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Add images from your photo library to a note's fields."
-        # We ship an asset catalog (the login logo) but no app icon yet; tell the
-        # asset compiler not to require an "AppIcon" set.
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        # App icon (required for App Store / TestFlight). AppIcon set lives in
+        # AnkiApp/Sources/Assets.xcassets.
+        ASSETCATALOG_COMPILER_APPICON_NAME: "AppIcon"
   # WidgetKit extension showing today's due counts on the home screen, faithful
   # to AnkiDroid's DeckPicker widget. Reads a snapshot the app writes to the
   # shared App Group; it does NOT depend on AnkiKit / the engine.

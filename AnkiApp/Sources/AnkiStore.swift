@@ -73,6 +73,52 @@ final class AnkiStore: ObservableObject {
     /// The user's typed answer for a `{{type:}}` card.
     @Published var typedAnswer: String = ""
 
+    // MARK: - "Focus weak topics" study mode (points-at-stake)
+
+    /// Whether the current review session studies the deck weakest-topic-first
+    /// (the engine's points-at-stake ordering) rather than normal scheduler order.
+    @Published var weakTopicsMode = false
+    /// Per-topic weakness read-out for the current deck, ordered weakest-first.
+    @Published var weakTopics: [WeakTopic] = []
+    /// Name of the deck the weak-topics read-out/session is for (for display).
+    @Published var weakTopicsDeckName = ""
+    /// Due review card ids for the weak-topics session, ordered by descending
+    /// points-at-stake (weakest topic first) — the order the review loop walks.
+    private var weakTopicsOrder: [Int64] = []
+    /// How far through `weakTopicsOrder` the session has progressed.
+    private var weakTopicsCursor = 0
+    /// Card id → topic, so the reviewer can label the current card's topic.
+    private var topicByCardID: [Int64: String] = [:]
+
+    // MARK: - MCAT coverage map
+
+    /// The MCAT outline coverage map (per-section + overall), computed on demand
+    /// by `loadCoverage()` from engine tag searches. Nil until first loaded.
+    @Published var coverage: CoverageReport?
+    /// Message from the most recent failed coverage load, for the CoverageView.
+    @Published var coverageError: String?
+
+    // MARK: - MCAT readiness scores (Memory / Performance / Readiness)
+
+    /// The most recent readiness assessment (the three scores + honesty read-out,
+    /// or the abstain state) for `readinessDeckName`. Nil until first loaded.
+    @Published var readiness: ReadinessAssessment?
+    /// Message from the most recent failed readiness load.
+    @Published var readinessError: String?
+    /// Whether a readiness computation is in flight (drives the dashboard spinner).
+    @Published var readinessLoading = false
+    /// Which deck the current readiness assessment is for.
+    @Published var readinessDeckName = MCATSeedDeck.deckName
+    /// Whether the clearly-marked scored *demo* deck has been seeded yet.
+    @Published var readinessDemoSeeded = false
+
+    /// The real MCAT deck the dashboard scores by default — it sits at ~48%
+    /// coverage with no reviews, so it correctly abstains. `nonisolated` so the
+    /// off-main-actor seeding/compute helpers can read it.
+    nonisolated static let realReadinessDeckName = MCATSeedDeck.deckName
+    /// The clearly-marked demo deck that crosses both give-up thresholds.
+    nonisolated static let demoReadinessDeckName = MCATReadinessDemoDeck.deckName
+
     /// Whether the backend has an action to undo (drives the Undo control).
     @Published var canUndo = false
     /// Localized name of the next undoable action (e.g. "Answer Card").
@@ -615,6 +661,8 @@ final class AnkiStore: ObservableObject {
         do {
             try backend.setCurrentDeck(id: id)
             currentDeckID = id
+            // A normal deck tap studies in scheduler order, not weak-topics order.
+            weakTopicsMode = false
             reviewDone = false
             showingAnswer = false
             currentQuestion = ""
@@ -1675,8 +1723,14 @@ final class AnkiStore: ObservableObject {
         let ms = UInt32(min(60_000, max(0, Date().timeIntervalSince(cardShownAt) * 1000)))
         do {
             try backend.answer(card: card, rating: rating, millisecondsTaken: ms)
-            // Only advance once the answer is actually recorded.
-            loadNext()
+            // Only advance once the answer is actually recorded. In weak-topics
+            // mode, advance to the next weakest due card, not scheduler order.
+            if weakTopicsMode {
+                weakTopicsCursor += 1
+                loadNextWeakTopicCard()
+            } else {
+                loadNext()
+            }
             // Haptic confirmation: the subtle review-loop grade tick, upgraded to
             // a success flourish when this answer clears the deck (the rewarding
             // "finished" moment).
@@ -2010,11 +2064,149 @@ final class AnkiStore: ObservableObject {
         guard let backend, canUndo else { return }
         do {
             _ = try backend.undo()
-            loadNext()
+            if weakTopicsMode {
+                weakTopicsCursor = max(0, weakTopicsCursor - 1)
+                loadNextWeakTopicCard()
+            } else {
+                loadNext()
+            }
             Haptics.tap()
         } catch {
             status = "Undo error: \(error)"
             Haptics.error()
+        }
+    }
+
+    // MARK: - MCAT readiness scores
+
+    /// Computes the three scores + honesty read-out (or the abstain state) for a
+    /// deck, off the main actor. Reuses the engine coverage map (deck-scoped so
+    /// decks don't pollute each other), the real per-card FSRS retrievability and
+    /// graded-review count (`readinessEvidence`), and the points-at-stake queue
+    /// for the "weakest area" best-next-thing. The give-up rule and the score math
+    /// live in AnkiKit (`ReadinessAssessment` / `ScoreModel`).
+    func loadReadiness(forDeck deckName: String) async {
+        guard let backend else { return }
+        readinessDeckName = deckName
+        readinessLoading = true
+        readinessError = nil
+        let topics = MCATOutline.coverageTopics
+        let sectionNames = MCATOutline.sectionNamesByToken
+        do {
+            let assessment = try await runDetached {
+                try Self.computeReadiness(
+                    backend, deckName: deckName, topics: topics, sectionNames: sectionNames
+                )
+            }
+            readiness = assessment
+        } catch {
+            readiness = nil
+            readinessError = "Couldn’t compute scores: \(error)"
+        }
+        readinessLoading = false
+    }
+
+    /// Seeds the clearly-marked scored *demo* deck (idempotent) off the main
+    /// actor, then loads its scored assessment. The seed plan (real MCAT facts +
+    /// a simulated FSRS history per card) is built on the main actor and only
+    /// plain values cross into the backend work.
+    func seedAndShowReadinessDemo() async {
+        guard let backend else { return }
+        readinessLoading = true
+        readinessError = nil
+        let plan = Self.readinessDemoSeedPlan()
+        do {
+            try await runDetached { try Self.applyReadinessDemoSeed(backend, plan: plan) }
+            readinessDemoSeeded = true
+            refreshDecks()
+        } catch {
+            readinessError = "Couldn’t seed the demo deck: \(error)"
+            readinessLoading = false
+            return
+        }
+        await loadReadiness(forDeck: Self.demoReadinessDeckName)
+    }
+
+    /// Sets `readinessDemoSeeded` from whether the demo deck currently exists.
+    private func refreshReadinessDemoState(_ backend: Backend) {
+        readinessDemoSeeded =
+            ((try? backend.deckNames())?.contains { $0.name == Self.demoReadinessDeckName }) ?? false
+    }
+
+    /// Off-main-actor readiness computation. `nonisolated` + only `Sendable`
+    /// inputs so it can run in a detached task. Setting the engine's current deck
+    /// scopes the points-at-stake queue to this deck (as the weak-topics screen
+    /// does); it doesn't change the user's selected study deck.
+    nonisolated private static func computeReadiness(
+        _ backend: Backend, deckName: String, topics: [CoverageTopic], sectionNames: [String: String]
+    ) throws -> ReadinessAssessment {
+        let coverage = try backend.coverage(forTopics: topics, inDeck: deckName)
+        let evidence = try backend.readinessEvidence(forDeck: deckName)
+        var weakest: String?
+        if let deckID = try backend.deckNames().first(where: { $0.name == deckName })?.id {
+            try? backend.setCurrentDeck(id: deckID)
+            let topTopic = (try? backend.pointsAtStakeQueue(topicPrefix: "MCAT::", weightBySize: false))?
+                .topics.max { $0.weakness < $1.weakness }
+            if let topTopic, topTopic.weakness > 0 {
+                weakest = sectionNames[topTopic.topic] ?? topTopic.topic
+            }
+        }
+        return ReadinessAssessment.make(
+            coverage: coverage, evidence: evidence, weakestStudiedTopic: weakest
+        )
+    }
+
+    /// Builds the demo seed plan on the main actor (it reads the app's MCAT
+    /// taxonomy and demo content), returning only plain `Sendable` values.
+    private static func readinessDemoSeedPlan() -> [ReadinessDemoSeedItem] {
+        MCATReadinessDemoDeck.cards.enumerated().compactMap { index, card in
+            guard let topic = MCATOutline.topic(byID: card.topicID) else { return nil }
+            let state = MCATReadinessDemoDeck.seededState(forIndex: index)
+            return ReadinessDemoSeedItem(
+                front: card.front, back: card.back, tag: topic.tag,
+                stability: state.stability, elapsedDays: state.elapsedDays, reps: state.reps
+            )
+        }
+    }
+
+    /// Applies the demo seed plan through the engine (idempotent): one note per
+    /// item, then a single `updateCards` writing each card's simulated FSRS memory
+    /// state, last-review date, and review count. The engine computes real FSRS
+    /// retrievability from that state — nothing here is a hand-written score.
+    nonisolated private static func applyReadinessDemoSeed(
+        _ backend: Backend, plan: [ReadinessDemoSeedItem]
+    ) throws {
+        let demoName = demoReadinessDeckName
+        // Already seeded? (Deck exists with cards.) Then do nothing.
+        if try backend.deckNames().contains(where: { $0.name == demoName }),
+           try backend.searchCards(query: "deck:\"\(demoName)\"").count > 0 {
+            return
+        }
+        guard let basic = try backend.notetypeNames().first(where: { $0.name.hasPrefix("Basic") }) else { return }
+        let deckID = try backend.createDeck(name: demoName)
+        let now = Int64(Date().timeIntervalSince1970)
+        var updated: [Anki_Cards_Card] = []
+        updated.reserveCapacity(plan.count)
+        for item in plan {
+            let nid = try backend.addNote(
+                notetypeID: basic.id, fields: [item.front, item.back], deckID: deckID, tags: [item.tag]
+            )
+            guard let cardID = try backend.searchCards(query: "nid:\(nid)").first else { continue }
+            var card = try backend.getCard(cardID: cardID)
+            card.ctype = 2          // CardType::Review
+            card.queue = 2          // CardQueue::Review
+            card.due = 0
+            card.interval = UInt32(max(1, item.elapsedDays))
+            card.reps = item.reps
+            var memory = Anki_Cards_FsrsMemoryState()
+            memory.stability = item.stability
+            memory.difficulty = 5
+            card.memoryState = memory
+            card.lastReviewTimeSecs = now - Int64(item.elapsedDays) * 86_400
+            updated.append(card)
+        }
+        if !updated.isEmpty {
+            try backend.updateCards(updated, skipUndoEntry: true)
         }
     }
 
@@ -3095,6 +3287,21 @@ final class AnkiStore: ObservableObject {
         return try await runDetached { try backend.importAnkiPackagePresets() }
     }
 
+    /// Imports a Library deck (already downloaded to a local `.apkg` path) into
+    /// the open collection **with scheduling** — so the deck's FSRS memory state
+    /// and review history come across and the readiness score has data at once.
+    /// Returns the note-level summary and refreshes the deck list on success.
+    func importLibraryDeck(fromLocalPath path: String) async throws -> ImportResult {
+        guard let backend else { throw NoteEditorError.collectionNotReady }
+        let result = try await runDetached {
+            var options = try backend.importAnkiPackagePresets()
+            options.withScheduling = true
+            return try backend.importAnkiPackage(path: path, options: options)
+        }
+        refreshAfterImport()
+        return result
+    }
+
     /// Exports a deck (and its subdecks) to a temporary `.apkg`, returning the
     /// file URL for the share sheet. Includes scheduling so the deck transfers
     /// with its progress; `includeMedia` carries referenced media.
@@ -3454,5 +3661,136 @@ struct BackupLimitsPrefs: Equatable {
         weekly = Int(backups.weekly)
         monthly = Int(backups.monthly)
         minimumIntervalMins = Int(backups.minimumIntervalMins)
+    }
+}
+
+/// One card of the scored readiness *demo* deck, flattened to plain `Sendable`
+/// values so the seed plan (built on the main actor from the app's MCAT
+/// taxonomy) can cross into the off-main-actor backend seeding work.
+private struct ReadinessDemoSeedItem: Sendable {
+    let front: String
+    let back: String
+    /// The card's `MCAT::Section::Topic` tag (for coverage).
+    let tag: String
+    /// Simulated FSRS stability in days.
+    let stability: Float
+    /// Simulated days since the last review (drives retrievability decay).
+    let elapsedDays: Int
+    /// Simulated graded-review count (`reps`).
+    let reps: UInt32
+}
+
+// MARK: - MCAT: Focus Weak Topics (points-at-stake) + Coverage
+//
+// Re-integrated after the main <- wednesday-submission merge. These read-outs and
+// the weakest-first review order drive the MCAT WeakTopicsView / CoverageView,
+// bridging to the engine's `GetPointsAtStakeQueue` RPC and the coverage map.
+// Kept in this file so it can reach `AnkiStore`'s private reviewer state
+// (`currentCard`, `present`, `finishReview`, the weak-topics cursor).
+extension AnkiStore {
+    /// The topic of the card currently shown, when studying in weak-topics mode
+    /// (drives the reviewer's "Focus: <topic>" badge). Nil outside that mode or
+    /// for cards the points-at-stake queue didn't score.
+    var currentCardTopic: String? {
+        guard weakTopicsMode, let id = currentCardID else { return nil }
+        return topicByCardID[id]
+    }
+
+    /// Number of due review cards in the current weak-topics session.
+    var weakTopicsCardCount: Int { weakTopicsOrder.count }
+
+    /// Loads the points-at-stake read-out for `deckID` without starting a review:
+    /// scopes study to the deck, calls the engine's `pointsAtStakeQueue` (the Rust
+    /// change), and publishes the per-topic weakness summary (weakest first) plus
+    /// the weakest-first card order the session will walk.
+    func loadWeakTopics(deckID: Int64, deckName: String, topicPrefix: String = "MCAT::") {
+        guard let backend else { return }
+        do {
+            try backend.setCurrentDeck(id: deckID)
+            currentDeckID = deckID
+            weakTopicsDeckName = deckName
+            // The engine scopes the due review queue to the current deck, so this
+            // ranks only this deck's topics.
+            let queue = try backend.pointsAtStakeQueue(topicPrefix: topicPrefix, weightBySize: false)
+            // Cards arrive sorted by descending points-at-stake (weakest first);
+            // keep that order to drive the review loop.
+            weakTopicsOrder = queue.cards.map(\.cardID)
+            topicByCardID = Dictionary(
+                queue.cards.map { ($0.cardID, $0.topic) }, uniquingKeysWith: { first, _ in first }
+            )
+            weakTopicsCursor = 0
+            weakTopics = queue.topics
+                .map { summary in
+                    WeakTopic(
+                        topic: summary.topic,
+                        cardCount: Int(summary.cardCount),
+                        weakness: Double(summary.weakness),
+                        pointsAtStake: Double(summary.topicWeight * summary.weakness),
+                        meanRetrievability: summary.hasMeanRetrievability
+                            ? Double(summary.meanRetrievability) : nil
+                    )
+                }
+                .sorted { $0.weakness > $1.weakness }
+        } catch {
+            status = "Weak topics error: \(error)"
+            weakTopics = []
+            weakTopicsOrder = []
+            topicByCardID = [:]
+        }
+    }
+
+    /// Begins a review session in weak-topics (weakest-first) order using the
+    /// ordering most recently computed by `loadWeakTopics`.
+    func startWeakTopicsReview() {
+        weakTopicsMode = true
+        reviewDone = false
+        showingAnswer = false
+        currentCard = nil
+        currentQuestion = ""
+        currentAnswer = ""
+        currentCSS = ""
+        currentIntervals = []
+        weakTopicsCursor = 0
+        loadNextWeakTopicCard()
+    }
+
+    /// Presents the next due review card in points-at-stake (weakest-first) order.
+    /// Re-reads the live queue each time so cards carry their real scheduling
+    /// `states`; we just pick them in weak-topics order. Cards no longer due are
+    /// skipped; when the order is exhausted the session ends.
+    func loadNextWeakTopicCard() {
+        guard let backend else { return }
+        showingAnswer = false
+        do {
+            let queued = try backend.queuedCards()
+            let byID = Dictionary(
+                queued.cards.map { ($0.card.id, $0) }, uniquingKeysWith: { first, _ in first }
+            )
+            while weakTopicsCursor < weakTopicsOrder.count {
+                let cardID = weakTopicsOrder[weakTopicsCursor]
+                if let queuedCard = byID[cardID] {
+                    try present(queuedCard)
+                    return
+                }
+                weakTopicsCursor += 1
+            }
+            finishReview()
+        } catch {
+            status = "Review error: \(error)"
+        }
+    }
+
+    /// Computes the MCAT coverage map from the engine (one tag search per outline
+    /// topic), off the main actor, then publishes it (or an error) for CoverageView.
+    func loadCoverage() async {
+        guard let backend else { return }
+        let topics = MCATOutline.coverageTopics
+        do {
+            let report = try await runDetached { try backend.coverage(forTopics: topics) }
+            coverage = report
+            coverageError = nil
+        } catch {
+            coverageError = "Couldn’t compute coverage: \(error)"
+        }
     }
 }

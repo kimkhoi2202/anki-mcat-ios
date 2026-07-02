@@ -5,8 +5,11 @@ A native **SwiftUI** iOS client for Anki, built on Anki's **shared Rust engine**
 scheduler (FSRS), SQLite collection, sync, search, media, and card rendering are
 reused as-is from the engine — never reimplemented.
 
-`main` is the clean, faithful AnkiDroid clone. The optional MCAT/"Speedrun" layer
-lives on separate branches (see [Branches](#branches)).
+`main` is the full app: a faithful AnkiDroid-parity client **plus** the MCAT
+"Speedrun" layer (Memory / Performance / Readiness scores, coverage map, Focus
+Weak Topics, in-app Library) built on top — all sharing the desktop fork's Rust
+engine, including the **points-at-stake** review-queue change (see
+[MCAT Speedrun](#mcat-speedrun)).
 
 ## Architecture
 
@@ -105,17 +108,31 @@ cd -P AnkiKit && swift test        # 88 engine-backed unit tests
   **scale-to-zero** (sleeps when idle, wakes on sync). In the app, choose a custom
   sync server in **Settings → Sync server** (while logged out).
 
+## MCAT Speedrun
+
+The MCAT layer is built **on top of** the full AnkiDroid-parity app — every screen
+is native SwiftUI and every number comes from the shared engine:
+
+- **MCAT Readiness** — three honest scores (Memory / Performance / Readiness), each
+  a range; shows **no score** until ≥200 graded reviews AND ≥50% topic coverage
+  (the give-up rule), otherwise the abstain read-out.
+- **MCAT Coverage** — a map over the 50-topic AAMC outline (a topic counts once it
+  has ≥1 card), rolled up per section and overall.
+- **Focus Weak Topics** — ranks topics weakest-first and studies them in that order
+  via the engine's `GetPointsAtStakeQueue` RPC (the shared **points-at-stake** Rust
+  change). Exercised by `AnkiKitTests.testPointsAtStakeQueueOrdersWeakTopicFirst`.
+- **MCAT Library** — one-tap import of curated, pre-scheduled decks (Supabase-backed).
+
+The MCAT-specific engine change (points-at-stake review queue) lives in the shared
+desktop fork (`../anki-desktop/main`); iOS calls it through
+`AnkiKit/Sources/AnkiKit/BackendPointsAtStake.swift`.
+
 ## Branches
 
 | Branch | What |
 | --- | --- |
-| **`main`** | The clean, faithful AnkiDroid clone — the foundation to build on. |
-| `speedrun/mcat-full` | Full MCAT/"Speedrun" layer (coverage map, weak-topics, points-at-stake UI). |
-| `feat/mcat-scores` | MCAT layer + the three honest scores (Memory / Performance / Readiness) + dashboard. |
-
-The MCAT-specific engine change (points-at-stake review queue) lives on the desktop
-fork (`../anki-desktop/main`) branch `feat/rust-points-at-stake`. `main` here has
-**no** MCAT app code.
+| **`main`** | The full app: AnkiDroid-parity client **+** the MCAT Speedrun layer. The trunk to build on. |
+| `wednesday-submission` | Frozen checkpoint of the graded Wednesday MCAT submission. |
 
 ## Project layout
 
