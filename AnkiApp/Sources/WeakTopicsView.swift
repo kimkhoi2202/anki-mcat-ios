@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import AnkiKit
 
 /// "Focus weak topics" study mode (PRD 7a) — the user-facing surface for the
@@ -18,23 +19,17 @@ struct WeakTopicsView: View {
     @State private var loaded = false
 
     var body: some View {
-        ZStack {
-            DS.background.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: DS.Spacing.l) {
-                    explainer
-                    if store.weakTopics.isEmpty {
-                        emptyState
-                    } else {
-                        topicsCard
-                        studyButton
-                    }
-                }
-                .padding(DS.Spacing.l)
+        Group {
+            if store.weakTopics.isEmpty {
+                MCATEmptyState(icon: "checkmark.seal", title: "No due review cards yet",
+                               message: "Points-at-stake ranks topics by FSRS recall on cards that are due for review. Once this deck has due, MCAT-tagged review cards, their weakest topics show up here.")
+            } else {
+                list
             }
         }
         .navigationTitle("Focus Weak Topics")
         .navigationBarTitleDisplayMode(.inline)
+        .tint(DS.accent)
         .navigationDestination(isPresented: $goReview) {
             ReviewerView(store: store)
         }
@@ -46,67 +41,40 @@ struct WeakTopicsView: View {
         }
     }
 
-    private var explainer: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.xs) {
-            Text(deck.fullName)
-                .font(DS.Typography.title)
-                .foregroundStyle(DS.textPrimary)
-                .lineLimit(2)
-            Text("Your due review cards, reordered weakest-topic-first by the engine’s points-at-stake score. Weakness is 1 − average recall, computed on-device from each card’s FSRS memory.")
-                .font(DS.Typography.caption)
-                .foregroundStyle(DS.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var topicsCard: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(store.weakTopics.enumerated()), id: \.element.id) { index, topic in
-                if index > 0 {
-                    Divider().overlay(DS.separator)
+    private var list: some View {
+        List {
+            Section {
+                ForEach(Array(store.weakTopics.enumerated()), id: \.element.id) { index, topic in
+                    WeakTopicRow(rank: index + 1, topic: topic, isWeakest: index == 0)
                 }
-                WeakTopicRow(rank: index + 1, topic: topic, isWeakest: index == 0)
+            } header: {
+                Text("Weakest topics first")
+            } footer: {
+                Text("Ranking for “\(deck.fullName)”. Your due review cards, reordered weakest-topic-first by the engine’s points-at-stake score — weakness is 1 − average recall, computed on-device from each card’s FSRS memory.")
             }
-        }
-        .dsCard(padding: 0)
-    }
 
-    private var studyButton: some View {
-        Button {
-            store.startWeakTopicsReview()
-            goReview = true
-        } label: {
-            Text(studyButtonTitle)
+            Section {
+                Button {
+                    store.startWeakTopicsReview()
+                    goReview = true
+                } label: {
+                    Label(studyButtonTitle, systemImage: "play.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(store.weakTopicsCardCount == 0)
+                .accessibilityLabel("Study weakest topics first, \(store.weakTopicsCardCount) cards")
+            }
+            .listRowBackground(Color.clear)
         }
-        .buttonStyle(.dsPrimary)
-        .disabled(store.weakTopicsCardCount == 0)
-        .accessibilityLabel("Study weakest topics first, \(store.weakTopicsCardCount) cards")
+        .listStyle(.insetGrouped)
     }
 
     private var studyButtonTitle: String {
         let count = store.weakTopicsCardCount
         let noun = count == 1 ? "card" : "cards"
         return "Study weakest first · \(count) \(noun)"
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: DS.Spacing.m) {
-            Image(systemName: "checkmark.seal")
-                .font(.system(size: 40))
-                .foregroundStyle(DS.textSecondary)
-            Text("No due review cards yet")
-                .font(DS.Typography.headline)
-                .foregroundStyle(DS.textPrimary)
-            Text("Points-at-stake ranks topics by FSRS recall on cards that are due for review. Once this deck has due, MCAT-tagged review cards, their weakest topics show up here.")
-                .font(DS.Typography.caption)
-                .foregroundStyle(DS.textSecondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, DS.Spacing.xl)
-        .dsCard()
     }
 }
 
@@ -119,39 +87,37 @@ private struct WeakTopicRow: View {
     let isWeakest: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: DS.Spacing.m) {
+        HStack(alignment: .top, spacing: 12) {
             rankBadge
-            VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(topic.topic)
-                        .font(DS.Typography.body.weight(.semibold))
-                        .foregroundStyle(DS.textPrimary)
+                        .font(.body.weight(.semibold))
                         .lineLimit(1)
-                    Spacer(minLength: DS.Spacing.s)
+                    Spacer(minLength: 8)
                     Text(weaknessPercent)
-                        .font(DS.Typography.body.weight(.semibold))
+                        .font(.body.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(weaknessColor)
                 }
-                WeaknessBar(fraction: topic.weakness)
+                ProgressView(value: min(1, max(0, topic.weakness)))
+                    .tint(weaknessColor)
                 Text(subtitle)
-                    .font(DS.Typography.caption)
-                    .foregroundStyle(DS.textSecondary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(DS.Spacing.l)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
     }
 
     private var rankBadge: some View {
         Text("\(rank)")
-            .font(DS.Typography.caption.weight(.bold))
+            .font(.caption.weight(.bold))
             .monospacedDigit()
-            .foregroundStyle(isWeakest ? Color.white : DS.textSecondary)
+            .foregroundStyle(isWeakest ? Color.white : .secondary)
             .frame(width: 26, height: 26)
-            .background(isWeakest ? DS.again : DS.background, in: Circle())
-            .overlay(Circle().strokeBorder(DS.separator, lineWidth: isWeakest ? 0 : 1))
+            .background(isWeakest ? DS.again : Color(.tertiarySystemFill), in: Circle())
             .accessibilityHidden(true)
     }
 
@@ -178,32 +144,5 @@ private struct WeakTopicRow: View {
         var label = "Rank \(rank), \(topic.topic), \(weaknessPercent), \(subtitle)"
         if isWeakest { label += ", studied first" }
         return label
-    }
-}
-
-/// A horizontal weakness meter (0…1), colored by severity to match the
-/// percentage label. Purely decorative — the row carries the spoken value.
-private struct WeaknessBar: View {
-    let fraction: Double
-
-    var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(DS.separator)
-                Capsule()
-                    .fill(color)
-                    .frame(width: max(4, geo.size.width * clamped))
-            }
-        }
-        .frame(height: 6)
-        .accessibilityHidden(true)
-    }
-
-    private var clamped: Double { min(1, max(0, fraction)) }
-
-    private var color: Color {
-        if fraction >= 0.40 { return DS.again }
-        if fraction >= 0.15 { return DS.hard }
-        return DS.easy
     }
 }

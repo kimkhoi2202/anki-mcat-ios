@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import AnkiKit
 
 /// MCAT Speedrun Library: browse curated decks and import them in one tap.
@@ -25,12 +26,19 @@ struct LibraryView: View {
     }
 
     var body: some View {
-        ZStack {
-            DS.background.ignoresSafeArea()
-            content
+        Group {
+            switch phase {
+            case .loading:
+                loadingState
+            case .failed(let message):
+                failedState(message)
+            case .loaded:
+                loadedList
+            }
         }
         .navigationTitle("MCAT Library")
         .navigationBarTitleDisplayMode(.inline)
+        .tint(DS.accent)
         .disabled(busy != nil)
         .overlay { busyOverlay }
         .alert("Imported", isPresented: resultPresented) {
@@ -47,113 +55,58 @@ struct LibraryView: View {
     }
 
     @ViewBuilder
-    private var content: some View {
-        switch phase {
-        case .loading:
-            ProgressView("Loading Library…")
-                .tint(DS.accent)
-                .foregroundStyle(DS.textSecondary)
-        case .failed(let message):
-            failedState(message)
-        case .loaded:
-            if decks.isEmpty {
-                emptyState
-            } else {
-                ScrollView {
-                    VStack(spacing: DS.Spacing.l) {
-                        Text("Curated MCAT decks. Import one — scheduling is included, so your readiness score and weak-topics show right away.")
-                            .font(DS.Typography.caption)
-                            .foregroundStyle(DS.textSecondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        ForEach(decks) { deck in
-                            deckCard(deck)
+    private var loadedList: some View {
+        if decks.isEmpty {
+            MCATEmptyState(icon: "books.vertical", title: "Library is empty",
+                           message: "No curated decks are available yet.")
+        } else {
+            List {
+                ForEach(decks) { deck in
+                    Section {
+                        if !deck.description.isEmpty {
+                            Text(deck.description)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                         }
+                        LabeledContent("Cards", value: "\(deck.cardCount)")
+                        if !deck.sections.isEmpty {
+                            LabeledContent("Sections", value: "\(deck.sections.count)")
+                        }
+                        Button {
+                            importDeck(deck)
+                        } label: {
+                            Label("Download & Import", systemImage: "arrow.down.circle.fill")
+                        }
+                    } header: {
+                        Text(deck.title)
                     }
-                    .padding(DS.Spacing.l)
                 }
             }
+            .listStyle(.insetGrouped)
         }
     }
 
-    private func deckCard(_ deck: LibraryDeck) -> some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.s) {
-            Text(deck.title)
-                .font(DS.Typography.headline)
-                .foregroundStyle(DS.textPrimary)
-            if let description = deck.description, !description.isEmpty {
-                Text(description)
-                    .font(DS.Typography.caption)
-                    .foregroundStyle(DS.textSecondary)
-            }
-            Text("\(deck.cardCount) cards · \(deck.sections.isEmpty ? "—" : deck.sections.joined(separator: ", "))")
-                .font(DS.Typography.caption)
-                .foregroundStyle(DS.textSecondary)
-
-            Button {
-                importDeck(deck)
-            } label: {
-                Label("Download & Import", systemImage: "square.and.arrow.down")
-                    .font(DS.Typography.body.weight(.semibold))
-                    .foregroundStyle(Color.white)
-                    .frame(maxWidth: .infinity)
-                    .frame(minHeight: DS.minTapTarget)
-                    .background(
-                        DS.accent,
-                        in: RoundedRectangle(cornerRadius: DS.Radius.large, style: .continuous)
-                    )
-            }
-            .buttonStyle(.plain)
-            .padding(.top, DS.Spacing.xs)
-            .accessibilityLabel("Download and import \(deck.title)")
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .dsCard()
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: DS.Spacing.m) {
-            Image(systemName: "books.vertical")
-                .font(.system(size: 44))
-                .foregroundStyle(DS.textSecondary)
-            Text("The Library is empty.")
-                .font(DS.Typography.headline)
-                .foregroundStyle(DS.textPrimary)
-        }
-        .padding(DS.Spacing.xl)
+    private var loadingState: some View {
+        ProgressView("Loading Library…")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func failedState(_ message: String) -> some View {
-        VStack(spacing: DS.Spacing.m) {
-            Image(systemName: "wifi.exclamationmark")
-                .font(.system(size: 44))
-                .foregroundStyle(DS.textSecondary)
-            Text("Couldn't reach the Library")
-                .font(DS.Typography.headline)
-                .foregroundStyle(DS.textPrimary)
-            Text(message)
-                .font(DS.Typography.caption)
-                .foregroundStyle(DS.textSecondary)
-                .multilineTextAlignment(.center)
-            Button("Retry") { Task { await load() } }
-                .buttonStyle(.borderedProminent)
-                .tint(DS.accent)
-        }
-        .padding(DS.Spacing.xl)
+        MCATEmptyState(icon: "wifi.exclamationmark", title: "Couldn’t reach the Library",
+                       message: message) { Task { await load() } }
     }
 
     @ViewBuilder
     private var busyOverlay: some View {
         if let busy {
             ZStack {
-                Color.black.opacity(0.3).ignoresSafeArea()
-                VStack(spacing: DS.Spacing.m) {
+                Color(.systemBackground).opacity(0.6).ignoresSafeArea()
+                VStack(spacing: 12) {
                     ProgressView()
-                    Text(busy)
-                        .font(DS.Typography.body)
-                        .foregroundStyle(DS.textPrimary)
+                    Text(busy).font(.callout)
                 }
-                .dsCard()
-                .fixedSize()
+                .padding(20)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .transition(.opacity)
         }
@@ -208,15 +161,62 @@ struct LibraryView: View {
     }
 }
 
+/// A native-styled empty / error state for the MCAT feature screens (an iOS
+/// 16-safe stand-in for `ContentUnavailableView`, which is iOS 17+). Centered
+/// SF Symbol, title, message, and an optional retry button.
+struct MCATEmptyState: View {
+    let icon: String
+    let title: String
+    let message: String
+    var retry: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 44))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.headline)
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if let retry {
+                Button("Retry", action: retry)
+                    .buttonStyle(.borderedProminent)
+                    .tint(DS.accent)
+                    .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(24)
+    }
+}
+
 /// One curated deck in the Library catalog (decoded from the Supabase REST row;
 /// `convertFromSnakeCase` maps `card_count`/`storage_path`).
 struct LibraryDeck: Identifiable, Decodable, Equatable {
     let id: String
     let title: String
-    let description: String?
+    let description: String
     let cardCount: Int
     let sections: [String]
     let storagePath: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, description, cardCount, sections, storagePath
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = (try? c.decode(String.self, forKey: .title)) ?? "(untitled)"
+        description = (try? c.decodeIfPresent(String.self, forKey: .description)) ?? ""
+        cardCount = (try? c.decodeIfPresent(Int.self, forKey: .cardCount)) ?? 0
+        sections = (try? c.decodeIfPresent([String].self, forKey: .sections)) ?? []
+        storagePath = (try? c.decodeIfPresent(String.self, forKey: .storagePath)) ?? ""
+    }
 }
 
 /// Read-only client for the public MCAT Speedrun Library on Supabase.
