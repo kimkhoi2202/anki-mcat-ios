@@ -13,7 +13,10 @@ crate-type = ["staticlib"]
 
 [dependencies]
 # Anki's Rust core, consumed from the desktop fork (shared engine).
-anki = { path = "../../anki-desktop/main/rslib" }
+# features=["rustls"]: on a real iOS device reqwest's default native-tls
+# (SecureTransport) fails to establish the sync connection; rustls (pure-Rust
+# TLS, what Anki's own mobile build uses) is required for on-device sync.
+anki = { path = "../../anki-desktop/main/rslib", features = ["rustls"] }
 # rslib relies on workspace-level tokio feature unification (notably io-util).
 # Depend on tokio directly so those features are enabled in this standalone build.
 tokio = { version = "1", features = ["full"] }
